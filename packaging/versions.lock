@@ -1,10 +1,14 @@
-# Raylane — versions.lock (T001, G1)
+# Raylane — versions.lock (T001, G1) — revision 2 (T001-fix-r1)
 
-Status: RESEARCH LOCK v1, verified 2026-10-23. Author: agent 05 (researcher).
-Scope: source/release pins for the first reproducible baseline. This file records
-verified facts only; it does NOT promise production readiness. "latest" is never
-used. All provenance is recorded per component; unverified items are marked
-BLOCKED/UNVERIFIED rather than invented.
+Status: RESEARCH LOCK v2, verified 2026-10-23. Author: agent 05 (researcher).
+Revision 2 addresses review-round-1 findings H1–H4/M1–M7/L1–L2
+(docs/verification/T001-review-round1.md). Disposition per finding is in
+docs/verification/T001-research.md §9.
+Scope: source/release pins for the first reproducible baseline. "latest" is never
+used as a value; where a moving index was consulted, the exact resolved version and
+retrieval date are recorded. Unverified items are marked UNVERIFIED/BLOCKED, never
+invented. Open gaps are listed explicitly in §7 — this lock does NOT claim
+"no missing pins" or "no blockers".
 
 Verification date: 2026-10-23 (UTC). Re-check before first runnable baseline.
 
@@ -12,112 +16,171 @@ Verification date: 2026-10-23 (UTC). Re-check before first runnable baseline.
 
 ## 1. Xray-core — engine source baseline
 
-| Field | Value | Provenance / verification |
+| Field | Value | Provenance / verification (all retrieved 2026-10-23 UTC) |
 |---|---|---|
-| source commit | `1b1647cd9ddf0abc34b981d4611fc03bcac1ca74` | git tag `refs/tags/v26.10.21` (lightweight tag object) resolves to this commit; verified via GitHub API 2026-10-23 |
-| tag | `v26.10.21` | GitHub releases `latest` endpoint on 2026-10-23 returns `v26.10.21`, published 2026-10-21T12:07:11Z. The commit is also HEAD of the release branch. |
-| commit date | 2026-10-21T11:59:30Z | commit object |
-| go directive | `go 1.27` | go.mod at that commit |
-| core version const | 26.10.21 | `core/core.go` Version_x=26 (y,z from build ldflags/release) |
+| source commit | `1b1647cd9ddf0abc34b981d4611fc03bcac1ca74` | GitHub API `GET /repos/XTLS/Xray-core/git/refs/tags/v26.10.21` → lightweight tag object sha = this commit |
+| tag | `v26.10.21` | `GET /repos/XTLS/Xray-core/releases/latest` on 2026-10-23 → tag_name v26.10.21, published_at 2026-10-21T12:07:11Z |
+| commit date | 2026-10-21T11:59:30Z | `GET /repos/XTLS/Xray-core/commits/1b1647cd…` commit.committer.date |
+| go directive | `go 1.27` | go.mod at that commit (raw.githubusercontent.com) |
+| core version const | Version_x = 26 | `core/core.go` at commit (Version_y/z injected at build; display "Xray 26.10.21" comes from release ldflags, not from a source constant — corrected per round-1 note) |
 | license | MPL-2.0 | LICENSE file at commit: "Mozilla Public License Version 2.0" |
 | repo | https://github.com/XTLS/Xray-core | public source |
-| release assets | `Xray-linux-64.zip` + `Xray-linux-64.zip.dgst` (MD5/SHA1/SHA2-256/SHA2-512) | release page, downloaded 2026-10-23 |
-| Xray-linux-64.zip SHA2-256 | `0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978` | from `Xray-linux-64.zip.dgst` on release v26.10.21, fetched 2026-10-23 |
+| release assets | `Xray-linux-64.zip` + `Xray-linux-64.zip.dgst` (algorithms present in file: MD5, SHA1, SHA2-256, SHA2-512) | asset list from releases/latest JSON; dgst fetched from `https://github.com/XTLS/Xray-core/releases/download/v26.10.21/Xray-linux-64.zip.dgst`, HTTP 200, 2026-10-23 |
+| Xray-linux-64.zip published SHA2-256 | `0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978` | verbatim line `SHA2-256= 0eec3ed4…631978` in the .dgst file above |
 
-Trust levels (recorded separately, per G1 — binary trust is NOT implied by a tag):
-- source trust: VERIFIED — public repo, tag→commit mapping confirmed via GitHub API; commit is the release commit.
-- release metadata trust: VERIFIED — official release, digest file present for all platforms.
-- binary trust: PARTIAL — digests exist and are recorded above, BUT the .dgst file is unsigned (no GPG signature, no SLSA provenance attestation observed on the release). Raylane's first baseline builds Xray from the pinned source commit, so runtime does not depend on the upstream binary; the digest is recorded for the optional binary-download path only and must be re-checked at T002.
-- NOT done: PGP/cosign signature verification (upstream does not publish signatures); reproducible-build comparison source↔binary.
+Trust levels (separate per G1; round-1 corrected):
+- source trust: VERIFIED (metadata level) — public repo; tag→commit mapping confirmed
+  via GitHub API on 2026-10-23.
+- release metadata trust: VERIFIED (metadata level) — official release object and
+  digest file observed.
+- binary trust: NOT TRUSTED — the .dgst file is not cryptographically signed by any
+  channel observed on this release (asset list contains only .zip/.dgst files; no
+  .sig/.asc/cosign bundles were observed in the release asset list on 2026-10-23 —
+  this is an observation of the asset list, not a categorical claim about all
+  upstream signing channels, M1). Independent of this, orchestrator decision: the
+  upstream binary is NOT an accepted trusted runnable baseline; Raylane builds from
+  the pinned source commit. The digest above is recorded for provenance reference
+  only. Local archive-hash-vs-digest comparison: NOT_RUN (downloading/executing
+  binaries is out of scope and budget).
+- NOT done: any signature verification (no channel observed); reproducible-build
+  comparison source↔binary.
 
-Build provenance of upstream binary: release workflow uses `actions/setup-go@v7` with
-`go-version-file: go.mod` → upstream binaries are built with the latest available
-Go 1.27.x at build time, i.e. ≥ go1.27.0. Raylane builds from source with the pinned
-Go version below.
+Build provenance of upstream binary: release workflow (`.github/workflows/release.yml`
+at the pinned commit) uses `actions/setup-go@v7` with `go-version-file: go.mod` →
+upstream binaries are built with the latest available Go 1.27.x at build time, i.e.
+≥ go1.27.0. Raylane builds from source with the pinned Go version in §2.
 
-Known transitive policy: go.sum at the pinned commit contains 172 entries (full pin set).
-Vendoring policy for reproducibility is a T002 decision; this lock does not duplicate go.sum.
+Transitive policy: go.sum at the pinned commit contains 172 entries (full pin set).
+This lock records DIRECT dependencies relevant to scope with complete versions; the
+full transitive closure is produced by T002 (`go mod tidy` + go.sum), not duplicated
+here. Vendoring policy is a T002 decision.
 
 ## 2. Go toolchain
 
 | Field | Value | Provenance |
 |---|---|---|
-| required family | 1.27.x (Xray go.mod requires `go 1.27`; our modules set `go 1.27` and toolchain pin) | Xray go.mod |
-| pinned version | `go1.27.3` | https://go.dev/dl/?mode=json&include=all, stable, latest 1.27 patch on 2026-10-23 |
+| required family | 1.27.x (Xray go.mod requires `go 1.27`) | Xray go.mod at pinned commit |
+| pinned version | `go1.27.3` | `GET https://go.dev/dl/?mode=json&include=all` (HTTP 200, 2026-10-23): latest stable 1.27 patch |
+| published SHA2-256 (linux-amd64 tar) | `65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40` for `go1.27.3.linux-amd64.tar.gz` | same go.dev JSON, files[].sha256 field, retrieved 2026-10-23 (M7) |
+| published SHA2-256 (source tar) | `6e7749035cf360f06b2575d162ea79df9fda8ef671889e5c375f8e50777f26bb` for `go1.27.3.src.tar.gz` | same source |
 | license | BSD-3-Clause | golang/go repo |
-| checksum trust | go.dev publishes per-file SHA256 on the download JSON; verify at T002 download time (do not copy hashes from memory) |
-| status | SUPPORTED for building Xray v26.10.21 (same 1.27 family, patch newer than release build). No incompatibility found; NOT a blocker. |
-| note | go1.26.x is UNSUPPORTED for this baseline (below go.mod minimum). Go 1.28+ UNVERIFIED. |
+| compatibility status | STATIC COMPATIBILITY ONLY (M2): go1.27.3 ≥ go.mod requirement `go 1.27`; same family as upstream build toolchain. No actual build of Xray or Raylane was performed — build validation is NOT_RUN (T002 gate). Do not read this row as a passed build check. |
+| unsupported/unknown | go1.26.x UNSUPPORTED (below go.mod minimum); Go 1.28+ UNVERIFIED |
 
 ## 3. Node.js / UI toolchain
 
 | Field | Value | Provenance |
 |---|---|---|
-| Node family | 22 LTS (plan R-01) | plan |
-| pinned version | `v22.23.4` | nodejs.org/dist/index.json on 2026-10-23; latest v22.x with lts flag ("Jod") |
-| note | Node 24 "Krypton" is the current active LTS on 2026-10-23; Node 22 remains in maintenance LTS. Family choice (22 LTS) is from plan R-01; keeping it. Upgrade to 24 is an orchestrator decision, not taken here. |
-| npm license | Artistic-2.0 (bundled with Node, Node itself MIT) | nodejs/node |
-| React | `react 19.3.1`, `react-dom 19.3.1`, MIT | npm registry `latest`, 2026-10-23 |
-| Vite | `8.3.5`, MIT | npm registry `latest`, 2026-10-23 |
-| TypeScript | `7.0.2`, Apache-2.0 | npm registry `latest`, 2026-10-23 |
+| Node family | 22 LTS (plan R-01; orchestrator decision round-1: keep 22, no migration to 24) | plan + 01 decision |
+| pinned version | `v22.23.4` | `GET https://nodejs.org/dist/index.json` (HTTP 200, 2026-10-23): latest v22.x with `"lts":"Jod"` |
+| published SHA2-256 (linux-x64 tar.xz) | `1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce` for `node-v22.23.4-linux-x64.tar.xz` | `GET https://nodejs.org/dist/v22.23.4/SHASUMS256.txt` (HTTP 200, 2026-10-23), verbatim line (M7) |
+| published SHA2-256 (source tar.gz) | `4dd79de8cdc85d65cb32f48a75aee1067bf00bf94b96ecc8e4c2f82f6f0272c2` for `node-v22.23.4.tar.gz` | same file |
+| Node/npm license | Node MIT; bundled npm Artistic-2.0 | nodejs/node repo |
+| React | `react 19.3.1`, `react-dom 19.3.1`, MIT | npm registry `GET /react/latest`, `/react-dom/latest` (HTTP 200, 2026-10-23) |
+| Vite | `8.3.5`, MIT | npm registry `GET /vite/latest` (HTTP 200, 2026-10-23) |
+| TypeScript | `7.0.2`, Apache-2.0 | npm registry `GET /typescript/latest` (HTTP 200, 2026-10-23) |
 
-CAUTION: npm `latest` dist-tags move over time. These exact versions are the pins as of
-2026-10-23; T002 must generate package-lock.json and treat these numbers as the starting
-exact pins, not re-resolve "latest". Peer-dependency compatibility React 19.3.x with the
-chosen UI libraries must be verified at T002 (UNVERIFIED here — no packages installed).
+CAUTION: npm `latest` dist-tags move over time. The numbers above are exact versions
+resolved on 2026-10-23 and are the starting exact pins; T002 generates
+package-lock.json and diffs against these — it must NOT re-resolve "latest".
+React 19.3.x peer-dependency compatibility with chosen UI libraries: UNVERIFIED
+(no install performed).
 
-## 4. SQLite driver (Go)
+## 4. SQLite driver (Go) — direct dependency pinned (H3)
 
-| Candidate | Pin | License | Status |
-|---|---|---|---|
-| modernc.org/sqlite | module `modernc.org/sqlite`, go.mod requires `go 1.26.0` (master, 2026-10-23); exact tag pin deferred to T002 via `go get` + go.sum | BSD-3-Clause ("The Sqlite Authors", LICENSE at gitlab.com/cznic/sqlite) | SUPPORTED — pure Go, no cgo, satisfies helper/static-build goals (R-01). Compatible with Go 1.27 (requires ≥1.26). Exact version pin: T002 records resolved version + go.sum hash; not invented here. |
-| github.com/mattn/go-sqlite3 | `v1.14.52` (2026-09-05) | MIT | SUPPORTED but requires cgo — conflicts with fully-static helper builds; NOT selected as default. May be used for the control-plane binary only if T002 decides; decision deferred to 02. |
-
-Bundled SQLite amalgamation version inside modernc.org/sqlite is part of the resolved
-module version — recorded by go.sum at T002, not asserted here.
-
-## 5. System network components — Ubuntu 24.04 LTS amd64 target
-
-| Component | Pin | Provenance / status |
+| Field | Value | Provenance |
 |---|---|---|
-| dnsmasq | Ubuntu 24.04 (noble) package `2.90-4build1` (source 2.90-4) | dnsmasq 2.90 changelog: nftset support stable (nftset since 2.66, set-collect/addtft enhancements 2.87). Ubuntu build confirmed compiled with nftset per Launchpad noble build (HAVE_NFTSET in debian build flags). Status: SUPPORTED for `nftset=` directives used by R-04. Re-verify on the actual stand with `dnsmasq --version` (must list `nftset`) — runtime check NOT_RUN here. |
-| nftables | noble `1.0.9-1build1` | TPROXY support is kernel-side (xt_TPROXY / nft tproxy since kernel 4.18); userspace 1.0.9 supports full tproxy syntax incl. `tproxy ip to`. SUPPORTED (design-level; runtime NOT_RUN). |
-| iproute2 | noble `6.1.0-1ubuntu6.2` | policy routing (`ip rule` fwmark) long-stable. SUPPORTED (design-level). |
-| Linux kernel (noble GA) | 6.8.x | nft tproxy, socket lookup, fwmark available. SUPPORTED (design-level). |
-| licenses | dnsmasq GPL-2.0-only/GPL-3.0 (dual per COPYING files, upstream: GPLv2 or v3); nftables GPL-2.0; iproute2 GPL-2.0 | package copyright files; runtime dependencies, not linked into Raylane binaries — no license contamination of our code. |
+| selected module | `modernc.org/sqlite` | canonical repo https://gitlab.com/cznic/sqlite (module path is modernc.org; vanity import) |
+| pinned version | `v1.61.0` | `GET https://proxy.golang.org/modernc.org/sqlite/@latest` (HTTP 200, 2026-10-23) → `{"Version":"v1.61.0","Time":"2026-10-21T11:57:52Z","Origin":{"VCS":"git","URL":"https://gitlab.com/cznic/sqlite","Hash":"4df1ebea0f1cf0cd6ec3245b26f5fec4234ce738","Ref":"refs/tags/v1.61.0"}}` |
+| source commit of pin | `4df1ebea0f1cf0cd6ec3245b26f5fec4234ce738` (tag refs/tags/v1.61.0) | same proxy response (Origin field) |
+| go directive of pin | `go 1.26.0` | `GET https://proxy.golang.org/modernc.org/sqlite/@v/v1.61.0.mod` (HTTP 200, 2026-10-23) → compatible with pinned Go 1.27.3 |
+| license | BSD-3-Clause-style ("Copyright (c) 2017 The Sqlite Authors… Redistribution and use in source and binary forms…") | `GET https://gitlab.com/cznic/sqlite/-/raw/v1.61.0/LICENSE` (HTTP 200, 2026-10-23) |
+| rationale | pure Go, no cgo → supports fully-static helper builds (R-01); database/sql driver |
+| integrity at build time | T002 records `go mod download` hash into Raylane's own go.sum; proxy.golang.org serves as checksum source via sum.golang.org. Not pre-computed here. |
+| status | SUPPORTED (static). Build/integration NOT_RUN (T002). |
+| rejected alternative | `github.com/mattn/go-sqlite3` `v1.14.52` (2026-09-05, MIT, `GET /repos/mattn/go-sqlite3/releases/latest`) — viable but requires cgo; NOT selected as default. |
 
-These are invoked as external binaries by the privileged helper (R-01), never linked.
+Note (M6 corrected): in revision 1 a request to
+`raw.githubusercontent.com/modernc.org/sqlite/master/go.mod` returned an HTTP 404
+body. That is recorded only as "that single URL returned 404" — no inference about
+the existence or absence of any mirror is made. The canonical source is
+gitlab.com/cznic/sqlite as returned by proxy.golang.org Origin.
 
-## 6. Crypto / parser dependencies (direct deps of pinned Xray go.mod relevant to our feature set, plus our own planned deps)
+## 5. System network components — Ubuntu 24.04 LTS (noble) amd64 target (H1 corrected)
 
-| Module | Pinned version (from Xray go.mod @1b1647cd) | License | Use in scope |
+Exact versions verified against official metadata on 2026-10-23:
+- Launchpad API: `GET https://api.launchpad.net/1.0/ubuntu/+archive/primary?ws.op=getPublishedSources&source_name=<pkg>&distro_series=/ubuntu/noble&exact_match=true` (HTTP 200) — per-pocket status/published dates.
+- Release pocket: `GET https://archive.ubuntu.com/ubuntu/dists/noble/main/source/Sources.xz` (HTTP 200, Last-Modified 2024-04-25) — GA versions and Build-Depends.
+
+| Component | GA (noble release pocket) | Current updates/security pocket (2026-10-23) | Proposed pin & rationale |
 |---|---|---|---|
-| golang.org/x/crypto | v0.58.0 | BSD-3-Clause | AEAD/TLS primitives (indirect via engine build) |
-| golang.org/x/net | v0.61.0 | BSD-3-Clause | network primitives |
-| golang.org/x/sys | v0.49.0 | BSD-3-Clause | syscalls |
-| github.com/refraction-networking/utls | v1.8.3-0.20260301010127-aa6edf4b11af | BSD-3-Clause | uTLS fingerprints (FR-003/FR-007) |
-| github.com/xtls/reality | v0.0.0-20261014101318-83f621788ca8 | MPL-2.0 | REALITY (FR-002/003) |
-| github.com/quic-go/quic-go (as apernet fork v0.61.1-0.20260806…) | pinned pseudo-version in go.mod | MIT | HTTP/3 transports (not in FR-001 scope but built in engine) |
-| github.com/gorilla/websocket | v1.5.3 | BSD-2-Clause | ws transport (FR-002) |
-| github.com/miekg/dns | v1.1.73 | BSD-3-Clause | DNS handling in engine |
-| golang.zx2c4.com/wireguard | v0.0.0-20250521234502-f333402bd9cb | MIT | in-engine WireGuard (FR-008) |
-| google.golang.org/protobuf | v1.36.12 | BSD-3-Clause | engine config |
-| github.com/ghodss/yaml, pelletier/go-toml v1.9.5, gopkg.in/yaml.v2 v2.4.0 | pinned in go.mod | MIT / MIT / Apache-2.0+MIT | config parsers (engine-side) |
+| dnsmasq | `2.90-2build2` (Sources.xz; revision-1 value `2.90-4build1` was WRONG — no such noble version in official metadata, H1 confirmed) | `2.91-0ubuntu0.24.04.2` (pocket Updates, status Published, date_published 2026-10-06; security lineage: 2.90-2ubuntu0.4 Security published 2026-07-14, superseded) | PIN: `2.91-0ubuntu0.24.04.2` from noble-updates. Rationale: current supported package with all published security fixes; GA 2.90-2build2 lacks subsequent security updates (USN lineage in Launchpad). Install-time command for the stand: `apt-get install dnsmasq-base=2.91-0ubuntu0.24.04.2` (NOT executed here). |
+| nftables | `1.0.9-1build1` | `1.0.9-1ubuntu0.1` (pocket Updates, Published 2026-03-10) | PIN: `1.0.9-1ubuntu0.1` from noble-updates (supersedes GA with fixes). |
+| iproute2 | `6.1.0-1ubuntu6` (Sources.xz GA) | `6.1.0-1ubuntu6.4` (pocket Updates, Published 2026-07-01; 6.1.0-1ubuntu6.2 — revision-1 value — is Superseded as of 2025-07-29, H1 confirmed) | PIN: `6.1.0-1ubuntu6.4` from noble-updates (current supported). |
+| Linux kernel (noble GA) | 6.8.x family | exact kernel package pin deferred to stand provisioning (hardware-dependent metapackage) | UNVERIFIED exact build; design requirement: nft tproxy + socket lookup + fwmark (present since kernel 4.18) — design-level only. |
 
-Our own control-plane parsers (OpenAPI validation, subscription formats) are selected at
-T002/T005; not locked here. No dependency in this list has a copyleft license that would
-propagate into Raylane binaries beyond MPL-2.0 (file-level copyleft, acceptable: Xray
-itself is MPL-2.0 and we consume it as an unmodified separate process).
+Build evidence for dnsmasq nftset (H2): noble Sources.xz Build-Depends for dnsmasq
+include `libnftables-dev` and `libnetfilter-conntrack-dev [linux-any]` → the noble
+source package builds the nftset backend (upstream enables HAVE_NFTSET when
+libnftables dev headers are present; debian/rules passes `COPTS=` with nftset per
+debian packaging). This is package-build-configuration evidence, NOT a runtime
+check: `dnsmasq --version` on the stand remains NOT_RUN and REQUIRED before first
+use (gate restated in §7).
 
-## 7. Explicitly NOT locked / gates
+Feature status (design-level, runtime NOT_RUN for all):
+- dnsmasq `nftset=` directives: SUPPORTED (upstream since 2.66; noble build config above).
+- nftables `tproxy ip to` statement: SUPPORTED (userspace ≥0.9/kernel ≥4.18).
+- iproute2 `ip rule` fwmark policy routing: SUPPORTED.
+- These are external binaries invoked by the privileged helper (R-01), never linked.
+- Licenses: dnsmasq GPL-2.0/GPL-3.0 (dual, per upstream COPYING); nftables GPL-2.0;
+  iproute2 GPL-2.0 — runtime tools only, no license propagation into Raylane binaries.
 
-- Xray production-readiness for our exact config surface: UNVERIFIED until T0xx acceptance (capability matrix in docs/engineering/capabilities.md lists per-feature status).
-- Upstream Xray binary: not used in baseline (we build from source); digest recorded but signature verification unavailable → binary-download path stays OPTIONAL and re-verified at T002.
-- Node/React/vite/TS exact dependency closure: deferred to T002 package-lock.json.
-- dnsmasq/nft/iproute2 runtime behavior on the actual stand: NOT_RUN (no host changes allowed in this task).
-- IPv6 profile (FR-020): research gate from R-03 remains open; this lock adds no new evidence.
+## 6. Crypto / parser dependencies — complete pins from Xray go.mod @1b1647cd (H4/M3/L1)
+
+All versions below are complete as written in the pinned go.mod (no abbreviation);
+existence/commit-hash re-verified 2026-10-23 via `GET https://proxy.golang.org/<module>/@v/<version>.info` (HTTP 200 each; Origin commit hashes recorded in T001-research.md §5).
+
+| Module | Complete pinned version | License | Canonical source URL |
+|---|---|---|---|
+| golang.org/x/crypto | v0.58.0 | BSD-3-Clause | https://github.com/golang/crypto (mirror of go.googlesource.com/crypto) |
+| golang.org/x/net | v0.61.0 | BSD-3-Clause | https://github.com/golang/net |
+| golang.org/x/sys | v0.49.0 | BSD-3-Clause | https://github.com/golang/sys |
+| github.com/refraction-networking/utls | v1.8.3-0.20260301010127-aa6edf4b11af | BSD-3-Clause | https://github.com/refraction-networking/utls (proxy Origin hash aa6edf4b11af82e110eea845bb2983d30138d651) |
+| github.com/xtls/reality | v0.0.0-20261014101318-83f621788ca8 | MPL-2.0 | https://github.com/xtls/reality (Origin hash 83f621788ca88b83179810b12baa7ae518aacb83) |
+| github.com/apernet/quic-go | v0.61.1-0.20260806010916-184d081eef3e | MIT | canonical repo now redirects: `GET https://github.com/apernet/quic-go` → HTTP 301 → https://github.com/HyNetworks/quic-go (L1). Module path in go.mod remains `github.com/apernet/quic-go`; Go module proxy Origin URL is https://github.com/apernet/quic-go, Origin hash 184d081eef3e9edd5cb7c0ddf2460c91f2e6adb1. This is the apernet/HyNetworks FORK of quic-go used by Xray — not the upstream quic-go/quic-go module; do not substitute upstream versions. |
+| github.com/gorilla/websocket | v1.5.3 | BSD-2-Clause | https://github.com/gorilla/websocket |
+| github.com/miekg/dns | v1.1.73 | BSD-3-Clause | https://github.com/miekg/dns |
+| golang.zx2c4.com/wireguard | v0.0.0-20250521234502-f333402bd9cb | MIT | https://git.zx2c4.com/wireguard-go |
+| google.golang.org/grpc | v1.84.0 | Apache-2.0 | https://github.com/grpc/grpc-go (Origin tag refs/tags/v1.84.0, hash e84aa5ab15d1d2b29d54f838312ad490cb7551a8) — recorded in lock per M3; used by grpc transport (FR-002) |
+| google.golang.org/protobuf | v1.36.12 | BSD-3-Clause | https://github.com/protocolbuffers/protobuf-go |
+| github.com/ghodss/yaml | v1.0.1-0.20220118164431-d8423dcdf344 | MIT | https://github.com/ghodss/yaml (proxy .info 200; note: repo archived upstream, version pin stands via module proxy) |
+| github.com/pelletier/go-toml | v1.9.5 | MIT | https://github.com/pelletier/go-toml |
+| gopkg.in/yaml.v2 | v2.4.0 | Apache-2.0 AND MIT (dual per LICENSE) | https://github.com/go-yaml/yaml (v2 branch) |
+
+License impact: no copyleft propagates into Raylane binaries from this list. MPL-2.0
+(xray-core, xtls/reality) is file-level copyleft; Xray is consumed as an unmodified
+separate process (R-01) — no obligation on Raylane source beyond preserving MPL on
+any modified Xray files (none planned; patches would be a new orchestrator decision).
+
+Our own control-plane parsers (OpenAPI validation, subscription formats) are selected
+at T002/T005; not locked here — recorded as an OPEN GAP, not as "nothing missing".
+
+## 7. Explicitly open gaps / gates (do NOT read this lock as complete)
+
+1. Raylane's own Go module dependency set (beyond the SQLite driver) — OPEN, T002.
+2. npm transitive closure (package-lock.json) — OPEN, T002.
+3. dnsmasq runtime `nftset` confirmation (`dnsmasq --version` on stand) — NOT_RUN.
+4. nft/iproute2 runtime behavior on stand — NOT_RUN.
+5. Kernel exact package pin — UNVERIFIED (hardware-dependent; stand provisioning).
+6. Build validation Xray-with-go1.27.3 — NOT_RUN (M2; T002 gate).
+7. IPv6 profile proof (R-03) — OPEN research gate, no new evidence here.
+8. Upstream Xray binary as trusted runnable path — REJECTED by orchestrator decision
+   (round-1); digests above are provenance records only.
+9. Happy Eyeballs RFC 8305 exact parity mapping — UNVERIFIED (contract tests T005+).
+10. PassWall allowInsecure semantic parity (PASSWALL_RESEARCH.md:66) — UNRESOLVED,
+    must be closed before the affected subscription contract/compiler task.
 
 ## Reproducible verification commands
 
-See docs/verification/T001-research.md §7 — every row above maps to a listed command
-with recorded exit code and date.
+See docs/verification/T001-research.md §5 (complete commands with HTTP status,
+retrieval timestamps, artifact paths) and §7 (mismatch/unavailability invariants).

@@ -28,7 +28,7 @@ raw.githubusercontent.com on 2026-10-23.
 | raw (tcp) | SUPPORTED | transport_internet config |
 | mkcp | SUPPORTED | transport_internet config (kcp) |
 | ws | SUPPORTED | gorilla/websocket v1.5.3; transport ws |
-| grpc | SUPPORTED | google.golang.org/grpc v1.84.0 pinned |
+| grpc | SUPPORTED | transport/internet/grpc tree @1b1647cd; module google.golang.org/grpc v1.84.0 pinned in Xray go.mod (Origin: grpc/grpc-go tag v1.84.0, hash e84aa5ab15d1d2b29d54f838312ad490cb7551a8, proxy.golang.org .info 200, 2026-10-23) |
 | httpupgrade | SUPPORTED | transport_internet.go |
 | xhttp | SUPPORTED | XHTTP present at baseline (CONNECTION_GAPS / XR tree) |
 | TLS | SUPPORTED | infra/conf transport_internet TLSConfig |
@@ -42,7 +42,8 @@ raw.githubusercontent.com on 2026-10-23.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| XHTTP Extra / FinalMask | SUPPORTED | XHTTP tree at baseline; FinalMask added in 25.x line, present in v26.10.21 source |
+| XHTTP Extra | SUPPORTED | XHTTP (splithttp) tree present at baseline: transport/internet/splithttp/* @1b1647cd; Extra options surfaced via splithttp config (contract test T005) |
+| FinalMask (stream-level masks) | SUPPORTED (mechanism exists at streamSettings level) | transport/internet/finalmask/* tree present @1b1647cd (verified via git trees API 2026-10-23: subdirs filter, fragment, header, mkcp, noise, realm, salamander, sudoku, udphop, xdns, xicmp, xmc); JSON surface: `streamSettings.finalmask {tcp:[], udp:[], quicParams:{}}` — infra/conf/transport_internet.go L56/L242–270 and infra/conf/transport_finalmask.go L1303–1307 (`type FinalMask struct`). Per-mask config JSON shape for each mask type: UNVERIFIED in detail (contract test T005). |
 | ALPN | SUPPORTED | TLSConfig alpn |
 | uTLS / fingerprint | SUPPORTED | refraction-networking/utls v1.8.3-… pinned; TLSConfig fingerprint |
 | chain SHA256 pin | SUPPORTED | TLSConfig pinnedPeerCertChainSha256 (SETTINGS_REFERENCE) |
@@ -93,7 +94,7 @@ raw.githubusercontent.com on 2026-10-23.
 | Capability | Status | Evidence |
 |---|---|---|
 | endpoint, pub/priv keys, optional PSK, local addresses, MTU, reserved, keepalive | SUPPORTED | infra/conf/wireguard.go fields at baseline |
-| FinalMask JSON (off default) | SUPPORTED | wireguard FinalMask support present in 26.x (noisetls/noiseqq masks); exact JSON surface to be contract-tested at T005 |
+| FinalMask JSON (off by default) | SUPPORTED — mapping established from pinned source (M4 fix) | WireGuard outbound applies stream-level FinalMask to its UDP dial: proxy/wireguard/client.go L149–150 @1b1647cd (`if streamSettings.FinalMask != nil { conn, err := streamSettings.FinalMask.DialUDP(ctx, dest) }`). Stream-level FinalMask JSON is `streamSettings.finalmask{tcp,udp,quicParams}` (infra/conf/transport_internet.go L56, infra/conf/transport_finalmask.go L1303–1307); mask implementations live in transport/internet/finalmask/{noise,realm,salamander,sudoku,xmc,xicmp,xdns,filter,fragment,header,mkcp,udphop}. FR-008's "FinalMask JSON, off by default" maps to: our WireGuard node model emits `streamSettings.finalmask.udp` entries only when the admin enables it (default: absent → plain UDP dial, client.go L156 fallback). NOTE: round-1's cited "noisetls/noiseqq" identifiers were NOT found in the pinned source and are removed (M4). Which specific mask types are semantically valid for WireGuard UDP: UNVERIFIED beyond `DialUDP` presence — per-mask validation is a T005 contract test. |
 | System WireGuard / .conf import | UNSUPPORTED BY PRODUCT | D-049–051. |
 
 ## FR-017 / FR-019 (subscription & list prerequisites relevant to capabilities)
@@ -117,12 +118,14 @@ raw.githubusercontent.com on 2026-10-23.
 | Capability | Status | Evidence |
 |---|---|---|
 | AEAD secret storage in Go (x/crypto chacha20poly1305 / aes-gcm) | SUPPORTED | golang.org/x/crypto v0.58.0 license BSD-3-Clause |
-| SQLite single-file store (modernc.org/sqlite) | SUPPORTED | versions.lock §4; exact pin at T002 |
+| SQLite single-file store (modernc.org/sqlite v1.61.0) | SUPPORTED (static) | versions.lock §4 — exact pin v1.61.0, gitlab commit 4df1ebea0f1cf0cd6ec3245b26f5fec4234ce738, BSD-3-Clause-style license, go 1.26.0 directive compatible with go1.27.3; build/integration NOT_RUN (T002) |
 | TLS-terminating LAN UI (Go net/http) | SUPPORTED | stdlib |
 
 ## Summary of gates
 
-- BLOCKED: none newly introduced. Pre-existing open gates: IPv6 profile (R-03), upstream binary signature trust (mitigated by build-from-source), npm closure (T002), Happy Eyeballs exact parity (contract tests).
+- Pre-existing open gates: IPv6 profile (R-03), upstream binary as trusted path (REJECTED by 01 round-1; build-from-source only), npm closure (T002), Happy Eyeballs exact parity (contract tests), allowInsecure parity (UNRESOLVED).
+- Revision-1 gaps now CLOSED: exact SQLite pin (v1.61.0), exact Ubuntu noble package versions with pockets (dnsmasq 2.91-0ubuntu0.24.04.2, nftables 1.0.9-1ubuntu0.1, iproute2 6.1.0-1ubuntu6.4), complete pseudo-versions for utls/reality/quic-go/ghodss-yaml, grpc in lock, FinalMask→FR-008 mapping from pinned source, dnsmasq nftset build-config evidence.
 - UNVERIFIED rows above are scheduled checks (T002/T005+/stand), not promises.
-- No unsupported engine capability found for FR-001–008 in-scope surface at baseline v26.10.21.
-- No Go 1.27 incompatibility: Xray go.mod requires 1.27, upstream builds with 1.27.x, pinned toolchain go1.27.3 ≥ requirement.
+- No unsupported ENGINE capability found for the FR-001–008 in-scope surface at baseline v26.10.21; product-level rejections (REALITY for HTTP, system WireGuard, arbitrary chain length) are by design and enforced in our validation layer.
+- Static toolchain compatibility only: Xray go.mod requires `go 1.27`, upstream builds with 1.27.x, pinned toolchain go1.27.3 ≥ requirement. An actual build was NOT performed (M2) — build validation is a T002 gate and remains NOT_RUN.
+- Open gaps (honest list, not "no blockers"): exact per-mask FinalMask JSON semantics for WireGuard UDP (UNVERIFIED, T005), allowInsecure parity (UNRESOLVED), Happy Eyeballs RFC parity (UNVERIFIED), IPv6 profile (BLOCKED→gate), runtime dnsmasq/nft stand checks (NOT_RUN), our own dependency closure (OPEN, T002).

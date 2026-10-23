@@ -183,7 +183,9 @@ Required accompanying rules:
 3. **I-JSON conformance.** The payload must be I-JSON: no duplicate member
    names, and every number must be a finite IEEE 754 double or an integer
    that a double represents exactly — no NaN, no Infinity, and no integer
-   outside the safe range.
+   outside the safe range. I-JSON constrains the *value* of a number, not
+   its lexical spelling: `1` and `1.0` are both I-JSON-valid and denote the
+   same number.
 4. **UTF-8 encoding.** The canonical form is serialised as UTF-8. Non-ASCII
    characters are emitted literally, not `\u`-escaped (RFC 8785 requires this;
    it is the opposite of the `ensure_ascii=True` default in many JSON
@@ -203,9 +205,33 @@ numeric *field* — `listenerPorts` items, `integer` with `minimum: 1` and
 `PrepareGeneration`, but it is one field with one bounded range). There are
 **no** float-typed or `number`-typed fields anywhere inside the payload, so
 the hard part of RFC 8785 — the ECMAScript number-formatting rules for
-doubles, exponents and `-0` — never applies to this type. The member names
-are ASCII, so the UTF-16 code-unit ordering that JCS specifies does not need
-to be emulated either.
+doubles, exponents and `-0` — never applies to this type.
+
+The **string values** are constrained as well, not only the member names.
+Every string-typed field in the payload is bounded by a pattern whose
+character class is printable ASCII:
+
+| Field | Pattern |
+|---|---|
+| `sha256` | `^[0-9a-f]{64}$` |
+| `confirmationToken` | `^[A-Za-z0-9._~+/=-]+$` |
+| `identifier` (and `generationId`, `artifactId`, `setId`, `policyId`, …) | `^[A-Za-z0-9][A-Za-z0-9_-]*$` |
+| `interfaceName` | `^[A-Za-z0-9][A-Za-z0-9_.-]*$` |
+
+No other string field exists in the payload. Because these classes exclude
+every non-ASCII code point, the JCS string-escaping corners — `\u` escapes,
+surrogate pairs, non-BMP characters — **cannot arise** in a payload value.
+The member names are ASCII literals fixed by the schema, so the UTF-16
+code-unit ordering that JCS specifies does not need to be emulated either.
+
+**This is an equivalence argument, not a conformance claim.** It says that
+for *this* payload type a local approximation happens to agree with RFC 8785,
+because the cases where the two could differ are excluded by construction.
+It does **not** mean the approximation satisfies RFC 8785 in general, and it
+does not make any implementation conformant. Conformance requires a
+**vetted RFC 8785 library** together with the **RFC 8785 test vectors** —
+neither is installed here, and installing them is outside this task. See
+[Open tooling gap](#open-tooling-gap).
 
 ### Numeric corner: the one number that is *not* covered by the hash
 
@@ -213,13 +239,11 @@ to be emulated either.
 `payloadHash`. It is therefore the only place where a numeric corner can
 reach the helper, and it needs its own rule.
 
-The schema types it as `integer` with `minimum: 0`. In JSON Schema,
-`"type": "integer"` means *a number with zero fractional part*; it is **not**
-a bounded machine integer and does **not** imply a 64-bit range. Verified
-against the installed validator: values of `2^53`, `2^53 + 1`, `2^63`,
-`2^64` and `10^30` are all accepted by the current schema, and so are `1.0`
-and `7.0` (which are integers in value even though they are written with a
-fractional part).
+In JSON Schema, `"type": "integer"` means *a number with zero fractional
+part*; it is **not** a bounded machine integer and does **not** imply a
+64-bit range. Before this correction the schema bounded `expectedGeneration`
+only from below (`minimum: 0`), and the installed validator accepted values
+of `2^53`, `2^53 + 1`, `2^63`, `2^64` and `10^30`.
 
 That matters because a JSON parser in a double-precision runtime silently
 rounds such values: parsing `9007199254740993` (`2^53 + 1`) through a
@@ -227,18 +251,28 @@ double-precision `JSON.parse` yields `9007199254740992` (`2^53`). Two
 implementations could therefore disagree about the generation number of the
 same request while both accepted it as schema-valid.
 
-**Proposed rule for `protocolVersion` 1:** `expectedGeneration` must be a
-non-negative integer in the range `[0, 2^53 - 1]` — the JSON safe-integer
-range — and a request whose value falls outside it, or which is written with a
-fractional part, is rejected. Within that range every conforming JSON parser
-represents the value exactly, so the comparison the helper performs is
-well-defined.
+**Applied rule for `protocolVersion` 1:** `expectedGeneration` is bounded to
+`[0, 9007199254740991]` — the JSON safe-integer range — by
+`"maximum": 9007199254740991` in the schema. Within that range every
+conforming JSON parser represents the value exactly, so the comparison the
+helper performs is well-defined.
 
-This bound is a **technical proposal for review**, like the other bounds in
-this document. It is deliberately *not* applied to the schema in this task:
-the task packet for this follow-up is documentation-only, and changing the
-schema would alter the artifact that agent 03 reviewed at `6f10cce`. The
-schema change is listed as a required follow-up below.
+**On the two spellings of the same integer.** `1` and `1.0` are **both**
+valid against the schema and **both** valid under I-JSON: I-JSON constrains
+the *range* of a number, not how it is spelled, and a value with zero
+fractional part is an integer regardless of its lexical form. Under RFC 8785
+both canonicalise to `1`, so they produce the **same** `payloadHash`. There
+is therefore no reason to reject a fractional *spelling* of an integer, and
+this document does not propose one. If an implementation wanted to
+canonicalise the lexical form itself, that would be a **transport-decoder**
+rule of its own — not a schema rule, not an I-JSON rule, and not required
+for correctness. Within the safe range, `1` and `1.0` also parse to the same
+value in any conforming parser, so `expectedGeneration` is unaffected either
+way.
+
+The schema bound above is now **applied**, not merely proposed. The
+remaining numeric open item is closed at the schema level; see
+[open item 9](#open-items--not-decided-here).
 
 ### Negative vectors for the canonicalisation
 
@@ -248,11 +282,11 @@ These belong in the contract test set once the proposal is accepted:
 |---|---|
 | Same payload, member names in a different order | Identical `payloadHash` — canonicalisation is order-independent. |
 | Same payload, different whitespace between tokens | Identical `payloadHash`. |
-| Same payload, `\uXXXX`-escaped vs literal non-ASCII | Identical `payloadHash` — UTF-8 output is literal, not escaped. |
-| `1` vs `1.0` in an integer-valued position | Identical `payloadHash` under JCS, and the non-integer spelling is rejected at parse time by rule 1's I-JSON constraint. |
-| Duplicate member name in `payload` | Rejected before hashing. |
-| `expectedGeneration` at `2^53`, `2^53 + 1`, `2^63`, `10^30` | Rejected (outside the proposed safe range). |
-| `expectedGeneration` written as `7.0` | Rejected (fractional spelling of an integer). |
+| Same payload, `\uXXXX`-escaped vs literal non-ASCII | Identical `payloadHash` — UTF-8 output is literal, not escaped. In the current payload type this vector is not reachable: every string value is constrained to printable ASCII, so no non-ASCII value can occur. |
+| `1` vs `1.0` in an integer-valued position | Both are schema-valid and I-JSON-valid; JCS canonicalises both to `1`, so the `payloadHash` is identical. No rejection on lexical form is required. |
+| Duplicate member name in `payload` | Rejected before hashing, at parse time. |
+| `expectedGeneration` at `2^53`, `2^53 + 1`, `2^63`, `10^30` | Rejected — outside the schema's safe-integer bound. |
+| `expectedGeneration` written as `7.0` | Accepted — a valid I-JSON and schema spelling of the integer 7; it denotes the same generation as `7`. |
 | Same `operationId` with a different `payloadHash` | Rejected — the helper contract's "same ID, different payload is rejected". |
 | Same `operationId` and same `payloadHash`, sent again | A **replay**, not a second application: the helper returns the original outcome and does not re-apply. |
 
@@ -264,19 +298,41 @@ local Bun or Go module caches. The canonicalisation could therefore be
 **approximated** offline with `json.dumps(payload, sort_keys=True,
 separators=(",", ":"), ensure_ascii=False)`, which is equivalent for this
 payload type, but that approximation is **not** a conformance check against
-RFC 8785 and was not used as one. A conforming implementation, and the
-acceptance test suite above, are prerequisites for the idempotency contract
-check and are **NOT_RUN**.
+RFC 8785 and was not used as one.
+
+The prerequisite for the idempotency contract check is therefore:
+
+1. a **vetted RFC 8785 library** — for example a maintained Go
+   implementation, a Node package, or a Python package, chosen on its
+   maintenance and correctness record rather than installed opportunistically;
+2. the **RFC 8785 test vectors**, run against that library, as the
+   conformance evidence.
+
+Neither is selected or installed by this task, and nothing was downloaded.
+Until both exist, the idempotency contract check and any JCS conformance
+claim remain **NOT_RUN**.
 
 ### Alternative to the UUIDv4 restriction
 
 `operationId` is currently constrained to UUID v4 (lowercase). The helper
 contract only requires a unique identifier, so the v4 restriction is a
-**protocol proposal**, not a product requirement. A time-sortable UUID v7
-would remain compatible and would make operation ordering recoverable from
-the identifier itself. The schema currently uses v4 and is **unchanged** in
-this task; switching to v7 would be a `protocolVersion` bump plus a schema
-revision, and the choice is a protocol decision, not a product one.
+**protocol proposal**, not a product requirement.
+
+A time-sortable UUID v7 would remain compatible. Its millisecond timestamp
+would be a **diagnostic aid** for correlating logs and operations in
+rough order — and nothing more:
+
+- it is **not** a proof of operation order. A timestamp is not a total
+  order: the clock can be skewed, and two operations can share a
+  millisecond;
+- it is **not** an authorisation mechanism;
+- it is **not** a generation guarantee. That is the job of
+  `expectedGeneration` together with `manifestHash`, which bind a request to
+  a specific state and a specific manifest.
+
+The schema currently uses v4 and is **unchanged** by that observation;
+switching to v7 would be a `protocolVersion` bump plus a schema revision, and
+the choice is a protocol decision rather than a product one.
 
 ## Error taxonomy — technical proposal
 
@@ -288,17 +344,21 @@ contract for the helper socket exists yet**, so it would be wrong to promise
 HTTP status numbers here. What can be proposed is the *shape* of a helper
 error and the *meaning* of its codes.
 
-Proposed error object:
+Proposed response shapes, mirroring the control-plane separation of outcomes
+from states:
 
 ```
-{ code, message, fieldErrors?, helperOperationId }
+success: { helperOperationId, state? }
+failure: { code, message, fieldErrors?, helperOperationId, state? }
 ```
 
 `helperOperationId` echoes the request's `operationId` so a failure can be
-correlated with the operation that caused it.
+correlated with the operation that caused it. `state` is **separate from**
+`code`: a response can carry an error code *and* a state, and the state
+describes where the helper stands, not what went wrong.
 
-Proposed codes, mirroring the control-plane taxonomy where an equivalent
-exists:
+Proposed error codes, mirroring the control-plane taxonomy where an
+equivalent exists:
 
 | Code | Meaning | Control-plane analogue |
 |---|---|---|
@@ -310,22 +370,36 @@ exists:
 | `ARTIFACT_HASH_MISMATCH` | A referenced artefact's content hash does not match. | — (helper-specific) |
 | `INTERFACE_NOT_APPROVED` | A requested interface is not in the helper's allowlist. | — (helper-specific) |
 | `IPV6_PROFILE_UNPROVEN` | An IPv6 TProxy enable was requested without a proven profile. | — (422-class) |
-| `DEGRADED_GUARDED` | The helper could not complete the operation and is in the degraded-guarded state. | — (state, not success) |
+| `SYSTEM_PROCESS_ERROR` | A system process (nftables or another invoked binary) failed or reported an error. | — (helper-specific) |
+| `ROLLBACK_FAILED` | A `RestoreGeneration` did not succeed; the helper is degraded-guarded. | — (helper-specific) |
 
 Two points of separation matter and are stated explicitly:
 
-- **`DEGRADED_GUARDED` is a state, not a success.** It is never reported as
-  a completed operation. When a rollback itself fails, the helper stays
-  degraded-guarded and says so; it must not report a restore that did not
-  happen.
-- **System-process failures are not swallowed.** Errors from nftables or
-  other system processes get their own codes and are never folded into a
-  generic success path — the helper contract requires that they are not
-  masked as success. Raw command output must not reach external logs
-  unredacted.
+- **A degraded state is not an error code.** `DEGRADED_GUARDED` is a
+  *state*, reported in the response's `state` field, not one of the error
+  codes. A failed rollback reports `ROLLBACK_FAILED` **and**
+  `state: degraded-guarded` together. The state is never reported as a
+  completed operation, and a rollback that did not happen is never reported
+  as a successful restore — the emergency state and the preserved protection
+  against direct bypass are what the caller must see (FR-021).
+- **System-process failures are not swallowed.** `SYSTEM_PROCESS_ERROR` is
+  its own code, never folded into a generic success path — the helper
+  contract requires that nftables and system-process errors are not masked as
+  success. The `message` is **redacted**: it states what failed and in which
+  phase, without carrying raw command output, paths or secret material into
+  anything that leaves the helper (FR-019).
 
-The concrete set, and the transport that would carry it, remain to be fixed
-together with the control-plane OpenAPI schema. Nothing here is claimed as
+The proposed `state` values are the ones the control-plane contract already
+names: `prepared`, `guarded`, `active`, `stopped-guarded`, `degraded-guarded`.
+
+**No HTTP status codes are introduced.** A Unix socket has no status codes,
+and **no transport contract for the helper socket exists yet**, so promising
+HTTP semantics here would be wrong. The code names above mirror the
+control-plane taxonomy for *consistency of meaning*; they are not status
+numbers and imply no transport mapping. The concrete response format, the
+transport that carries it and the code set are an **approved technical
+draft** to be settled before any future schema or implementation work — see
+[open item 7](#open-items--not-decided-here). Nothing here is claimed as
 agreed.
 
 ## Not promised by this schema
@@ -363,7 +437,7 @@ product defaults, and not user-facing configuration.
 | `confirmationToken` length | 32–512 | Wide enough for a random token, bounded so the field cannot carry a document. |
 | `sha256` | exactly 64 lowercase hex | The contract names SHA-256 explicitly; uppercase is rejected so the digest has one canonical form. |
 | `operationId` | UUID v4, lowercase | RFC 4122 v4 via an explicit pattern, because `format` is annotation-only in most validators and would not reject a malformed value. |
-| `expectedGeneration` | `[0, 2^53 - 1]` (**proposed, not yet in the schema**) | The JSON safe-integer range, so every conforming JSON parser represents the value exactly and the helper's generation comparison is well-defined. JSON Schema's `integer` does not imply this — see [Numeric corner](#numeric-corner-the-one-number-that-is-not-covered-by-the-hash). |
+| `expectedGeneration` | `[0, 9007199254740991]` (**applied in the schema**) | The JSON safe-integer range, so every conforming JSON parser represents the value exactly and the helper's generation comparison is well-defined. JSON Schema's `integer` does not imply this on its own — see [Numeric corner](#numeric-corner-the-one-number-that-is-not-covered-by-the-hash). |
 
 A note on the `operationId` restriction: it is a **protocol proposal**, not a
 product requirement. The helper contract only asks for a unique identifier, so
@@ -410,9 +484,11 @@ Draft202012Validator`). The CLI's `-V` argument needs the full class name —
 | Payload variants are closed | PASS | `additionalProperties: false` in every variant |
 | No path/exec/env/secret field exists | PASS | no such property name in the schema |
 | Numeric types reachable inside payload | PASS | resolved `$ref`s: only `listenerPorts` items are numeric (`integer`, 1–65535); **0** float/`number` fields and **0** unbounded integers inside payload |
-| `expectedGeneration` accepts values beyond binary64 | PASS (observed, drives open item 9) | `2^53`, `2^53+1`, `2^63`, `2^64`, `10^30` all accepted; `1.0` and `7.0` accepted; `1.5` rejected |
+| String values inside payload are ASCII-constrained | PASS | four string patterns, all character classes printable ASCII; no other string field exists in the payload |
+| `expectedGeneration` bound applied | PASS | schema carries `"maximum": 9007199254740991`; boundary vectors 0 / max / max+1 / large / −1 / `1.0` behave as documented |
+| `1` and `1.0` are both valid | PASS | both accepted by the installed validator; both are I-JSON-valid; no lexical-form rejection is proposed |
 | Double-precision parsing rounds a large integer | PASS (observed) | `JSON.parse("9007199254740993")` yields `9007199254740992` |
-| RFC 8785 implementation available locally | **NOT_RUN** | no `jcs` / `rfc8785` Python package, none in the local Bun or Go module caches; the stdlib approximation (`sort_keys=True`, `separators=(",",":")`, `ensure_ascii=False`) is equivalent for this payload type but is **not** a conformance check and was not used as one |
+| RFC 8785 implementation available locally | **NOT_RUN** | no `jcs` / `rfc8785` Python package, none in the local Bun or Go module caches; the stdlib approximation (`sort_keys=True`, `separators=(",",":")`, `ensure_ascii=False`) is equivalent for this payload type but is **not** a conformance check and was not used as one. Conformance requires a vetted RFC 8785 library plus the RFC test vectors — neither selected nor installed |
 
 Artefacts of the corpus live in the ignored scratch directory
 `.hyper/tmp/buj/t005/` (generator, checker, generated cases, one JSON file
@@ -453,9 +529,14 @@ later task.
 7. **Error taxonomy.** The control-plane contract defines `{code, message,
    fieldErrors?, requestId}` for the API. The corresponding helper-side error
    taxonomy is not fixed by any contract. A proposal now exists — see
-   [Error taxonomy](#error-taxonomy--technical-proposal) — but it is a
-   proposal, and no transport contract for the helper socket exists yet, so
-   HTTP status semantics are explicitly not promised.
+   [Error taxonomy](#error-taxonomy--technical-proposal): a response shape of
+   `success {helperOperationId, state?}` /
+   `failure {code, message, fieldErrors?, helperOperationId, state?}`, with
+   the degraded state kept **separate from** the error codes, `SYSTEM_PROCESS_ERROR`
+   and `ROLLBACK_FAILED` named explicitly, and redacted messages. It remains
+   a proposal: no HTTP status semantics are promised, and the response
+   format and the transport that would carry it are an approved technical
+   draft to be settled before any future schema or implementation work.
 8. **Delivery of artefact content into helper-owned storage.** The manifest
    references engine artefacts, DNS artefacts and canonical destination sets
    as `{id, sha256}` only. **No command in the schema carries the content of
@@ -479,47 +560,53 @@ later task.
    is **blocked**: a helper cannot honestly implement artefact verification
    without a defined source for the bytes.
 
-9. **`expectedGeneration` numeric range.** The schema's `integer` type does
-   not bound the value, and a double-precision JSON parser silently rounds
-   integers beyond `2^53`. The proposed rule — accept only
-   `[0, 2^53 - 1]` and reject fractional spellings — is described in
+9. **`expectedGeneration` numeric range — closed at the schema level.** The
+   schema's `integer` type does not bound the value, and a double-precision
+   JSON parser silently rounds integers beyond `2^53`. The bound
+   `[0, 9007199254740991]` is now **applied** in the schema
+   (`"maximum": 9007199254740991`), so a request outside the safe-integer
+   range is rejected by validation rather than silently reinterpreted. The
+   reasoning is in
    [Numeric corner](#numeric-corner-the-one-number-that-is-not-covered-by-the-hash).
-   The schema is **unchanged** in this task; the bound must be added in a
-   schema revision under agent 03's review.
-10. **`ipv6TProxyEnabled` is not in the helper contract's manifest list.**
-    The helper contract lists generation ID, listener ports, approved
-    interfaces, canonical destination sets, policy refs and engine/DNS
-    artefact hashes; the schema adds the IPv6 flag on top of that list, on
-    the grounds of FR-020 and D-058. Agent 03 accepted the addition as a
-    justified extension, but the contract and the schema now differ on this
-    point. A **synchronisation line in the feature contract** is required at
-    the next contract revision, so that the schema does not become
-    undocumented architecture by omission. The feature contracts are not
-    modified by this task.
+   No further schema change is outstanding for this item.
+10. **`ipv6TProxyEnabled` — synchronisation done.** The helper contract listed
+    the manifest without the IPv6 flag while the schema carried it. A
+    synchronisation line has now been added to
+    `specs/001-selected-connections/contracts/network-agent.md`: the flag is
+    part of the typed manifest, defaults to false, records **intent only**,
+    is not proof of a proven IPv6 profile and is not permission to enable
+    IPv6 interception. The contract and the schema agree again. The
+    underlying requirement — refusing an IPv6 enable without a proven
+    profile — is unchanged and remains **NOT_RUN** (G2).
 
 ## What agent 03 should check next
 
-The schema at `6f10cce` was already reviewed by agent 03 (PASS-schema, no
-blockers). The items below are what this follow-up adds for a further review
-round:
+The schema at `6f10cce` was reviewed by agent 03 (PASS-schema, no blockers),
+and the canonical protocol detail was reviewed separately in
+`.hyper/tmp/t005a/T005-protocol-detail-review-REPORT.md`. The corrections
+C1–C5 from that review are applied in this commit. What remains for the next
+review round:
 
-- The [canonical serialisation proposal](#canonical-payload-serialisation--technical-proposal-for-protocolversion-1):
+- The [canonical serialisation](#canonical-payload-serialisation--technical-proposal-for-protocolversion-1):
   RFC 8785 over the payload only, duplicate keys rejected before hashing,
   I-JSON number rules, UTF-8 literal output, and a `protocolVersion` bump on
-  any change.
-- The [`expectedGeneration` safe-integer rule](#numeric-corner-the-one-number-that-is-not-covered-by-the-hash):
-  whether `[0, 2^53 - 1]` is the right bound, and whether it should be
-  applied to the schema in a revision.
+  any change. The RFC 8785 conformance evidence (a vetted library plus the
+  RFC test vectors) is still outstanding — it is **NOT_RUN**.
+- The [applied `expectedGeneration` bound](#numeric-corner-the-one-number-that-is-not-covered-by-the-hash):
+  `"maximum": 9007199254740991` is now in the schema, and the boundary
+  vectors are in the contract corpus.
 - The [error taxonomy proposal](#error-taxonomy--technical-proposal): the
-  proposed code set, and whether the separation between `DEGRADED_GUARDED` as
-  a state and the ordinary error codes is adequate.
+  proposed code set with `SYSTEM_PROCESS_ERROR` and `ROLLBACK_FAILED` named,
+  the degraded state kept separate from the codes, and no HTTP status
+  semantics introduced.
 - The [open item 8](#open-items--not-decided-here) wording: that the delivery
   gap is stated as a blocker for the runtime implementation, and that the
   architecture is left to the Chief Architect.
 - The [open item 10](#open-items--not-decided-here) note about
-  `ipv6TProxyEnabled` needing a synchronisation line in the feature contract.
+  `ipv6TProxyEnabled`: the synchronisation line has now been added to the
+  helper contract, so the schema and the contract agree again.
 
-Unchanged from the earlier review round, and still to hold: no arbitrary
+Unchanged from the earlier review rounds, and still to hold: no arbitrary
 shell, executable, environment, command text or raw path can be expressed in
 any payload; no secret value can be expressed; the nine commands match the
 helper contract exactly and no command permits saving or applying

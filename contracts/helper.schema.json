@@ -25,7 +25,8 @@
     "expectedGeneration": {
       "type": "integer",
       "minimum": 0,
-      "description": "Numeric generation state the control plane believes the helper is currently in. The helper compares this against its own state and rejects the request when they differ, so a request prepared against a stale view cannot be applied. This is a request-side expectation only; it is not a lock and does not prevent a concurrent request, which is why the helper must also serialise its own operations."
+      "maximum": 9007199254740991,
+      "description": "Numeric generation state the control plane believes the helper is currently in. The helper compares this against its own state and rejects the request when they differ, so a request prepared against a stale view cannot be applied. This is a request-side expectation only; it is not a lock and does not prevent a concurrent request, which is why the helper must also serialise its own operations. The value is bounded to the JSON safe-integer range [0, 2^53-1] so that every conforming JSON parser represents it exactly: an unbounded integer would be silently rounded by a double-precision parser, and two implementations could then disagree about the generation of the same request."
     },
     "command": {
       "$ref": "#/$defs/command",

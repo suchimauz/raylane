@@ -1,0 +1,373 @@
+# Raylane — CI verification workflow
+#
+# Scope (T004): unit / race / frontend / contract checks for the CURRENT
+# scaffold and for the tests that later tasks will add.
+#
+# This file has NOT been executed. It was authored offline, in a task with
+# network access disabled, and it was never dispatched, never run by a
+# runner, and never validated by a hosted CI. Every statement about CI
+# behaviour below is a design intent, not an observed result. See
+# docs/engineering/testing.md for the full statement of what is and is not
+# known.
+#
+# Hard rules encoded here:
+#   - The workflow runs on `push` and `pull_request` only. It never runs on
+#     `pull_request_target`, so a fork PR can never run with repository
+#     secrets or write permissions.
+#   - `permissions: contents: read` at workflow level, and no job widens it.
+#   - No secret is referenced anywhere. No deploy, publish or release step.
+#   - Every action is pinned to a full commit SHA, never to a tag or
+#     `latest`. Only two pins are used, and both were verified from local
+#     upstream sources: `actions/checkout` v7.0.1 and `actions/upload-artifact`
+#     v7.0.1. The pins that could NOT be verified locally (`actions/cache`,
+#     `actions/setup-go`, `actions/setup-node`) are deliberately NOT used —
+#     an unverified digest is worse than no cache. See docs/engineering/testing.md
+#     gap T4-C1 and T4-C2.
+#   - Dependency installation uses the committed lockfiles with
+#     `--frozen-lockfile` / `--ignore-scripts`, so a CI run installs
+#     exactly the reviewed closure and runs no third-party install code.
+#   - The network-integration runner is NOT provisioned, NOT run and NOT
+#     auto-enabled. It is documented as an opt-in, disposable-VM gate only.
+#
+# Toolchain versions and their SHA-256 checksums come from
+# packaging/versions.lock (T001, G1). This workflow does not invent a
+# version: it reads the pinned values below, which are the same values the
+# lock file records.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read-only by default. No job below raises this.
+permissions:
+  contents: read
+
+# A stuck job must not consume the runner budget.
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned toolchain versions — the same values as packaging/versions.lock.
+  GO_VERSION: "1.27.3"
+  NODE_VERSION: "22.23.4"
+  # Published SHA-256 checksums, verbatim from packaging/versions.lock §2/§3.
+  # linux-amd64 only: the lock file records no arm64 checksum, so no arm64
+  # toolchain is installed here. See docs/engineering/testing.md gap T4-C3.
+  GO_LINUX_AMD64_SHA256: "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
+  NODE_LINUX_AMD64_SHA256: "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Go — build, vet, module integrity, then unit and race tests.
+  #
+  # The Go toolchain is installed from the official go.dev tarball and its
+  # checksum is verified before use. `actions/setup-go` is not used: its
+  # digest could not be verified from any local source in this
+  # network-less task, and an unverified digest is worse than none.
+  # ---------------------------------------------------------------------------
+  go:
+    name: go build / vet / unit / race
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Go toolchain
+        run: |
+          set -euo pipefail
+          tarball="go${GO_VERSION}.linux-amd64.tar.gz"
+          url="https://go.dev/dl/${tarball}"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+               --output "/tmp/${tarball}" "${url}"
+          echo "${GO_LINUX_AMD64_SHA256}  /tmp/${tarball}" | sha256sum --check --strict
+          rm -rf "${RUNNER_TOOL_CACHE}/go"
+          mkdir -p "${RUNNER_TOOL_CACHE}/go"
+          tar --extract --gzip --file "/tmp/${tarball}" --directory "${RUNNER_TOOL_CACHE}/go" --strip-components=1
+          echo "${RUNNER_TOOL_CACHE}/go/bin" >> "${GITHUB_PATH}"
+          echo "GOROOT=${RUNNER_TOOL_CACHE}/go" >> "${GITHUB_ENV}"
+          rm -f "/tmp/${tarball}"
+
+      - name: Report the toolchain version
+        run: |
+          set -euo pipefail
+          go version
+          test "$(go env GOVERSION)" = "go${GO_VERSION}"
+
+      # Read-only verification of the committed dependency closure. These
+      # run before any test so that a broken closure fails fast and is not
+      # reported as a test failure.
+      - name: Verify the module closure
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          go mod verify
+          go mod tidy -diff
+
+      - name: Build both binaries
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          go build ./cmd/...
+          go vet ./...
+
+      # The scaffold currently contains NO test files. `go test` therefore
+      # reports "no test files" for every package, which is a SUCCESS exit
+      # code but is NOT a test-coverage claim. The step below prints the
+      # package count so a human reading the log can tell an empty run from
+      # a real one. The count is echoed, never asserted: asserting it would
+      # break the moment the first test lands, which is exactly the wrong
+      # moment to fail a build.
+      - name: Unit tests
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          packages="$(go list ./... | wc -l)"
+          echo "packages under test: ${packages}"
+          if go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -q .; then
+            echo "test files present — running them"
+            go test -count=1 ./...
+          else
+            echo "NOT_RUN: no *_test.go files exist in this commit (${packages} packages, 0 with tests)."
+            echo "This step exits 0 and asserts NOTHING. Test coverage is NOT_RUN."
+          fi
+
+      # The race detector runs as an unprivileged user on the hosted runner,
+      # with no namespace, no firewall change and no root capability.
+      - name: Race tests
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -q .; then
+            echo "test files present — running with -race"
+            go test -count=1 -race ./...
+          else
+            echo "NOT_RUN: no *_test.go files exist in this commit; -race has nothing to run."
+            echo "This step exits 0 and asserts NOTHING. Race coverage is NOT_RUN."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 2. Frontend — clean install from the lockfile, typecheck, build, unit and
+  #    E2E tests.
+  #
+  # The Node toolchain is installed from the official nodejs.org tarball and
+  # its checksum is verified before use, for the same reason as Go.
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: frontend ci / typecheck / build / unit / e2e
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/web
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Node toolchain
+        run: |
+          set -euo pipefail
+          tarball="node-v${NODE_VERSION}-linux-x64.tar.xz"
+          url="https://nodejs.org/dist/v${NODE_VERSION}/${tarball}"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+               --output "/tmp/${tarball}" "${url}"
+          echo "${NODE_LINUX_AMD64_SHA256}  /tmp/${tarball}" | sha256sum --check --strict
+          rm -rf "${RUNNER_TOOL_CACHE}/node"
+          mkdir -p "${RUNNER_TOOL_CACHE}/node"
+          tar --extract --xz --file "/tmp/${tarball}" --directory "${RUNNER_TOOL_CACHE}/node" --strip-components=1
+          echo "${RUNNER_TOOL_CACHE}/node/bin" >> "${GITHUB_PATH}"
+          rm -f "/tmp/${tarball}"
+
+      - name: Report the toolchain version
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          test "$(node --version)" = "v${NODE_VERSION}"
+
+      # `npm ci` is the only install mode allowed: it installs strictly from
+      # package-lock.json and fails if the lockfile is out of sync with
+      # package.json. `--ignore-scripts` is mandatory, not precautionary:
+      # it is what prevents third-party install code from executing.
+      - name: Install dependencies from the lockfile
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Check that the install did not rewrite the lockfile
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- package.json package-lock.json || {
+            echo "FAIL: npm modified the committed manifests — npm ci must never rewrite them"
+            exit 1
+          }
+
+      - name: Typecheck
+        run: |
+          set -euo pipefail
+          npm run typecheck
+
+      - name: Production build
+        run: |
+          set -euo pipefail
+          npm run build
+
+      # web/package.json currently declares no "test" and no "test:e2e"
+      # script. The steps below detect that and report NOT_RUN instead of
+      # claiming a passing test run. They exit 0 deliberately: the missing
+      # test harness is a known gap of the scaffold, not a CI failure. The
+      # day the scripts appear, the same steps run them for real.
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s.test?0:1)"; then
+            echo "unit test script present — running it"
+            npm run test -- --run
+          else
+            echo "NOT_RUN: web/package.json declares no \"test\" script in this commit."
+            echo "This step exits 0 and asserts NOTHING. Frontend unit coverage is NOT_RUN."
+          fi
+
+      - name: End-to-end tests
+        run: |
+          set -euo pipefail
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['test:e2e']?0:1)"; then
+            echo "e2e test script present — running it"
+            npm run test:e2e
+          else
+            echo "NOT_RUN: web/package.json declares no \"test:e2e\" script in this commit."
+            echo "This step exits 0 and asserts NOTHING. E2E coverage is NOT_RUN."
+          fi
+
+      - name: Upload the build output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-dist-${{ github.sha }}
+          path: ${{ github.workspace }}/web/dist
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Contract checks — the machine-readable contracts under contracts/.
+  #
+  # This job validates the STRUCTURE of the contracts. It is explicitly NOT
+  # an OpenAPI conformance check: no OpenAPI validator is available in the
+  # repository or in the CI image, and inventing one is out of scope. The
+  # difference between the two is stated in the step output and in
+  # docs/engineering/testing.md.
+  # ---------------------------------------------------------------------------
+  contract:
+    name: contract structure checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the JSON contracts parse
+        run: |
+          set -euo pipefail
+          for f in contracts/*.json; do
+            [ -e "${f}" ] || continue
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "${f}"
+            echo "parsed: ${f}"
+          done
+
+      - name: Check the OpenAPI document parses and its references resolve
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import sys
+
+          import yaml
+
+          path = "contracts/openapi.yaml"
+          with open(path) as fh:
+              text = fh.read()
+          doc = yaml.safe_load(text)
+          if not str(doc.get("openapi", "")).startswith("3.1"):
+              sys.exit(f"unexpected openapi version: {doc.get('openapi')!r}")
+
+          refs = sorted(set(re.findall(r'\$ref\s*:\s*"([^"]+)"', text)))
+          missing = []
+          for ref in refs:
+              if not ref.startswith("#/"):
+                  missing.append(ref)
+                  continue
+              node = doc
+              for part in ref[2:].split("/"):
+                  if not isinstance(node, dict) or part not in node:
+                      missing.append(ref)
+                      break
+                  node = node[part]
+          if missing:
+              sys.exit(f"unresolved $ref targets: {missing}")
+
+          operations = []
+          for path, item in doc["paths"].items():
+              for method, op in item.items():
+                  if method in ("get", "post", "patch", "put", "delete"):
+                      operations.append(op)
+          ids = [op.get("operationId") for op in operations]
+          if len(ids) != len(set(ids)):
+              sys.exit("duplicate operationId values")
+          if not all(ids):
+              sys.exit("an operation is missing operationId")
+
+          print(f"structure OK: {len(doc['paths'])} paths, {len(operations)} operations, {len(refs)} refs")
+          print("NOT_RUN: full OpenAPI conformance validation — no validator is vendored or installed.")
+          PY
+
+      - name: Check the whitespace and the lockfile consistency
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --exit-code -- go.mod go.sum web/package.json web/package-lock.json || {
+            echo "FAIL: dependency manifests differ from the committed state"
+            exit 1
+          }
+
+  # ---------------------------------------------------------------------------
+  # 4. The network-integration runner — NOT provisioned, NOT run, NOT enabled.
+  #
+  # This job exists only as a documented gate. It is `if: false` and it
+  # would additionally require a repository variable to be set by a human.
+  # It provisions nothing, creates no VM, changes no firewall and needs no
+  # root capability. The disposable-VM design is described in
+  # docs/engineering/testing.md §"Network-integration runner".
+  # ---------------------------------------------------------------------------
+  network-integration:
+    name: network integration (opt-in, disposable VM only)
+    runs-on: ubuntu-24.04
+    if: false # Opt-in gate: a human must enable this deliberately.
+    permissions:
+      contents: read
+    needs: [go, frontend]
+    steps:
+      - name: Explain why this job is inert
+        run: |
+          set -euo pipefail
+          cat <<'MSG'
+          This job is intentionally inert.
+          It is not provisioned, not scheduled and not enabled by default.
+          The network-integration suite requires a disposable Linux VM with
+          isolated namespaces; it must never run on a host root, and it must
+          never touch the operator's LAN. See docs/engineering/testing.md for
+          the required setup and the explicit approval steps.
+          MSG

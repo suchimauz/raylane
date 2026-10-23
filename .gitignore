@@ -1,0 +1,19 @@
+# Private deployment/test context — never commit
+.local/
+.hyper/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Research downloads, scratch files and runtime artifacts
+.tmp/
+tmp/
+artifacts/
+logs/
+*.log
+.DS_Store
+__pycache__/

@@ -147,3 +147,7 @@ util_xray.lua:1258–1346: chain=1 добавляет предварительн
 
 ### Проверка значения Vision-udp443
 Источник: https://github.com/XTLS/Xray-core/blob/1b1647cd9ddf0abc34b981d4611fc03bcac1ca74/proxy/vless/outbound/outbound.go#L246-L275 . Для xtls-rprx-vision-udp443 устанавливается allowUDP443=true и flow нормализуется к Vision; обычный Vision отклоняет RequestCommandUDP с портом 443. Это не подтверждает поддержку UDP всей сетевой цепочкой. D-011 сохраняет все три значения flow; D-010 требует TLS/REALITY даже при выключенном flow.
+
+## Подписки: точная логика фильтров (D-031)
+Источник: https://github.com/Openwrt-Passwall/openwrt-passwall/blob/409d28cc7d7d2d806039bf03f7ebf4724c03ea99/luci-app-passwall/root/usr/share/passwall/subscribe.lua#L64-L130 . split_filter_keywords делит строки списка по символу |, убирает точные дубликаты, не выполняет trim в этой функции. match_filter_keywords использует буквальную подстроку (find(...,1,true)), без regex и без нормализации регистра в matcher. Для окончательной оценки регистра входного имени проверить вызовы matcher. Режим 5, отсутствующий или неизвестный режим наследует глобальный; глобальный fallback mode=0.
+Пусть D — совпадение discard, K — keep. Отбрасывание: mode1=D; mode2=not K; mode3=D and not K; mode4=D or not K; mode0=false. Следовательно, при совпадении обоих mode3 сохраняет, mode4 отбрасывает; при отсутствии обоих mode3 сохраняет, mode4 отбрасывает. Пустой keep в mode2/4 отбрасывает все. Политика Raylane для нулевой выборки еще не согласована. Это статический анализ, не результат выполненных тестов.

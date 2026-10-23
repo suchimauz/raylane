@@ -90,3 +90,5 @@
 | WireGuard: endpoint, ключи, pre-shared key, адреса, MTU, Reserved, Keep Alive | Весь перечисленный набор, один peer (D-049) | Уточняется | CONFIRMED | Outbound Xray, не системный WG; валидация и защита ключей |
 
 | WireGuard: FinalMask JSON | Сохранить (D-050) | Выключен | CONFIRMED | Проверки синтаксиса/совместимости; неактивный JSON не передается движку |
+
+| WireGuard: импорт обычного .conf | Не включать в первую версию (D-051) | — | CONFIRMED OUT OF SCOPE | Ручной ввод и согласованные форматы подписок остаются |

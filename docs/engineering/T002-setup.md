@@ -167,18 +167,21 @@ the native binaries are not referenced by the output. They are, however, real
 platform-specific artefacts in the toolchain, so the closure is not portable
 to another `os`/`cpu`/`libc` combination without re-resolving them.
 
-`typescript 7.0.2` is a native-portable package: its own `dependencies` and
-`optionalDependencies` both list the 20 per-platform binaries, and the
+`typescript 7.0.2` is a native-portable package: it declares **no regular
+`dependencies`** and lists the 20 per-platform binaries
+(`@typescript/typescript-*`) in `optionalDependencies` only. The
 platform-appropriate one (`@typescript/typescript-linux-x64`, Apache-2.0,
 integrity-pinned) is selected at install time.
 
-## Download volume (estimate)
+## Download volume
 
-The exact number of bytes transferred over the wire is **UNKNOWN**. Bodies
-served from the npm cache, repeated downloads and npm's internal retries are
-not logged, and the HTTP header overhead of revalidation responses was not
-recorded. What follows is an **estimate**, based on distinct content, not a
-measured transfer.
+The number of bytes actually transferred over the wire is **UNKNOWN**. No
+bound can be given for it from the retained evidence: response bodies served
+from the npm cache, repeated downloads, npm's internal retries and HTTP
+compression are not recorded, and the size of the headers exchanged during
+cache revalidation was not captured. The figures below are a **local
+measurement of distinct stored bodies**, not a transfer measurement, and they
+are neither an upper nor a lower bound on what went over the network.
 
 The cap of 250 MiB (262 144 000 bytes) was set for this task and was **lifted
 by the user** afterwards; the volume is therefore no longer a blocker. The
@@ -191,27 +194,24 @@ presented as within budget.
 | `node-v22.23.4-linux-x64.tar.xz` | 31 029 996 | `stat -c %s` on the retained archive |
 | npm metadata + tarballs (distinct blobs) | 191 926 637 | union of both npm caches, deduplicated by content hash |
 | Go module files (zips, `.mod`, `.info`) | 52 487 906 | files added to the module cache during T002 |
-| **Distinct-content total** | **346 033 217** | **330.00 MiB** |
+| **Distinct stored bodies (local measurement)** | **346 033 217** | **330.00 MiB** |
 
 Agent 04 independently measured the same quantity at **345 943 004 B
-(329.92 MiB)** — a difference of 90 213 B (0.086 MiB), i.e. the same figure
-within measurement noise. That is the basis of the table above.
-
-**Range.** The 191 926 637 B npm figure counts distinct blobs only. The first
-`npm install --package-lock-only` wrote a separate cache
-(`/tmp/t002-npm/cache`, 154 501 448 B) whose content is largely duplicated in
-the working cache. If that content was fetched again rather than served from
-cache, the transfer was higher; the npm debug logs show the second run
-revalidating 99 cached responses (bodies reused, only conditional headers sent,
-header size unrecorded). The plausible range is therefore **329.92 MiB
-(distinct) up to ~477 MiB (if the duplicated cache was fully re-fetched)**.
-The exact value is not recoverable without new network requests.
+(329.92 MiB)** — a difference of 90 213 B (0.086 MiB). Both figures describe
+the same local measurement; neither is a claim about transferred bytes.
 
 Three inconsistent figures were reported by the implementing agent during
 T002 (330.00 MiB, 423.35 MiB, and a 244.62 MiB figure in a scratch ledger).
-The 423.35 MiB figure double-counted the duplicated cache; the 244.62 MiB
-figure omitted the Go module zips. **330.00 MiB is the figure that 04
-corroborates**, and it is the one used above.
+Their relationship to the measurement above is not established: the
+423.35 MiB figure counts the duplicated metadata cache as a separate
+contribution, but whether that content was actually fetched a second time is
+**neither proven nor disproven** by the retained evidence, and the
+244.62 MiB figure omits the Go module files. The **330.00 MiB / 346 033 217 B
+figure** is the one agent 04 corroborated as a distinct-content measurement,
+and it is the one used in the table above.
+
+No attempt was made to recover the transfer total: doing so would require new
+network requests, which are outside this task.
 
 ### Reproduction notes
 
@@ -302,7 +302,8 @@ pipeline and with the raw output retained.
   preserved log of the download commands exists; agent 04 confirmed the
   archives match the accepted upstream pins by digest and extraction, and
   located the npm debug logs (three runs, 224 HTTP requests) in the retained
-  npm cache, which is what made the volume measurable at all.
+  npm cache. The number of HTTP requests is therefore known; the number of
+  bytes transferred is not.
 - The build, vet, install and smoke results above are **self-reported**. Agent
   04 confirmed the *artefacts* they produced (both binaries, the bundle
   sizes, the 50-line `go.sum`, 25 installed packages) but did not re-execute

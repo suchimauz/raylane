@@ -1,6 +1,6 @@
 # Tasks: Raylane — 001-selected-connections
 
-Статус: реализация явно разрешена пользователем и начата. T001 принят как исследовательский результат; T002 принят как инертный сборочный каркас после независимых 03/04 проверок. Остальные задачи не завершены. Evidence: [T001 acceptance](../../docs/verification/T001-acceptance.md), [T002 acceptance](../../docs/verification/T002-acceptance.md). G1 runnable и G2–G4 остаются OPEN. План: plan.md, spec.md, data-model.md, contracts/*.md. Порядок ниже технический, не присвоенные пользователю бизнес-приоритеты.
+Статус: реализация явно разрешена пользователем и начата. T001 принят как исследовательский результат; T002 принят как инертный сборочный каркас после независимых 03/04 проверок. T003 принят как синтетический корпус fixtures, без заявления о проверке поведения продукта. Остальные задачи не завершены. Evidence: [T001 acceptance](../../docs/verification/T001-acceptance.md), [T002 acceptance](../../docs/verification/T002-acceptance.md), [T003 acceptance](../../docs/verification/T003-acceptance.md). G1 runnable и G2–G4 остаются OPEN. План: plan.md, spec.md, data-model.md, contracts/*.md. Порядок ниже технический, не присвоенные пользователю бизнес-приоритеты.
 
 ## Общий контракт выполнения
 01 выдает пакет с base commit, FR/US, allowed paths, зависимостями и критериями. 02 — основной writer; 05 — source/capability research; 03 — независимый review; 04 — тесты/evidence. Если явно не указано иное, владелец 02; 01 не отмечает Done без 03 review + 04 evidence. Возможные test-first failures фиксируются; инфраструктурный сбой не считается доказательством failing acceptance test. Секреты/сырые дампы — вне Git; нет live network/push/deploy без отдельного подтверждения. Все пути ниже будущие, не существующий код. [P] означает разные файлы после выполненных prerequisites, не разрешение двум агентам править одну область.
@@ -8,7 +8,7 @@
 ## Phase 1 — Setup / G1
 - [x] T001 Закрепить release/capability/license matrix и provenance выбранного Xray source baseline, Go/Node/dnsmasq/nft и crypto/parser dependencies в packaging/versions.lock и docs/engineering/capabilities.md; 05 собирает, 03 проверяет. G1: никакого latest или неподтвержденного checksum, нет обещания binary trust по одному tag.
 - [x] T002 После T001 создать Go modules, cmd/raylane/main.go, cmd/raylane-net/main.go, web/package.json и lockfiles для Go/React/SQLite; без root/network side effects, build обоих бинарников и UI воспроизводим.
-- [ ] T003 [P] После T002 создать tests/fixtures/README.md и синтетические fixtures всех протоколов/ошибок; 04 задает секретные canaries и expected semantic outcomes из spec, не реальные подписки.
+- [x] T003 [P] После T002 создать tests/fixtures/README.md и синтетические fixtures всех протоколов/ошибок; 04 задает секретные canaries и expected semantic outcomes из spec, не реальные подписки.
 - [ ] T004 [P] После T002 настроить unit/race/frontend/contract CI в .github/workflows/verify.yml и docs/engineering/testing.md; network runner только opt-in disposable VM, не host root.
 
 ## Phase 2 — Foundational

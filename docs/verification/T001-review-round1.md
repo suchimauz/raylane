@@ -52,4 +52,17 @@ Orchestrator previously ran `git diff c21bb12..521b018 --check` successfully and
 Correction task T001-fix-r1 has been dispatched to 05 against base `d7b75a8`, limited to the original three research files. The earlier freeze is lifted for that writer. 04's result remains attached to `521b018`; no acceptance transfers automatically to a changed revision. Findings from both reviewers must receive explicit dispositions, followed by affected independent checks on the new immutable commit. Node 22 and the existing architecture remain unchanged.
 
 
+## Round 2 correction to historical findings
+
+Target: `4e98e02910820f92fc6177014c06aef3b602e10e`, actual parent `9566a13`. Both independent reviews confirm the corrected pins and static capability evidence. Reviewer 03: CHANGES_REQUESTED for documentation; tester 04: PASS with a minor documentation finding. T001/G1 remain OPEN pending corrected documentation and independent recheck.
+
+**Retraction:** 04 explicitly withdrew the round-1 claim that iproute2 `6.1.0-1ubuntu6.2` never existed. Its query used Published records and a truncated result page; that did not establish historical absence. Both reviewers now report a noble Updates publication beginning 2025-07-29 and supersession on 2026-04-29. Publication and supersession dates must not be conflated. The earlier H1/F-04-2 summaries above are historical, not the current finding. The invalid dnsmasq `2.90-4build1` finding remains.
+
+Both reviewers found explicit `COPTS += -DHAVE_NFTSET` in dnsmasq debian/rules, conditional on absence of `DEB_BUILD_OPTIONS=nonftset`. This supplies stronger build-configuration evidence than Build-Depends alone; installed runtime behavior remains NOT_RUN.
+
+Remaining documentation dispositions: provider-reported PGP commit verification (local crypto NOT_RUN), successful pinned core/core.go evidence rather than a 404 response, explicit F-04-1..6 dispositions, debian/rules citation, correct package pocket/status dates, complete REALITY version, accurate parent reference, and dnsmasq-base/main versus dnsmasq/universe packaging distinction. A bounded doc-only correction was assigned to 05; the research files remain owned by that writer.
+
+Working evidence for round 2: `.hyper/tmp/t001/T001-review-r2-REPORT.md` (03) and `.hyper/tmp/bul/t001-04r2/REPORT.md` with `checks.tsv` (04). This section records attributed review results, not a new execution of their commands. Binary integrity, local signature verification, builds and network acceptance are not declared PASS.
+
+
 No task checkbox or gate is closed by this document.

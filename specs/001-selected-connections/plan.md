@@ -1,14 +1,14 @@
 # Implementation Plan: Raylane selected connections and LAN
 
-**Status:** DRAFT TECHNICAL PLAN / REVIEW REQUIRED. Spec Kit Phase 0 выполнена как консолидация исследования; Phase 1 — проект контрактов. Version/network gates ниже остаются блокерами runnable baseline, а не скрыто «решенными» неизвестными.
+**Status:** TECHNICAL PLAN FOR TASK BREAKDOWN / CONDITIONAL IMPLEMENTATION. Phase 0/1 artifacts подготовлены; разрешение реализации не получено. Архитектурная база определена, supply-chain и сетевые verification gates ниже блокируют runnable baseline/приемку, не маскируются под выполненные тесты.
 **Spec:** [spec.md](spec.md). Feature 001-selected-connections; текущая Git-ветка main, отдельная ветка не создавалась. Пользователь разрешил составить plan с учетом существующих агентов 01–05, не запуск реализации.
 
 ## Summary
 Самостоятельная Ubuntu-панель: Go control-plane + ограниченный privileged helper, React/TypeScript UI, SQLite, отдельные Xray и dnsmasq. Immutable drafts/active snapshots, безопасное применение с journal/rollback, отдельно живущая защита от direct bypass. nftables/TPROXY — выбранная база проектирования, один NIC проверяется прежде реализации полной сетевой интеграции. Все решения/альтернативы и ограничения — [research.md](research.md).
 
 ## Technical Context
-- Language: Go backend/helper, TypeScript UI. Точные supported release pins блокируются gate G1, не оставлены на «latest».
-- Dependencies: Xray (один движок), dnsmasq с nftset, nftables/iproute2, React, SQLite driver, проверенные crypto/парсеры. Production Xray release еще не выбран; snapshots только исследовательские.
+- Language: Go backend/helper, TypeScript UI. Go 1.27 family (совместимость с исследованным Xray); Node 22 LTS family для сборки UI, React 19 family. Точные patch/dependency locks и provenance фиксируются G1 до runnable baseline, без latest.
+- Dependencies: Xray (один движок), dnsmasq с nftset, nftables/iproute2, React, SQLite driver, проверенные crypto/парсеры. Source baseline Xray: локально проверенный tag v26.10.21 на commit 1b1647cd9ddf0abc34b981d4611fc03bcac1ca74. Подлинность release assets/поддержка/готовность production этим не доказаны; G1.
 - Storage: SQLite single-host, WAL/transactions, отдельный secret key; immutable manifests и recovery journal в служебном каталоге.
 - Testing: Go unit/fuzz/race, frontend unit/component и Playwright E2E; изолированные Linux namespaces для dataplane; отдельный реальный Ubuntu стенд только после разрешения.
 - Platform: первичный целевой стенд Ubuntu 24.04 LTS amd64, systemd. ARM/другие ОС не объявлены поддержанными.
@@ -48,7 +48,7 @@ tests/                       # synthetic tests
 
 ## Gates и порядок этапов
 **G0 — согласование технического плана:** пользователь/ревью подтверждают базу и границы; неожиданные требования возвращаются в spec.
-**G1 — reproducible baseline:** 05 собирает release/capability/license matrix Xray, Go/Node/dependencies; 03 проверяет. 01 фиксирует versions/checksums. Без этого нет обещания runnable quickstart или готовности Phase 0 к реализации.
+**G1 — reproducible baseline:** Во время реализации 05 собирает release/capability/license matrix Xray, Go/Node/dependencies; 03 проверяет. 01 фиксирует versions/checksums. Без этого нет обещания runnable quickstart или готовности Phase 0 к реализации.
 **G2 — сеть одного NIC:** доказать в изолированной среде IPv4 direct SNAT-return, TPROXY, DNS readiness, no-loop/no-bypass, management. IPv6 отдельно; незакрытый IPv6 блокирует полную приемку FR-020, не вычеркивается из scope.
 **G3 — security contracts:** 03 проверяет helper attack surface, bootstrap/session, fetch SSRF, secrets/backup, crash consistency. 04 готовит отрицательные проверки.
 **G4 — acceptance evidence:** каждый принятый FR имеет тест/свидетельство, failure tests и recovery. Непройденный gate блокирует acceptance.
@@ -79,3 +79,13 @@ tests/                       # synthetic tests
 
 ## Completion / Complexity Tracking
 Phase 1 artifacts подготовлены как проект. Никаких новых продуктовых вопросов; technical plan требует ревью, G1/G2/G3 имеют явные условия закрытия. Не объявлять Phase 0 полностью resolved: exact releases и network proof еще не получены. Добавленная сложность helper оправдана изоляцией root и сохранением gate после смерти UI/engine; backend-root и один общий процесс отвергнуты. Следующий разрешаемый шаг после review — speckit.tasks, затем speckit.analyze; implement только отдельно.
+
+
+## Уточнение границы агентной работы
+По последнему указанию пользователя команда 01–05 включается ТОЛЬКО при отдельно разрешенной реализации. Подготовку plan, tasks и analyze выполняет текущий агент самостоятельно. Все роли/передачи выше — будущий workflow, не поручения исследовать или ревьюить текущий план сейчас. Никакие уведомления/задания им не отправлены.
+
+## Решения, уточненные при самостоятельной проверке
+- Закреплен воспроизводимый Xray source baseline: локальный tag v26.10.21 и полный commit; go.mod требует Go 1.27. Это не проверка подписи upstream и не публикация бинарника.
+- Для полного IPv6 профиля предлагаем отдельный логический transit VLAN поверх того же физического NIC с ручной настройкой роутера: policy выбирает клиентский ingress, не transit-return. IPv4 flat-LAN SNAT остается базовым вариантом. Наличие VLAN-capable пути — precondition IPv6-профиля; если окружение его не поддерживает, не выдавать IPv6 enable за работающий. Испытать в G2, не принуждать реальную сеть сейчас.
+- Известные назначения без домена классифицируются IP/CIDR/set-правилами; неизвестный домен не означает автоматически аварийную неготовность всего DNS. Readiness относится к доступности согласованного DNS/классификатора/поколения правил. DoH/скрытые домены остаются явно согласованным ограничением, не обещанием универсальной идентификации.
+- Пакетные/служебные новые решения baseline не расширяют product scope. Любое несовпадение с D-требованием блокирует задачу, а не переписывает spec.

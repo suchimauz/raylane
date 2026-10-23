@@ -43,3 +43,11 @@
 ## R-08 — работа существующих агентов
 **Decision:** 01 orchestration, 02 implementation, 03 independent technical/security review, 04 independent tests/evidence, 05 research/capability contracts. Номера/роли подтверждены runtime discovery, агенты idle на момент подготовки. Их не запускали и контекст не изменяли. Детальный порядок в plan; tasks.md создается отдельно через speckit.tasks.
 **Rationale:** один implementation writer снижает конфликты; 03/04 не заменяются самооценкой 02. Исследование 05 закрывает version/network gates, не меняет product requirements самостоятельно.
+
+
+## Самостоятельное уточнение baseline перед tasks
+Локальный git describe/tag --points-at подтвердил v26.10.21 на исследованном Xray commit 1b1647cd9ddf0abc34b981d4611fc03bcac1ca74; go.mod содержит go 1.27. Этот source baseline выбран для воспроизводимого первого компилятора. Release provenance и бинарные checksums не проверены: packaging gate обязателен. Выбор Go 1.27 family, Node 22 LTS family и React 19 family определяет совместимость архитектуры; exact patch locks создаются до первого runnable baseline и проверяются независимо. Не записывать выдуманные hashes/versions в план.
+
+IPv6 path design: отдельный logical transit VLAN через тот же NIC, ручной router policy по ingress клиента с исключением return transit. Это избегает требования NAT66; доступность подходящего switch/router — проверяемая precondition. IPv6 gate включает этот профиль; если не поддержан, нужна корректировка профиля или явное ограничение развертывания, а не молчаливое снятие защиты. Архитектурная гипотеза выбрана, но подтверждение остается за изолированным тестом.
+
+Команда 01–05 используется только при реализации. До нее текущий агент готовит документы самостоятельно; задачи gate в tasks — будущие задания, не dispatch сейчас.

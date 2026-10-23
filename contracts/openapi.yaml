@@ -40,10 +40,14 @@ info:
       that may carry userinfo. Secret fields are presence-only on read; a
       source URL is returned redacted.
     * A secret update is an explicit union of unchanged / replace / clear.
-      The union does NOT by itself reject a masked placeholder: the
-      placeholder's literal spelling is not specified yet, so the rejection
-      is a server-side validation rule, recorded as gap G-17, not a property
-      of this schema.
+      "Leave this field alone" is expressed with `op: unchanged` — the
+      client already knows whether it edited the field, and the presence-only
+      read API protects the VALUE rather than reporting edit state. The one
+      reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__` is refused: a
+      `replace` carrying exactly that string is not schema-valid, is
+      rejected with 422, and is never stored or echoed. Every other string
+      is legitimate, including mask-like strings — a pattern-based
+      rejection would refuse legitimate passwords.
     * No read or write implicitly fetches a remote source, and no draft
       operation implicitly applies anything. Saving is never applying. In
       other words: there is no implicit fetch and no implicit apply anywhere
@@ -134,12 +138,22 @@ paths:
       operationId: createNode
       x-implementation-status: blocked
       x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. A create has no prior revision to compare against, and the
-        guard for it is not specified: the contract does not say whether a
-        create is guarded by the collection revision, by a global revision, or
-        not at all. That is a concurrency-design decision, so it is not made
-        here.
+        A create is the one mutation whose guard is still unresolved. The
+        contract's mutation line says every mutation carries an optimistic
+        revision, and the data model says the same, but the operation table
+        names expectedRevision only for PATCH.
+        Two readings remain, and this is a one-line decision:
+          * an UNGUARDED create — a create adds a new object and overwrites
+            nothing, so there is no prior revision of that object to
+            compare against;
+          * a guard against a COLLECTION revision — but the domain model
+            has no collection-level revision entity to compare against. The
+            per-entity revisions (Node, Subscription, DestinationRule) belong
+            to the object being created, and ConfigRevision is the immutable
+            applied revision. Introducing a collection revision would mean
+            inventing an entity, which is not this artifact's call.
+        The choice is not made here, and it is not resolved by assuming the
+        unguarded reading.
         See gap G-18.
       tags: [nodes]
       summary: Create a node draft.
@@ -243,15 +257,6 @@ paths:
           $ref: "#/components/responses/SemanticValidationFailed"
     delete:
       operationId: deleteNode
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. This delete carries none: a delete of an object that has
-        just changed underneath is exactly the race the contract's mutation
-        line is about. The guard — an If-Match-style header, a body field, or
-        a different mechanism — is not specified, and choosing it here would
-        be a concurrency-design decision.
-        See gap G-18.
       tags: [nodes]
       summary: Delete a node draft.
       description: |
@@ -259,8 +264,14 @@ paths:
         deleted; the response lists those dependencies and the request is
         rejected with 409. Removing a reference from the draft alone does not
         release an active dependency.
+
+        The delete is optimistic-concurrency checked: `expectedRevision` is
+        required, and a revision mismatch is 409 and does not delete a node
+        that changed underneath the client.
       security:
         - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ExpectedRevision"
       responses:
         "204":
           description: The draft was deleted.
@@ -368,24 +379,27 @@ paths:
   /runtime/stop:
     post:
       operationId: stopRuntime
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. This stop carries none. The runtime's current generation is
-        the obvious candidate for the guard, but the contract does not say so,
-        and this operation is not attached to the release-protection flow (gap
-        G-07). The guard mechanism is unspecified.
-        See gap G-18.
       tags: [runtime]
       summary: Stop the runtime, keeping the protection in place.
       description: |
         Stops the service and leaves the protection against direct bypass
         active. This operation never releases the protection; releasing it is
         a separate operation with a separate confirmation.
+
+        The stop is optimistic-concurrency checked against the runtime
+        generation: `expectedGeneration` is required, and a mismatch is 409
+        and the stop is refused. The guard is the generation, not a release
+        confirmation, so this operation does not depend on the release flow.
       security:
         - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopRuntimeRequest"
       responses:
         "202":
           description: The stop was accepted and is in progress.
@@ -435,10 +449,22 @@ paths:
       operationId: createRule
       x-implementation-status: blocked
       x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. A create has no prior revision to compare against, and the
-        guard for it is not specified. Choosing one here would be a
-        concurrency-design decision.
+        A create is the one mutation whose guard is still unresolved. The
+        contract's mutation line says every mutation carries an optimistic
+        revision, and the data model says the same, but the operation table
+        names expectedRevision only for PATCH.
+        Two readings remain, and this is a one-line decision:
+          * an UNGUARDED create — a create adds a new object and overwrites
+            nothing, so there is no prior revision of that object to
+            compare against;
+          * a guard against a COLLECTION revision — but the domain model
+            has no collection-level revision entity to compare against. The
+            per-entity revisions (Node, Subscription, DestinationRule) belong
+            to the object being created, and ConfigRevision is the immutable
+            applied revision. Introducing a collection revision would mean
+            inventing an entity, which is not this artifact's call.
+        The choice is not made here, and it is not resolved by assuming the
+        unguarded reading.
         See gap G-18.
       tags: [rules]
       summary: Create a destination rule in the draft.
@@ -521,20 +547,19 @@ paths:
           $ref: "#/components/responses/SemanticValidationFailed"
     delete:
       operationId: deleteRule
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. This delete carries none. The guard mechanism is
-        unspecified, and choosing it here would be a concurrency-design
-        decision.
-        See gap G-18.
       tags: [rules]
       summary: Delete a destination rule from the draft.
       description: |
         A rule referenced by the active configuration cannot be deleted; the
         response lists the dependencies and the request is rejected with 409.
+
+        The delete is optimistic-concurrency checked: `expectedRevision` is
+        required, and a revision mismatch is 409 and does not delete a rule
+        that changed underneath the client.
       security:
         - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/ExpectedRevision"
       responses:
         "204":
           description: The rule was deleted from the draft.
@@ -585,10 +610,22 @@ paths:
       operationId: createSubscription
       x-implementation-status: blocked
       x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. A create has no prior revision to compare against, and the
-        guard for it is not specified. Choosing one here would be a
-        concurrency-design decision.
+        A create is the one mutation whose guard is still unresolved. The
+        contract's mutation line says every mutation carries an optimistic
+        revision, and the data model says the same, but the operation table
+        names expectedRevision only for PATCH.
+        Two readings remain, and this is a one-line decision:
+          * an UNGUARDED create — a create adds a new object and overwrites
+            nothing, so there is no prior revision of that object to
+            compare against;
+          * a guard against a COLLECTION revision — but the domain model
+            has no collection-level revision entity to compare against. The
+            per-entity revisions (Node, Subscription, DestinationRule) belong
+            to the object being created, and ConfigRevision is the immutable
+            applied revision. Introducing a collection revision would mean
+            inventing an entity, which is not this artifact's call.
+        The choice is not made here, and it is not resolved by assuming the
+        unguarded reading.
         See gap G-18.
       tags: [sources]
       summary: Create subscription settings.
@@ -707,10 +744,22 @@ paths:
       operationId: createRuleSource
       x-implementation-status: blocked
       x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. A create has no prior revision to compare against, and the
-        guard for it is not specified. Choosing one here would be a
-        concurrency-design decision.
+        A create is the one mutation whose guard is still unresolved. The
+        contract's mutation line says every mutation carries an optimistic
+        revision, and the data model says the same, but the operation table
+        names expectedRevision only for PATCH.
+        Two readings remain, and this is a one-line decision:
+          * an UNGUARDED create — a create adds a new object and overwrites
+            nothing, so there is no prior revision of that object to
+            compare against;
+          * a guard against a COLLECTION revision — but the domain model
+            has no collection-level revision entity to compare against. The
+            per-entity revisions (Node, Subscription, DestinationRule) belong
+            to the object being created, and ConfigRevision is the immutable
+            applied revision. Introducing a collection revision would mean
+            inventing an entity, which is not this artifact's call.
+        The choice is not made here, and it is not resolved by assuming the
+        unguarded reading.
         See gap G-18.
       tags: [sources]
       summary: Create rule-source settings.
@@ -798,14 +847,6 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshSubscription
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. This refresh carries none. The contract does name a 409 for
-        a busy resource, which is a concurrency outcome but not an optimistic
-        revision check. The two are not the same thing, and the guard is not
-        specified.
-        See gap G-18.
       tags: [sources]
       summary: Refresh a subscription explicitly.
       description: |
@@ -813,6 +854,17 @@ paths:
         parameters only: it never applies the result to the running network
         configuration. If a job is already running for this source, the
         request is rejected with 409 rather than overwriting it.
+
+        The concurrency guard here is the one the data model already
+        specifies for an update job: one running job per source, so a
+        second refresh is refused with 409, and the job commits only if the
+        revision it captured still matches. A revision conflict rejects the
+        candidate instead of overwriting manual changes.
+
+        This is not the same guard as the `expectedRevision` on the settings
+        PATCH: the settings themselves are guarded by their own PATCH, and
+        the refresh is guarded by the single-running-job rule and the
+        captured-revision commit check.
       security:
         - sessionCookie: []
       responses:
@@ -840,20 +892,23 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshRuleSource
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The contract states that EVERY mutation carries an optimistic
-        revision. This refresh carries none. The contract does name a 409 for
-        a busy resource, which is a concurrency outcome but not an optimistic
-        revision check. The two are not the same thing, and the guard is not
-        specified.
-        See gap G-18.
       tags: [sources]
       summary: Refresh a rule source explicitly.
       description: |
         Starts an update job that updates the draft version of the source
         only. An erroneous or empty result does not replace the previous set,
         and nothing is applied to the running network configuration.
+
+        The concurrency guard here is the one the data model already
+        specifies for an update job: one running job per source, so a
+        second refresh is refused with 409, and the job commits only if the
+        revision it captured still matches. A revision conflict rejects the
+        candidate instead of overwriting manual changes.
+
+        This is not the same guard as the `expectedRevision` on the settings
+        PATCH: the settings themselves are guarded by their own PATCH, and
+        the refresh is guarded by the single-running-job rule and the
+        captured-revision commit check.
       security:
         - sessionCookie: []
       responses:
@@ -942,6 +997,20 @@ components:
         minLength: 1
         maxLength: 128
         pattern: "^[A-Za-z0-9._:-]+$"
+    ExpectedRevision:
+      name: expectedRevision
+      in: query
+      required: true
+      description: |
+        The revision the client based this mutation on. A mismatch is a
+        409 conflict and never overwrites a newer state.
+
+        This parameter is used by the mutations that carry no request body.
+        A revision counter is not a secret, so putting it in the query
+        string does not violate the rule that secrets never appear in a
+        query string.
+      schema:
+        $ref: "#/components/schemas/Revision"
     NodeId:
       name: nodeId
       in: path
@@ -1080,27 +1149,28 @@ components:
         An explicit update of one secret field. `unchanged` keeps the stored
         value, `replace` sets a new one, `clear` removes it.
 
-        **A masked placeholder is not a value — but this schema does not
-        enforce that.** The union below accepts any string of 1..4096
-        characters as a `replace` value, including one that happens to look
-        like the masked placeholder the UI displays. The contract states the
-        rule ("masked placeholder is not a new value"); the rule is a
-        SERVER-SIDE validation, not a schema constraint, because the
-        placeholder's literal spelling is not yet specified (gap G-17).
+        **The reserved sentinel.** A client that wants to leave a secret
+        untouched expresses that with `op: unchanged` — the client already
+        knows whether it edited the field, because it rendered the form. The
+        read API is presence-only, and that is deliberate: it protects the
+        VALUE, it does not have to report whether the client edited
+        anything. So `unchanged` is the only way to say "leave this alone",
+        and the server never has to infer it.
 
-        Two things are therefore missing, and both are normative gaps rather
-        than properties of this schema:
-          * a reserved, explicitly specified placeholder constant, so that a
-            server rule can recognise it and refuse it (gap G-17);
-          * a typed UI state that distinguishes "unchanged" from "replaced",
-            because the read API is presence-only and cannot tell the client
-            that a field is unchanged — the client must keep that state
-            itself (gap G-17).
+        One value is reserved and refused: the exact string
+        `__RAYLANE_SECRET_UNCHANGED_V1__`. If a `replace` value equals it
+        exactly, the request is rejected with 422 and a field error. The
+        sentinel is never stored and never echoed back.
 
-        Until G-17 is closed, a `replace` carrying a placeholder-looking
-        value is SCHEMA-VALID here and must be rejected by the server
-        validation rule, not by this document. Do not read this schema as
-        evidence that a placeholder is already rejected.
+        **Only an exact match is refused.** Any other string is a legitimate
+        secret value, including strings that merely LOOK like a mask —
+        `••••`, `********`, `***`, `«hidden»`. A pattern-based rejection
+        would refuse legitimate passwords, so the rule is exact equality
+        against the one reserved constant and nothing else.
+
+        The schema enforces the exact-match rule directly:
+        `replace.value` is `not: {const: __RAYLANE_SECRET_UNCHANGED_V1__}`,
+        so a sentinel-carrying request is not schema-valid.
       oneOf:
         - type: object
           additionalProperties: false
@@ -1120,6 +1190,8 @@ components:
               type: string
               minLength: 1
               maxLength: 4096
+              not:
+                const: __RAYLANE_SECRET_UNCHANGED_V1__
         - type: object
           additionalProperties: false
           required: [op]
@@ -1155,6 +1227,14 @@ components:
           type: string
           minLength: 1
           maxLength: 4096
+          not:
+            const: __RAYLANE_SECRET_UNCHANGED_V1__
+          description: |
+            The new secret value. The one reserved sentinel
+            `__RAYLANE_SECRET_UNCHANGED_V1__` is refused: it means "leave
+            this unchanged", which is expressed with `op: unchanged`
+            instead. Every other string is accepted, including strings that
+            look like a mask.
 
     SecretUpdateClear:
       type: object
@@ -1336,10 +1416,12 @@ components:
           description: |
             Secret updates, one entry per secret field.
 
-            A masked placeholder is not a new value — but that rule is
-            enforced by server-side validation, not by this schema, and the
-            placeholder's literal spelling is not yet specified (gap G-17).
-            See the `SecretUpdate` description.
+            Use `op: unchanged` to leave a field alone — the client knows
+            whether it edited the field. The one reserved sentinel
+            `__RAYLANE_SECRET_UNCHANGED_V1__` is refused with 422 and is
+            never stored or echoed; every other string, including
+            mask-like strings, is a legitimate value. See the `SecretUpdate`
+            description.
 
     NodeDraftUpdate:
       type: object
@@ -1840,6 +1922,30 @@ components:
           format: uri
         schedule:
           $ref: "#/components/schemas/SourceSchedule"
+
+    StopRuntimeRequest:
+      type: object
+      description: |
+        The body of a runtime stop.
+
+        `expectedGeneration` is required: the stop applies to the generation
+        the administrator saw, and a mismatch is 409. The guard here is the
+        generation, NOT a release confirmation — stopping the runtime and
+        releasing the protection against direct bypass are separate
+        operations, and the stop carries no release field. This body is
+        independent of gap G-07, which concerns the release path only.
+      additionalProperties: false
+      required: [expectedGeneration]
+      properties:
+        expectedGeneration:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: |
+            The generation the administrator believes is running. A mismatch
+            against the current generation is 409 and the stop is refused.
+            The boundary is the JSON safe-integer range, matching the helper
+            envelope.
 
     ReleaseProtectionRequest:
       type: object

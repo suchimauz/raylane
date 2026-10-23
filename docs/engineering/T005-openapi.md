@@ -26,8 +26,8 @@ is blocked until the contract is complete and reviewed.
 | Apply operation | **Not represented** — G-10. |
 | Release-protection operation | **Not represented** (route removed) — G-07. |
 | Per-protocol node field model | **Not represented** — G-11, **blocking**. |
-| Placeholder rejection | **Server-side rule, not a schema property** — G-17. |
-| Optimistic-revision guard beyond PATCH | **Not specified** — G-18. |
+| Placeholder rejection | **CLOSED** — reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__`, exact-match only — G-17. |
+| Optimistic-revision guard beyond PATCH | **Specified for 5 of 9**; the four creates remain unresolved — G-18. |
 | Any server, route or handler | Does not exist. Nothing was executed. |
 
 No endpoint in `contracts/openapi.yaml` may be treated as implemented. No
@@ -41,6 +41,17 @@ applied in this revision. The corrections removed five operations, removed
 three false security claims, and added two gaps (G-17, G-18). The review
 report is in `.hyper/tmp/t005a/T005-openapi-review-REPORT.md` (agent 03's
 own ignored scratch).
+
+**Second correction round.** Agent 03 reviewed that revision and passed it
+as a document (`PASS-doc`) while finding that the *composition of the
+blockers* was stated wrongly: G-17 and G-18 were presented as
+architecture-level blockers, when seven of the nine marked mutations
+already had a normative guard that only needed wire-coding. This revision
+applies the resulting bounded patch: G-17 is closed by the reserved
+sentinel 01 fixed, five of the nine markers are removed because their guard
+is now written down, and G-18 shrinks to the four creates. G-11, the A04
+gaps and the storage/backup gaps are untouched. Agent 03's report is in
+`.hyper/tmp/t005a/T005-correction-review-REPORT.md`.
 
 ## Sources
 
@@ -105,9 +116,15 @@ These are structural in the artifact, not merely described in prose:
    `RuleSourceSettings` expose `urlPresent` and `urlRedacted`, never `url`.
    A raw URL can carry userinfo credentials, so it is not returned.
 3. **A secret update is an explicit union** of `unchanged` /
-   `replace(value)` / `clear`, with a discriminator on `op`.
-   **This union does not reject a masked placeholder** — see the correction
-   below and G-17.
+   `replace(value)` / `clear`, with a discriminator on `op`. "Leave this
+   field alone" is expressed with `op: unchanged` — the client already knows
+   whether it edited the field, and the presence-only read API protects the
+   VALUE rather than reporting edit state. The one reserved sentinel
+   `__RAYLANE_SECRET_UNCHANGED_V1__` is refused: a `replace` carrying
+   exactly that string is not schema-valid (`not: {const: ...}`), is
+   rejected with 422, and is never stored or echoed. Every other string is
+   legitimate, including mask-like strings — a pattern-based rejection
+   would refuse legitimate passwords. **G-17 is closed.**
 4. **There is no implicit fetch and no implicit apply.** Source settings
    operations state that they never fetch; `validateRevision` states that it
    never applies; a fetch happens only through the explicit `refresh`
@@ -130,19 +147,27 @@ now **removed**, because they were not true:
 
 - ~~"A write never accepts a masked placeholder as a value."~~ The
   `SecretUpdate` union accepts any string of 1..4096 characters as a
-  `replace` value. A string that looks like the masked placeholder the UI
-  displays is schema-valid. The contract states the rule; enforcing it is a
-  server-side validation, and the placeholder's literal spelling is not
-  specified anywhere. The artifact now says so explicitly and names the
-  two missing pieces — a reserved placeholder constant and a typed UI
-  unchanged state — as **G-17**. The negative corpus demonstrates the gap
-  rather than asserting it away.
+  `replace` value. The reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__`
+  is now excluded by an explicit `not: {const: ...}` rule and is refused
+  with 422, and **no other string is refused** — a mask-like string such as
+  `••••` or `********` is a legitimate password. The earlier framing was
+  wrong twice over: it claimed a "masked placeholder" without ever
+  specifying one, and it justified the absence with the claim that the
+  presence-only read API "cannot tell the client that a field is
+  unchanged". Neither is true — `op: unchanged` is already in the union,
+  the client knows its own edit state, and the concurrent-change case is
+  covered by `expectedRevision`. **G-17 is closed.**
 - ~~"Every mutation is optimistic-concurrency checked with an expected
-  revision."~~ Only the four `PATCH` bodies carry `expectedRevision`. The
-  contract's mutation line is broader, and the guard for creates, deletes,
-  the runtime stop and the two refreshes is not specified. Choosing one
-  would be a concurrency-design decision, so those nine operations carry
-  `x-implementation-status: blocked` with a note naming **G-18**.
+  revision."~~ The guard is now specified for every mutation **except the
+  four creates**. The four `PATCH` bodies require `expectedRevision`; the
+  two DELETEs carry a required `expectedRevision` query parameter; the
+  runtime stop carries a required `expectedGeneration` body; and the two
+  refreshes keep the guard the data model already specifies for an update
+  job — one running job per source, so a second refresh is 409, and the
+  job commits only if the revision it captured still matches. The four
+  creates stay marked `x-implementation-status: blocked`, because a create
+  has no prior revision to compare against and the domain model has no
+  collection-level revision entity — see **G-18**.
 - ~~"The security-relevant property is preserved regardless: no secret value
   may appear here [in `NodeFields`], and secrets travel only through the
   explicit secret-update union."~~ `NodeFields` is three free-form objects
@@ -152,7 +177,8 @@ now **removed**, because they were not true:
   longer claims otherwise; it names the two enforcement points that are
   required (a typed capability profile checked on write, and a read-side
   filter) and marks **G-11** as a blocking prerequisite. The same applies
-  to `ConfigRevision.canonicalDocument` and **G-12**.
+  to `ConfigRevision.canonicalDocument` and **G-12**. **This gap is
+  untouched by the latest patch.**
 
 ### Consistency with the helper contract
 
@@ -208,8 +234,8 @@ browser storage or in logs.
 | G-14 | Diagnostics export (`POST /diagnostics/export`) | TODO | The endpoint and the allowlisted artefact set. | The contract requires an allowlisted non-secret artefact export, but the allowlist itself is not defined. It is not included rather than being guessed. |
 | G-15 | Update-job counters | TODO | The counters an update job reports. | The data model lists counters on `UpdateJob` without fixing them. |
 | G-16 | Peer / LAN allowlist for source fetches | TODO | The per-source LAN allowlist field and its administration. | FR-023 and D-061 require a per-source allowlist that only the administrator changes, and forbidden address classes to take priority over it. The mechanism is not fixed, so the field is not invented. |
-| G-17 | Masked-placeholder constant and the typed UI unchanged state | TODO | The reserved literal the UI displays in place of a secret, the server-side rule that refuses it, and the client-side state that distinguishes "unchanged" from "replaced". | The contract states that a masked placeholder is not a new value, but the placeholder's literal spelling is specified nowhere, and the read API is presence-only — it cannot tell the client that a field is unchanged. So the `SecretUpdate` union **cannot** reject a placeholder-looking value: `replace.value` accepts any string of 1..4096 characters, and a placeholder-looking string is schema-valid. The artifact now says this plainly instead of claiming the rejection. Two normative prerequisites are named here rather than invented: a reserved, explicitly specified placeholder constant that the server can recognise and refuse, and a typed UI state for "unchanged". A constant is not declared here, because choosing one is a product decision and no contract fixes it. |
-| G-18 | Optimistic-revision guard for the mutations that have none | TODO | The concurrency mechanism for creates, deletes, the runtime stop and the two refreshes. | The contract's mutation line says every mutation carries an optimistic revision, but the contract itself names `expectedRevision` only for `PATCH`, and names a 409 for a busy resource and for a dependency conflict — which are concurrency outcomes, not optimistic revision checks. The guard for the remaining nine operations is therefore unspecified. Choosing one here would be a concurrency-design decision, so those operations carry `x-implementation-status: blocked` with a note, instead of the artifact claiming that PATCH alone satisfies the contract. |
+| G-17 | Reserved sentinel for "leave this secret unchanged" | **CLOSED** | — | The one missing piece was the spelling of the reserved value, and 01 has now fixed it: the reserved sentinel is `__RAYLANE_SECRET_UNCHANGED_V1__`. The rule is exact equality only — a `replace` whose value equals the sentinel exactly is not schema-valid (`not: {const: ...}`) and is rejected with 422 and a field error; the sentinel is never stored and never echoed. Every other string stays a legitimate value, including mask-like strings such as `••••` or `********`, because a pattern-based rejection would refuse legitimate passwords. The earlier framing of this gap was wrong on two counts and is corrected here: the "typed UI unchanged state" is NOT missing — `op: unchanged` is already in the union — and the presence-only read API does NOT need to report edit state, because it protects the VALUE while the client already knows whether it edited the field. The concurrent-change case is covered separately by `expectedRevision`. |
+| G-18 | Optimistic-revision guard for the four creates | TODO | Whether a create is unguarded, or is guarded against a collection-level revision. | **This gap is now scoped to the four creates only.** The other five mutations that previously carried an unresolved marker now have a specified guard: the two DELETEs carry a required `expectedRevision` query parameter, the runtime stop carries a required `expectedGeneration` body, and the two refreshes keep the guard the data model already specifies for an update job (one running job per source, so a second refresh is 409, and the job commits only if the revision it captured still matches). Each of those five had a normative source — `control-plane.md` L3 "все mutation ... optimistic revision", `data-model.md` "все mutation требуют expectedRevision" and the UpdateJob invariants — and needed only wire-coding, which is this artifact's own competence. For a create, the guard genuinely is not determined: a create adds a new object and overwrites nothing, so there is no prior revision of that object to compare against, and the domain model has NO collection-level revision entity to compare against either (the per-entity revisions belong to the object being created, and `ConfigRevision` is the immutable applied revision). Both readings — unguarded, or collection-revision — are consistent with the contracts, and choosing one would be a concurrency-design decision, so the four creates stay marked `x-implementation-status: blocked` pending a one-line decision. They are NOT resolved by assuming the unguarded reading. |
 
 ## Technical choices made here, and why
 
@@ -246,7 +272,7 @@ files are the OpenAPI artifact and this document.
 |---|---|---|
 | YAML parses | PASS | `yaml.safe_load(open('contracts/openapi.yaml'))` → exit 0 |
 | OpenAPI version is 3.1.x | PASS | `openapi: 3.1.0` |
-| All `$ref` targets resolve | PASS | 45 refs, 0 unresolved |
+| All `$ref` targets resolve | PASS | 47 refs, 0 unresolved |
 | Every operation has an `operationId` | PASS | 21 operations |
 | `operationId`s are unique | PASS | 21 unique |
 | Every operation declares `responses` | PASS | 21/21 |
@@ -259,13 +285,18 @@ files are the OpenAPI artifact and this document.
 | Release-protection route absent | PASS | no `/runtime/release-protection` in `paths` |
 | `expectedGeneration` required | PASS | `ReleaseProtectionRequest.required = [confirmation, expectedGeneration]` |
 | The four item GETs are absent | PASS | no `getRevision` / `getRule` / `getSubscription` / `getRuleSource` |
-| The nine unguarded mutations are marked | PASS | 9 × `x-implementation-status: blocked`, each naming G-18 |
+| The four creates are marked, and only they | PASS | 4 × `x-implementation-status: blocked`, each naming G-18 |
+| The five resolved mutations carry a specified guard | PASS | 2 × DELETE `expectedRevision` query, 1 × stop `expectedGeneration` body, 2 × refresh cited job guard |
+| The reserved sentinel is refused by the schema | PASS | `replace.value` = `not: {const: __RAYLANE_SECRET_UNCHANGED_V1__}` |
+| The sentinel is refused, mask-like strings are not | PASS | jsonschema vectors: exact sentinel rejected; 5 near-misses and 6 mask-like strings accepted |
+| G-17 is closed | PASS | reserved sentinel fixed by 01; the "typed UI unchanged state" premise removed |
 | `403` on every mutation | PASS | 14/14 |
 | `413` on every body-accepting operation | PASS | 8/8 |
 | Response code lists in numeric order | PASS | 21/21 |
 | The three false claims are gone | PASS | no "no secret value may appear here", no "Writes never accept a masked placeholder", no "Every mutation is optimistic-concurrency checked" |
-| Correction corpus | PASS | 73 cases, 0 failures, exit 0 |
-| Component schemas are valid JSON Schema (Draft 2020-12) | PASS | 35/35 `Draft202012Validator.check_schema` |
+| Correction corpus (previous round, updated to the new expected state) | PASS | 75 cases, 0 failures, exit 0 |
+| Patch corpus (this round) | PASS | 83 cases, 0 failures, exit 0 |
+| Component schemas are valid JSON Schema (Draft 2020-12) | PASS | 36/36 `Draft202012Validator.check_schema` |
 | Full OpenAPI conformance validation | **NOT_RUN** | no OpenAPI validator installed; none was installed |
 
 The correction corpus covers the structure and the invariants, and its
@@ -283,9 +314,12 @@ The correction corpus covers the structure and the invariants, and its
   (G-17);
 - the release-protection route and the four item GETs are absent from
   `paths`;
-- the nine mutations without a revision guard carry an explicit
-  implementation-status marker rather than being silently covered by the
-  PATCH bodies (G-18);
+- the four creates carry an explicit implementation-status marker rather
+  than being silently covered by the PATCH bodies, and the other five
+  mutations carry a written-down guard (G-18);
+- the reserved sentinel is refused while near-miss and mask-like strings
+  are accepted, checked with a real JSON Schema validator rather than in
+  prose (G-17, closed);
 - the accepted A04 session values (idle 15 min, absolute 12 h, re-login
   after restart) are recorded, the prohibition on losing unsaved edits is
   recorded with them, and the session gaps are stated to be independent of
@@ -304,9 +338,8 @@ conformance.
   decided.
 - The capability profile, and therefore the concrete node fields, the
   write-side validation and the read-side filter (G-11, **blocking**).
-- The masked-placeholder constant and the typed UI unchanged state (G-17).
-- The optimistic-revision guard for creates, deletes, the runtime stop and
-  the refreshes (G-18).
+- The optimistic-revision guard for the four creates (G-18). G-17 is
+  closed: the reserved sentinel is fixed.
 - The release-protection operation and its confirmation delivery (G-07).
 - Every gap listed above.
 
@@ -319,22 +352,44 @@ narrow:
   `NodeFields`, that the write-side capability validation and the read-side
   filter are named as prerequisites, and that G-11 is marked **blocking**
   rather than TODO. That no per-protocol field model was invented.
-- **S2** — that the artifact no longer claims the union rejects a masked
-  placeholder, that the negative corpus demonstrates the gap rather than
-  asserting it away, and that no placeholder constant was invented.
-  That G-17 names both the reserved constant and the typed UI unchanged
-  state.
+- **S2** — that the reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__` is
+  excluded from `replace.value` by an explicit `not: {const: ...}` rule,
+  that the refusal is EXACT equality only, and that mask-like strings stay
+  legitimate. That the previous "typed UI unchanged state" premise and the
+  previous "the read API cannot tell the client" premise are both gone.
+  That G-17 is closed.
 - **S3** — that the release route is gone from `paths`, that
   `ReleaseProtectionRequest` is clearly marked as an unused reference, and
   that `expectedGeneration` is required.
 - **C1** — that the four item GETs are gone and that nothing outside the
   feature contract's operation table was added in their place. That
   `ConfigRevision` was not deleted but demoted to a reference schema.
-- **C2** — that the nine unguarded mutations carry an explicit
-  implementation-status marker naming G-18, that the four PATCH bodies still
-  require `expectedRevision`, and that no concurrency design was chosen.
+- **C2** — that the four creates carry an explicit implementation-status
+  marker naming G-18, that the five resolved mutations carry a written-down
+  guard, that the four PATCH bodies still require `expectedRevision`, and
+  that no concurrency design was chosen.
 - **C3** — that `403` is on every mutation, that `413` is on every
   body-accepting operation, and that no HTTP behaviour is claimed.
+- **P2** — that the two DELETEs take a REQUIRED `expectedRevision` query
+  parameter, that the parameter carries no secret, and that 409 covers the
+  stale-revision case.
+- **P3** — that the runtime stop takes a REQUIRED `expectedGeneration` body
+  with the safe-integer bound, that 409 covers the generation mismatch, and
+  that the stop carries NO release field and does not depend on the release
+  flow (G-07).
+- **P4** — that the two refreshes still carry the normative job guard — one
+  running job per source (busy 409) and the captured-revision commit check
+  — and that the artifact does NOT claim this busy lock alone satisfies the
+  contract's all-mutations rule; the settings themselves are guarded by
+  their own PATCH.
+- **P5** — that the create note names the unresolved scope precisely
+  (unguarded vs collection revision), that it states the domain model has no
+  collection-level revision entity, and that it does NOT resolve the choice
+  by assuming the unguarded reading.
+- **Counters** — that the document's counts are right: 2 deletes + 1 stop +
+  2 refreshes = 5 resolved, 4 creates = 4 still marked, 9 in total.
+- That G-11, the A04 gaps and the storage/backup gaps are untouched by this
+  patch.
 - That the accepted A04 session values are recorded, that the prohibition on
   losing unsaved edits is recorded with them, that the session gaps are
   stated to be independent of the backup A/B choice, and that no claim is
@@ -347,8 +402,8 @@ narrow:
 - The gaps that block the apply operation are resolved by the Chief
   Architect's decision on artefact delivery, and separately by the A04
   decision.
-- G-11, G-17 and G-18 are prerequisites for any downstream implementation
-  of this contract.
+- G-11 and G-18 are the remaining prerequisites for any downstream
+  implementation of this contract. G-17 is closed.
 - Agent 04 runs independent contract checks.
 - T005 stays **partial** until the gap matrix is empty enough for the
   downstream implementation to start.

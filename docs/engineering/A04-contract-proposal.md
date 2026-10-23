@@ -1,6 +1,6 @@
-# A04 — revised security-contract proposal (r2)
+# A04 — security-contract proposal (r3: scoped session-policy consent)
 
-**PROPOSED, не CONFIRMED. A04 OPEN.** Researcher 05; 2026-10-23.
+**Частичный пользовательский consent; остальные defaults PROPOSED. A04 OPEN.** Researcher 05; 2026-10-23.
 Corrections to target `427a9de4a72af848dacb3496a466c83da1e46ec5`.
 Assignment/research base исходного предложения: `5774d00`; HEAD до правок:
 `427a9de`. Фактический parent нового commit сообщается после commit.
@@ -9,7 +9,28 @@ research R-05/R-06; control-plane/network-agent contracts. Это предлож
 не изменение архитектуры, schema, contracts, tasks или кода. Сеть: 0.
 Никакие sessions/secrets/GC не созданы и не запущены.
 
-## 1. Fixed technical constants — все PROPOSED
+## 0. Источник и точный scope согласия
+
+Consent source: пользовательский input `in9a75e5c3028a907d`, ответ
+`accept-session-policy-preserve-edits`; передан оркестратором 01 в задании
+T005-A04-consent-record. Correction target/base: `d0ae30a` (HEAD проверен).
+Это запись полученного согласия, не самостоятельная приемка Researcher.
+
+**USER-ACCEPTED только:** session idle 15 min, polling/read не продлевают idle;
+absolute 12 h; re-login после control-plane restart; допустимость ограничения
+НОВОГО login под LAN DoS. Точные limiter constants, activity allowlist и остальные
+технические детали остаются PROPOSED, не превращаются в согласованные defaults.
+
+**Обязательное условие UX:** потеря НЕСОХРАНЕННЫХ правок НЕ разрешена. До реализации
+UI должен быть определен и проверен механизм сохранения/восстановления правок при
+expiry, re-login и restart. Данный consent НЕ выбирает механизм и НЕ разрешает
+автоматическое хранение секретов в localStorage, browser storage или журналах.
+Не ослаблять expiry/auth ради сохранения правок; secret handling остается FR-019/021.
+
+Consent НЕ выбирает backup A/B, НЕ разрешает automatic deletion, не вводит новую
+архитектуру, features или UI knobs. Backup-live schema/GC остаются BLOCKED.
+
+## 1. Fixed technical constants — статус указан ниже, остальные PROPOSED
 
 Новых admin UI knobs/settings нет. Значения фиксируются в security contract
 только после review/решения 01. Для фиксированного параметра min=max=default;
@@ -18,8 +39,8 @@ research R-05/R-06; control-plane/network-agent contracts. Это предлож
 
 | ID | Параметр / единицы | Default = min = max | Граница и rationale |
 |---|---|---|---|
-| P1 | Session idle, s | 900 | Sliding deadline только для activity по §2; polling не продлевает. Ограничивает оставленную панель. |
-| P2 | Session absolute, s | 43 200 | От login, без продления; ограничивает постоянно используемый украденный cookie. |
+| P1 | Session idle, s | 900 | USER-ACCEPTED: 15 min, polling/read не продлевают. Точный activity allowlist §2 PROPOSED; UX preservation обязателен (§0). |
+| P2 | Session absolute, s | 43 200 | USER-ACCEPTED: 12 h absolute. Детали enforcement остаются PROPOSED; UX preservation обязателен (§0). |
 | P3 | Session token entropy, bits | 128 | CSPRNG random token; в БД SHA-256 hash, cookie Secure/HttpOnly/SameSite=Strict; без plaintext/logging. |
 | P4 | Bootstrap TTL, s | 600 | Локальная issuance ДО появления admin; одноразовый random token; TTL не настройка существующего admin. |
 | P5 | Release confirmation TTL, s | 120 | Random token, bound к session + ActiveState generation + protection state; одноразовый. |
@@ -49,8 +70,10 @@ contract; новые API endpoints этим не добавляются.
 GET/HEAD/OPTIONS не activity. В частности `/operations` (включая `/operations/{id}`),
 `/state`, liveness, фоновые refresh/status requests никогда не продлевают idle;
 ошибки 4xx/5xx/CSRF failure также не activity. Простое чтение/долгое редактирование
-без сохранения не продлевает session — явный UX tradeoff; после expiry нужен login,
-не скрытый heartbeat. Login создает новую session, а не оживляет старую.
+без сохранения не продлевает session; после expiry нужен login, не скрытый heartbeat.
+Это НЕ согласие на потерю несохраненных правок: защита правок должна быть определена
+до UI, без автоматического plaintext-secret persistence (§0). Login создает новую
+session, а не оживляет старую.
 
 Valid iff not revoked AND now < idle_deadline AND now < absolute_deadline;
 равенство deadline уже expired. Request проверяется до приема команды. Команда,
@@ -76,7 +99,9 @@ Backward jump >300 s относительно persistent watermark/наблюд�
 откате effective wall time = max(observed wall, watermark), а monotonic lifetime не
 увеличивается. Запрет новых issuance при недостоверном времени до его исправления.
 
-При КАЖДОМ service restart старые sessions/bootstrap/confirmation tokens инвалидны;
+USER-ACCEPTED: после control-plane restart требуется re-login; несохраненные правки
+должны быть защищены (§0). PROPOSED enforcement: при КАЖДОМ service restart старые
+sessions/bootstrap/confirmation tokens инвалидны;
 отмена фиксируется до открытия auth API, idle/absolute не восстанавливаются «с нуля».
 Это консервативный пересмотр исходного предложения о persist-through-restart:
 persistent watermark нужен и после restart, чтобы откат часов не обходил policy.
@@ -129,7 +154,9 @@ Established valid sessions, authenticated management operations и liveness НЕ
 попадают в unauthenticated login limiter. Login с отдельного peer не наследует
 чужой IP bucket. Общий NAT peer может мешать admin на том же IP; распределенный
 flood может исчерпать bounded global capacity. Абсолютной login availability под
-LAN DoS НЕ обещаем. Это residual risk для 03/01, не «local console все решает».
+LAN DoS НЕ обещаем. USER-ACCEPTED: ограничение НОВОГО login под LAN DoS допустимо;
+это НЕ acceptance точных P6 чисел или доказательство availability действующей session.
+Остаточные technical risks остаются для 03/01, не «local console все решает».
 Нужны tests: отсутствие account lockout, refill несмотря на flood, доступ действующей
 session, bounded CPU/queue, возможность нового login после прекращения flood.
 Локальная консоль — диагностика/исправление storage/time и разрешенное service
@@ -279,5 +306,20 @@ spec FR-019/021. Не выдаем чужие review checks за собстве�
 Post-edit diff-check, staged-scope check и immutable commit/parent приводятся в
 completion report после исполнения. Эта запись не предсказывает их результат.
 
-**A04 OPEN; APPROVED/Done не присваивается.** Все значения PROPOSED; readiness,
-clock recovery, disk-full behavior и race safety пока не испытаны.
+## 12. Consent-record disposition
+
+T005-A04-consent-record: записан input ID и точный scope (§0); P1/P2 policy,
+restart re-login и допустимость ограничения нового login под LAN DoS отмечены
+USER-ACCEPTED. Все остальные defaults/mechanics остаются PROPOSED; blanket-статус
+«все PROPOSED» заменен только в пределах согласия. UX preservation — обязательное
+условие до UI; механизм не выбран и не реализован. Backup A/B не выбран,
+automatic deletion не разрешена, backup-live schema/GC BLOCKED.
+
+Дополнительная будущая проверка (NOT_RUN): несохраненные правки переживают expiry,
+re-login и control-plane restart без неразрешенного secret persistence/утечки и без
+обхода auth; при отсутствии согласованного механизма затронутая UI реализация BLOCKED.
+Это acceptance requirement, не создание нового endpoint или browser storage feature.
+
+**A04 OPEN; APPROVED/Done не присваивается.** USER-ACCEPTED только scope §0;
+остальные параметры PROPOSED; readiness, clock recovery, disk-full behavior,
+race safety и защита несохраненных правок пока не испытаны.

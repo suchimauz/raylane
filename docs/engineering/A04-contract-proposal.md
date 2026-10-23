@@ -1,161 +1,283 @@
-# A04 — contract proposal: bounded session / confirmation / retention parameters
+# A04 — revised security-contract proposal (r2)
 
-Status: PROPOSED (nothing here is CONFIRMED; product/architecture decisions remain with
-01 and, where marked, require a user decision). Author: agent 05 (Researcher).
-Date: 2026-10-23. Base: 5774d00. Doc-only research; network 0 requests; no sessions,
-secrets, GC or code created/executed.
-Scope: FR-019/FR-021, US2; data-model entities Admin/Session/SecretRef/ConfigRevision;
-analysis item A04; research R-06; contracts control-plane.md / network-agent.md.
-Closes the A04 gap "retention policy and session expiry described without concrete
-durations" — as a proposal for 03 review, then 01 decides whether a user decision is
-needed. This document changes no product decision and no contract/schema/code/tasks.
+**PROPOSED, не CONFIRMED. A04 OPEN.** Researcher 05; 2026-10-23.
+Corrections to target `427a9de4a72af848dacb3496a466c83da1e46ec5`.
+Assignment/research base исходного предложения: `5774d00`; HEAD до правок:
+`427a9de`. Фактический parent нового commit сообщается после commit.
+Scope: FR-019/021, US2; Admin/Session/Secret/ConfigRevision; analysis A04;
+research R-05/R-06; control-plane/network-agent contracts. Это предложение,
+не изменение архитектуры, schema, contracts, tasks или кода. Сеть: 0.
+Никакие sessions/secrets/GC не созданы и не запущены.
 
-## 1. Parameter table (all values PROPOSED)
+## 1. Fixed technical constants — все PROPOSED
 
-Units: seconds unless stated. "nonconfigurable" = hard constant in code, no admin
-setting (reason given). Configurable parameters live in the security contract schema
-(T005/T007/T008 area), validated to stay within [min, max].
+Новых admin UI knobs/settings нет. Значения фиксируются в security contract
+только после review/решения 01. Для фиксированного параметра min=max=default;
+изменение — новая согласованная версия контракта, не пользовательская настройка.
+Это не обещание производительности и не результат испытаний.
 
-| # | Parameter | Default | Min | Max | Configurable? | Scope / expiry boundary | Rationale |
-|---|---|---|---|---|---|---|---|
-| P1 | Session idle expiry | 900 s (15 min) | 300 s | 86 400 s | yes (admin) | Sliding: any authenticated request that passes CSRF/origin resets the idle deadline; idle deadline is per-session, stored server-side | Single admin on trusted LAN; 15 min matches common admin-console practice; short enough to bound an abandoned unlocked session, long enough for config work |
-| P2 | Session absolute expiry | 43 200 s (12 h) | 3 600 s | 604 800 s (7 d) | yes (admin) | Fixed at login; NOT extended by activity; on expiry the session is invalid regardless of idle state | Bounds stolen-cookie lifetime even under continuous use; 12 h covers a work day without re-login friction |
-| P3 | Session cookie/token | 128-bit random, stored as SHA-256 hash server-side; cookie Secure/HttpOnly/SameSite=Strict | nonconfigurable | — | no (reason: cryptographic floor, not a policy knob) | Token value never stored plaintext, never logged; rotation on privilege-relevant change (password change, release-protection grant) | R-06: sessions and secret transfer protected; hash-at-rest limits DB-read impact |
-| P4 | Bootstrap one-time token TTL | 600 s (10 min) | 300 s | 3 600 s | yes (admin at bootstrap issuance only) | From issuance over the authorized local (loopback) channel; single-use: consumed atomically with admin creation; expiry or consumption closes bootstrap permanently (no re-open without new local issuance) | FR-021: protected initial setup, no shared factory password; short TTL bounds an unattended console window |
-| P5 | Release-protection confirmation token TTL | 120 s | 60 s | 600 s | no (reason: safety-critical destructive action; fixed short window avoids policy drift) | Bound to: admin session id, target state hash (active revision id + protection state), single use; replay or state change invalidates; re-authorization (password) required at issuance (control-plane.md:14) | Stale-confirmation replay must fail; binding to state hash prevents confirm-A-apply-B |
-| P6 | Login rate limit | 5 failures / 300 s per source IP AND per account, lockout 300 s | lockout min 60 s | max 3 600 s | lockout configurable; attempt count nonconfigurable (reason: brute-force floor) | Failure counters decay after window; successful login clears per-IP counter, NOT the per-account counter during lockout | LAN-only exposure but compromised-LAN-device scenario exists |
-| P7 | SecretRef retention (unused secrets) | no time-based deletion; reference-counted only | — | — | nonconfigurable (reason: time-based secret GC can destroy rollback capability — see §3) | A SecretRef is deletable ONLY when referenced by: no active revision, no current draft, no in-flight apply/rollback journal entry, no retained revision (P8), no retained backup metadata. Deletion is a transaction: mark-deleted → verify zero refs in same tx → delete payload | data-model.md:33: cleanup only after absence of all live revision/backup-retention refs |
-| P8 | ConfigRevision retention | keep ALL active+rollback chain; non-active, non-rollback drafts older than 2 592 000 s (30 d) may be compacted | 7 d | unlimited ("keep forever" = compaction off) | yes (admin); compaction = delete draft metadata but KEEP an audit stub (id, timestamp, actor, result) | Never deletes: the active revision; the last-known-good rollback revision; any revision referenced by an in-flight operation or retained backup | R-05: immutable revisions; failure analysis needs history; bounded growth |
-| P9 | Audit log retention | 15 768 000 s (≈6 months) | 30 d | unlimited | yes (admin) | Time-based; deletion in chronological batches in one transaction per batch; secrets never in audit (FR-019) so audit deletion loses history only | Audit supports security review of release-protection and admin actions; unbounded growth on a router-class device is a real constraint |
-| P10 | Session storage cleanup sweep interval | 60 s | 30 s | 600 s | no (reason: internal hygiene, not policy) | Expired sessions removed lazily on access AND by sweep; sweep failure never blocks request path (log + retry next tick) | Prevents unbounded session-table growth |
-
-## 2. Semantics and edge cases (expected results for future tests)
-
-### 2.1 Session expiry (P1/P2)
-- Idle vs absolute are independent deadlines: session valid iff now < min(idle_deadline,
-  absolute_deadline) and not revoked.
-- Expired session request → 401, cookie cleared, generic response (no "expired vs
-  invalid" distinction to unauthenticated caller).
-- Revoked session (logout, password change, admin-triggered revocation) → same 401;
-  revocation is immediate (server-side check every request; no cache window).
-- Parallel sessions: allowed (single admin may use two browsers); each has its own
-  deadlines; password change revokes ALL sessions except the one performing the change.
-- Time jump (clock moved forward/backward): expiry comparisons use the monotonic
-  server clock for durations where available; stored deadlines are wall-clock UTC.
-  Forward jump past deadlines → sessions expire (fail-closed, acceptable). Backward
-  jump → sessions live LONGER than intended (fail-open risk): mitigation = store
-  last-observed wall clock; on backward jump > 300 s, treat all sessions as expired
-  (fail-closed) and log audit event. PROPOSED; needs user decision only if product
-  wants fail-open instead (recommend fail-closed).
-- Server restart: sessions persist in SQLite; restart does NOT extend deadlines;
-  on boot, expired rows swept. Management path after restart = fresh login (no
-  recovery backdoor).
-
-### 2.2 Bootstrap (P4)
-- Token valid iff: unconsumed AND now < issued+TTL AND channel is the authorized
-  local channel. Any other use → generic failure, audit event, counter incremented.
-- After successful admin creation, bootstrap endpoint permanently disabled for the
-  instance lifetime (DB flag in same transaction as admin insert).
-- Expired unused token → bootstrap returns "not available"; re-issuance requires the
-  local channel again (no remote recovery — fail-closed).
-
-### 2.3 Release-protection confirmation (P5)
-- Token = HMAC or random 128-bit bound to (session id, active revision id, current
-  protection state, expiry). Stored hashed; single use.
-- Stale confirmation replay (same token twice) → 409/410, audit event, no state change.
-- State change between issuance and use (new revision applied by parallel session) →
-  token invalid → 409 with reason "state changed".
-- Expired token → 410-style failure; operator must re-confirm (re-authorize).
-
-### 2.4 Retention / cleanup (P7–P10)
-- Cleanup ordering (atomicity): all retention deletions run as
-  (a) compute candidate set, (b) inside ONE SQLite transaction: re-verify references
-  under the write lock, (c) delete payloads, (d) insert audit stub. Crash between (c)
-  and (d) is safe: worst case is an unreferenced payload re-collected next sweep —
-  never a referenced payload deleted, because re-verification happens in-transaction.
-- Reference race: a draft created concurrently referencing a SecretRef that is a
-  deletion candidate → the draft insert takes the write lock first (or fails
-  validation); the cleanup transaction re-checks references under the same lock, so
-  the race resolves to "secret kept" (fail-safe direction).
-- Pinned references are NEVER deleted: active revision, current draft, in-flight
-  apply/rollback journal, rollback revision, backup-related live refs. This is a hard
-  rule, not a parameter.
-- Crash cleanup: on boot, reconciliation marks interrupted in-flight operations
-  failed (R-05 journal); their SecretRefs/refs return to normal retention evaluation
-  — no special "crash GC".
-- What retention does NOT do (needs separate product decision if wanted):
-  deleting backup FILES from admin-managed storage; deleting audit stubs of compacted
-  drafts; any history-loss feature ("forget that revision existed"). These lose
-  history/backups and are OUT of this proposal — explicit user decision required.
-
-### 2.5 Negative-test vectors (to be implemented as tests in T007/T008; NOT_RUN now)
-1. Expired idle session used after 901 s of inactivity → 401; same session with
-   activity at 899 s → 200 and idle deadline slid.
-2. Absolute expiry: continuous activity for 12 h + 1 s → 401 despite activity.
-3. Revoked session: logout then reuse cookie → 401; parallel second session still
-   valid until its own expiry; password change kills both except initiator.
-4. Clock: wall clock set +1 h → all sessions expired (fail-closed); wall clock set
-   -1 h (> 300 s backward) → all sessions expired + audit event.
-5. Bootstrap: token at TTL+1 s → rejected; token reused after success → rejected;
-   token used from non-local channel → rejected; bootstrap after admin exists →
-   permanently disabled.
-6. Release protection: confirmation token replayed → rejected + audit; token used
-   after intervening apply (state hash mismatch) → 409; token at TTL+1 s → rejected.
-7. Retention race: delete-candidate SecretRef + concurrent draft referencing it →
-   secret survives; SecretRef referenced only by a compacted draft's audit stub →
-   stub is NOT a live ref → payload deletable ONLY if no other live ref (audit stubs
-   hold no payload references by design — flagged for 03 review).
-8. Crash: kill between payload delete and audit stub insert → next sweep re-collects
-   candidate safely; no referenced payload lost (property test over op orderings).
-9. Login rate limit: 6th failure within window → lockout; success during lockout from
-   same IP still rejected until lockout expiry; counters don't leak via timing
-   (constant-time response shape).
-10. Restore/backup: restore creates draft only (FR-021); restored draft's SecretRefs
-    count as live refs → retention must not collect them while draft exists.
-
-## 3. Design rationale highlights
-
-- Reference-counted (not time-based) secret retention: time-based deletion can break
-  rollback (old-but-pinned revision references a secret) and backups. The cost is
-  storage of unused secrets until last reference drops — acceptable at this scale.
-- Fail-closed on clock anomalies and bootstrap: every ambiguity resolves to
-  "re-authenticate / re-issue locally", never to extended trust.
-- Nonconfigurable floors: token entropy, attempt counts, confirmation TTL bounds —
-  safety parameters are code constants so a misconfiguration cannot weaken them.
-- Management path on any failure: local console remains able to issue bootstrap /
-  inspect state; no remote recovery path exists by design (FR-021 LAN-only).
-
-## 4. Explicitly out of scope / open for 01
-
-- Backup file lifecycle (deletion of old backups) — product decision, loses history.
-- Whether admin may configure P1/P2/P9 at all vs fixed defaults — currently PROPOSED
-  configurable within bounds; 01 may simplify to fixed.
-- Audit stub reference semantics (vector 7) — needs 03 confirmation that audit stubs
-  holding no payload refs matches the intended data-model.
-- Exact lockout/backoff curve beyond the stated window — implementation detail,
-  bounded by P6.
-
-## 5. Checks
-
-| command | exitCode | executedAt | artifactPath |
+| ID | Параметр / единицы | Default = min = max | Граница и rationale |
 |---|---|---|---|
-| `git log --oneline -2; git status --porcelain` | 0 | 2026-10-23T19:40Z | (stdout) base 5774d00, tree clean |
-| `grep -n A04 specs/001-selected-connections/analysis.md` | 0 | 2026-10-23T19:40Z | (stdout) A04 requirement text |
-| `grep session/retention data-model.md, research.md, contracts/*, spec.md` | 0 | 2026-10-23T19:41Z | (stdout) source requirements cited above |
-| test commands | NOT_RUN | — | — | no tests exist yet (T007/T008 will implement); per instructions, vectors listed in §2.5 only |
+| P1 | Session idle, s | 900 | Sliding deadline только для activity по §2; polling не продлевает. Ограничивает оставленную панель. |
+| P2 | Session absolute, s | 43 200 | От login, без продления; ограничивает постоянно используемый украденный cookie. |
+| P3 | Session token entropy, bits | 128 | CSPRNG random token; в БД SHA-256 hash, cookie Secure/HttpOnly/SameSite=Strict; без plaintext/logging. |
+| P4 | Bootstrap TTL, s | 600 | Локальная issuance ДО появления admin; одноразовый random token; TTL не настройка существующего admin. |
+| P5 | Release confirmation TTL, s | 120 | Random token, bound к session + ActiveState generation + protection state; одноразовый. |
+| P6 | Login admission | 5 attempts/IP burst; refill 1/60 s; max 2 concurrent password verifications; max 1 waiting request | Только per-source admission и глобальное ограничение работы; НЕТ account-wide unauthenticated lockout. Подробнее §4. |
+| P7 | Secret payload deletion | OFF | Нет разрешения на cleanup. Reachability/tx алгоритм §5 — только design proposal; backup semantics не решены → затронутые schema/GC BLOCKED. |
+| P8 | Revision/draft retention deletion | OFF | Никаких 30-day compactions; все revision/draft сохраняются до отдельного продуктового решения. |
+| P9 | Audit retention deletion | OFF | Никакого six-month удаления/stubs вместо history. Audit сохраняется до отдельного продуктового решения. |
+| P10 | Expired auth-record sweep, s | 60 | Только истекшие session/confirmation/bootstrap token records, не audit/revisions/secrets. Expiry проверяется на запросе независимо от sweep. |
 
-## 6. Risks
+OFF — reason nonconfigurable: удаление history/backup требует отдельного решения,
+не технического duration default. Это НЕ разрешение на бесконтрольный silent disk
+growth: backpressure/management path — §7. Согласия на P8/P9 сейчас не запрашиваем.
 
-- If 03 finds audit stubs SHOULD hold references, P8/vector 7 change (storage cost up).
-- Backward-clock fail-closed may surprise during VM snapshots; documented, admin
-  re-login is the recovery.
-- All durations are design proposals; load testing may tighten P1/P6.
+## 2. Session activity contract (P1–P3)
 
-## 7. Questions for 01
+Server-side route classification, default **NO_ACTIVITY**. Клиентский header
+«human action» не принимается как доказательство. Activity только при всех условиях:
+1. session валидна ДО выполнения операции;
+2. CSRF/origin и authorization успешны;
+3. это allowlisted явная mutation черновика либо пользовательская команда
+   apply/stop/backup-export/restore/release-confirmation в существующем API;
+4. команда принята сервером (успешный commit или 202 с durable operation id).
+В этом случае idle deadline обновляется в той же транзакционной границе принятия
+команды, с cap по absolute deadline. Конкретный route allowlist должен войти в T005
+contract; новые API endpoints этим не добавляются.
 
-1. P1/P2/P9 configurable-within-bounds or fixed constants? (proposal: configurable)
-2. Confirm fail-closed on backward clock jump > 300 s.
-3. Backup file lifecycle: keep out of scope (proposal) or add a separate user
-   decision item?
+GET/HEAD/OPTIONS не activity. В частности `/operations` (включая `/operations/{id}`),
+`/state`, liveness, фоновые refresh/status requests никогда не продлевают idle;
+ошибки 4xx/5xx/CSRF failure также не activity. Простое чтение/долгое редактирование
+без сохранения не продлевает session — явный UX tradeoff; после expiry нужен login,
+не скрытый heartbeat. Login создает новую session, а не оживляет старую.
 
-A04 NOT closed by this document; awaits 03 review, then 01 decision routing.
+Valid iff not revoked AND now < idle_deadline AND now < absolute_deadline;
+равенство deadline уже expired. Request проверяется до приема команды. Команда,
+принятая до expiry, может завершиться после него под своим journal/in-flight pins;
+последующее чтение результата требует действующей session.
+
+Expired/revoked/invalid → одинаковый generic 401 и очистка cookie. Revocation
+проверяется на каждом запросе без кеш-окна. Parallel sessions разрешены независимо;
+logout затрагивает текущую; password change атомарно отзывает остальные и ротирует
+текущую без продления ее absolute lifetime. Session rotation отзывает старый token
+и связанные confirmation tokens; новые права/сроки этим не создаются.
+
+## 3. Clock, restart, bootstrap, confirmation
+
+### Clock/restart — fail-closed, persistent
+В процессе durations используют monotonic clock и wall UTC deadline: истечение
+по ЛЮБОМУ из двух часов завершает session; forward wall jump за deadline не отменяется
+последующим backward jump. Persistent security wall-clock high-water mark обновляется
+в SQLite при принятии auth activity/issuance и checkpoint раз в 60 s. Не допускается
+уменьшение watermark; clock write failure → auth mutation отказ, не продление trust.
+Backward jump >300 s относительно persistent watermark/наблюдаемого в процессе
+максимума отзывает sessions и ephemeral tokens, пишет redacted audit; при меньшем
+откате effective wall time = max(observed wall, watermark), а monotonic lifetime не
+увеличивается. Запрет новых issuance при недостоверном времени до его исправления.
+
+При КАЖДОМ service restart старые sessions/bootstrap/confirmation tokens инвалидны;
+отмена фиксируется до открытия auth API, idle/absolute не восстанавливаются «с нуля».
+Это консервативный пересмотр исходного предложения о persist-through-restart:
+persistent watermark нужен и после restart, чтобы откат часов не обходил policy.
+Если запись revocation/clock state невозможна, auth API fail-closed; management
+liveness доступен без секретов. Bootstrap после admin creation НЕ открывается.
+DB/snapshot restore: до открытия auth middleware отозвать старые auth tokens;
+если это нельзя гарантировать — auth API BLOCKED, не считать старые cookie валидными.
+Это не новая remote recovery функция; корректный login после исправления storage/time
+остается штатным путем. Не обещать HTTP login при физически неработающей БД.
+
+### Bootstrap (P4)
+До admin локальная консоль/защищенный local channel выдает random 128-bit token
+на 600 s, сервер хранит hash. Новая локальная issuance отзывает предыдущий token.
+Endpoint доступен только по принятому authorized local channel (не LAN HTTP).
+Consume token + insert admin + permanent bootstrapConsumed — одна SQLite transaction.
+Два конкурентных запроса: ровно один победитель. Expired token требует новой локальной
+issuance; после admin creation повторная issuance запрещена, включая restart.
+Local bootstrap НЕ способ password recovery существующего admin.
+
+### Release protection (P5)
+Однозначно **CSPRNG random 128-bit token**, не «HMAC или random»; хранится hash и
+binding tuple (session id, ActiveState.generation, protection state, expiry, used).
+Не добавляем password re-entry как согласованное продуктовое требование: действующая
+авторизация повторно проверяется при выдаче и использовании, как в contract.
+При consume атомарно повторно проверить session, deadlines, generation, protection
+state и unused flag; отметить used и durable принятие release operation.
+Проверка актуального generation/protection state также обязательна на helper boundary,
+чтобы очередь не дала снять уже изменившуюся защиту. Changed generation (даже если
+revision id прежний), logout/rotation/revocation/restart/expiry → token недействителен.
+Replay → отказ без второго эффекта; stale state → authenticated 409; expiry/invalid
+→ согласуемый contract error, не новый публичный HTTP-код. Дублирование delivery уже
+принятой operation допустимо только идемпотентно по journal id, не повторным consume.
+Guard самопроизвольно не снимается при ошибках storage/time/auth.
+
+## 4. P6: anti-bruteforce без account-wide unauthenticated lockout
+
+Удален исходный account-wide 5 failures → lockout: атакующий не должен иметь
+возможность навсегда блокировать единственного admin неверными паролями.
+Per-IP token bucket из P6 применяется ДО password hash; адрес — фактический peer,
+не произвольный X-Forwarded-For. IP bucket не продлевает ban на каждом rejected
+request: refill идет независимо от атакующего. Хранилище buckets bounded: 1 024
+entries, неистекшие entries не вытесняются для обхода лимита; overflow новых peers
+получает краткий generic busy. Idle entries удаляются после полного refill.
+Глобальный concurrency cap/очередь ограничивают CPU/memory, не создают persistent
+account-disabled flag. При исчерпании очереди fail-fast generic retry response без
+достоверного account-existence сигнала. Неверный username проходит эквивалентный
+password-hash путь после admission, без вывода credentials в audit.
+
+Established valid sessions, authenticated management operations и liveness НЕ
+попадают в unauthenticated login limiter. Login с отдельного peer не наследует
+чужой IP bucket. Общий NAT peer может мешать admin на том же IP; распределенный
+flood может исчерпать bounded global capacity. Абсолютной login availability под
+LAN DoS НЕ обещаем. Это residual risk для 03/01, не «local console все решает».
+Нужны tests: отсутствие account lockout, refill несмотря на flood, доступ действующей
+session, bounded CPU/queue, возможность нового login после прекращения flood.
+Локальная консоль — диагностика/исправление storage/time и разрешенное service
+administration, НЕ новый bypass/password-reset/remote recovery endpoint.
+
+## 5. Reachability и cleanup: порядок, ограничения, BLOCKED часть
+
+Сейчас P7/P8/P9 OFF. Даже будущая cleanup policy НИКОГДА не может удалять payload,
+достижимый из active, current draft, retained revision, in-flight apply/export/restore,
+rollback/reconciliation journal, previous-good revision или выбранных backup-live refs.
+Достижимость — по immutable snapshot/revision graph, а не ненадежному отдельно
+обновляемому refcount. AuditEvent содержит ids/result без секретов; по 03 audit stub
+не live SecretRef, НО это не разрешение стирать исходный revision ради stub.
+
+Если cleanup позже разрешен: candidate enumeration не дает права удаления. В одной
+SQLite write transaction повторно проверить ВСЕ roots, удалить только unreachable
+payload и записать redacted audit. Writer, pin insertion, restore-draft commit и
+cleanup сериализованы тем же write-lock discipline. Если GC выиграл раньше, новый
+reference creation проверяет payload existence и отказывает целиком, никогда не
+создает dangling ref. Если writer первым закрепил ref — GC его сохраняет.
+
+Crash до commit → полная rollback transaction (payload И audit); после commit →
+оба эффекта durable. Исходное «crash между delete и audit → re-collect» было неточно:
+при единой транзакции ни частичного delete, ни audit gap нет. In-flight pins нельзя
+снимать по timeout/PID. Restart сначала reconciles journal; incomplete apply/rollback
+не объявляется failed автоматически с освобождением refs. Неясность → pins сохранены,
+cleanup BLOCKED, management path/guard остаются по R-05.
+
+## 6. Backup-live: две альтернативы, НЕ архитектурное решение
+
+Уже принято: FR-021 требует encrypted backup с отдельной passphrase, ключ не рядом;
+restore проверяет envelope и создает draft БЕЗ apply. R-06/data-model дают BackupEnvelope,
+Secret и запрет cleanup при live revision/backup-retention refs; **BackupMetadata
+сущность в принятом data-model не объявлена**. Из этого нельзя вывести существующий
+каталог экспортов/его expiry или разрешение удалить backup files.
+
+| | A — self-contained encrypted export | B — persistent backup metadata/pinning |
+|---|---|---|
+| Payload | Все нужные snapshot config и secret values внутри AEAD envelope; SecretRef IDs экспортера не являются обязательной restore-зависимостью | Backup зарегистрирован, persistent metadata содержит roots/pinning до явного снятия регистрации |
+| Pins | Export capture + transient in-flight pin атомарны; pins сохраняются на весь read/encrypt/export operation и recovery. После доказанного complete/abort/reconciliation — снять pins, completed export не зависит от live SecretRef | Те же in-flight pins, плюс persistent backup-related roots; удаление регистрации требует отдельного policy и согласования потери защиты |
+| Restore | Проверить envelope/passphrase, импортировать секреты под новыми локальными refs и создать draft одной логической commit-границей. После успеха draft — live root | Нужно определить переносимость/поведение при потере исходной БД и metadata; одной ссылки на live SecretRef недостаточно для FR-021 backup с секретами |
+| Tradeoff | Меньше постоянных зависимостей и сущностей; loss exporter DB не должен мешать restore. Требуется доказать completeness secret closure | Управляемый backup catalog/history, но новая schema/registration lifecycle; рост retention и риск вечных pins |
+
+**Рекомендация, не решение:** A лучше соответствует переносимой резервной копии с
+секретами и уже принятому BackupEnvelope, без новой постоянной сущности. Но сам факт
+self-contained payload и точное завершение export необходимо закрепить архитектором
+в backup contract: encrypted envelope сам по себе не доказывает полноту payload.
+B требует Chief Architect до введения metadata/schema, плюс отдельного продукта
+решения о lifecycle/удалении history/backup. Ни A, ни B здесь не реализуются.
+До выбора 01/архитектора затронутые backup-live schema/SecretRef GC **BLOCKED**;
+консервативно сохранять refs. Нельзя превратить незарегистрированный export в тайную
+зависимость от исходного хранилища. Backup FILE deletion остается вне scope.
+
+## 7. Retention OFF: disk-full/backpressure и management path
+
+P8/P9 OFF не означает silent unlimited growth: нужны redacted storage-health warnings
+и bounded admission (PROPOSED reserve floor 64 MiB free filesystem bytes для новых
+revision/export/restore mutations). При free <64 MiB — не принимать новые такие
+операции, не менять active/draft; ранее принятые journal operations reconciled.
+Это admission watermark, не доказанная физическая reservation: совместный filesystem
+может заполниться между check и write. ENOSPC/SQLITE_FULL/IO error всегда обработать
+transactionally, без success response при недоказанном commit. Никакого auto-GC,
+удаления audit/history/backups ради места или fail-open release protection.
+
+Если audit/journal нельзя durable записать, отказать mutation и release-protection;
+не продолжать «без audit». Read-only management/state/liveness сохранять где storage
+позволяет; новые login требуют durable session state и при full storage могут
+отказать. Existing authenticated management reads не требуют audit write per read.
+При полном отказе БД нельзя обещать web management: локальная диагностика и явное
+освобождение места оператором вне этого scope; guard остается, active snapshot не
+стирается. Стенд должен доказать этот degraded path; эти меры не разрешают cleanup.
+
+## 8. Negative-test vectors — expected, все NOT_RUN
+
+Tests отсутствуют в baseline; ниже acceptance vectors для будущих T005/T007/T008,
+не команды к несуществующим файлам и не результаты выполнения.
+
+| # | Input / interleaving | Expected |
+|---|---|---|
+| 1 | Login t0; принята allowlisted save на t0+899 s | Idle переносится на +900 s, absolute остается t0+43 200 s; ошибка save не переносит |
+| 2 | Activity каждые 60 s до absolute boundary | На t0+43 200 s 401 независимо от активности; equality expired |
+| 3 | Logout/reuse, parallel sessions, password change/rotation | Старый cookie 401; независимая session живет до отзыва; password change отзывает остальные и старый current token, current absolute не растет |
+| 4 | Forward jump за deadline / backward >300 s / малый rollback | Forward expires; большой backward отзывает tokens и блокирует issuance при недостоверном времени; малый rollback не продлевает monotonic lifetime |
+| 5 | Expired bootstrap / remote channel / two concurrent consumes / restart после admin creation | Отказ/отказ/ровно один admin и один consume; bootstrap навсегда закрыт после admin |
+| 6 | Confirmation replay / same revision reapply с новой generation / logout / queued stale release | Не более одного эффекта; новая generation инвалидирует token даже при том же revision; helper отказывает stale state |
+| 7 | Future GC против draft reference insertion | Writer first → payload pinned; GC first → writer отказывает, dangling ref не создается; сейчас GC OFF |
+| 8 | Crash между delete/audit/commit будущего GC; crash apply с pins | До commit оба эффекта rolled back, после оба durable; unresolved journal сохраняет pins до reconciliation |
+| 9 | Лимит P6 и неправильный username/password | Bounded CPU/queue, generic response без account-existence oracle; secret values отсутствуют в audit |
+| 10 | Restore validated backup одновременно с cleanup candidate | Imported secret+draft atomic; нет промежуточного dangling ref, active не меняется; backup ambiguity не обходится |
+| 11 | Только GET /operations/{id}, /state, liveness каждые 5 s после login | Idle истекает через 900 s; polling не оживляет session; fake human-activity header игнорируется |
+| 12 | Атакующий циклически шлет ошибки в single-admin account | Нет account-wide lockout; отдельный peer допускается при свободной capacity; established management reads работают; local console не выдается за bypass; после flood/refill login восстанавливается, ошибки generic |
+| 13 | Export capture одновременно с будущим secret deletion | Capture/pin под write lock: pin first → GC сохраняет; GC first → export fails до принятия snapshot; выбранная A/B policy определяет момент освобождения, не таймер |
+| 14 | Persist watermark → restart → rollback clocks / старые cookies/tokens | Старые auth tokens инвалидны; persisted watermark проверен до auth issuance; write failure fail-closed; bootstrap не открывается заново |
+| 15 | <64 MiB / ENOSPC между check и commit / audit write fails | Backpressure, mutation не объявлена успешной, active/draft сохранены transactionally, guard остается; no destructive cleanup |
+| 16 | DB snapshot restore с прежними session tokens и clock state | До открытия auth старые tokens revoked; если revocation нельзя durable гарантировать, auth BLOCKED; restore конфигурации остается draft-only |
+
+## 9. Disposition review 03 (target 427a9de)
+
+Исходный report использует P1–P10, section notes и missing vectors 11–14, а не
+отдельные H/M finding IDs; ниже сохраняются именно эти идентификаторы.
+
+| ID | Disposition |
+|---|---|
+| P1 M | REVISED §2: server-side allowlist accepted explicit mutations only; polling/reads/errors не activity; vectors 1/11 |
+| P2 L | REVISED: fixed absolute 12h, без 7d UI bound/knob; tests 2/3 |
+| P3 L / §2.3 random ambiguity | REVISED: все токены random 128-bit, SHA-256 stored; HMAC alternative удалена |
+| P4 L | REVISED: local issuance ДО admin, 600s fixed; permanent bootstrapConsumed atomic; vector 5 |
+| P5 L | REVISED: session+generation+protection state, one-use; consume/helper recheck; vector 6 |
+| P6 M | REVISED §4: no account-wide unauthenticated lockout; per-peer bucket + bounded global concurrency; остаточный NAT/distributed DoS явно не скрыт; vectors 9/12 |
+| P7 backup-live | BLOCKED decision §6: A/B альтернативы; новая BackupMetadata не вводится; affected schema/GC запрещены до решения |
+| P8 H | WITHDRAWN: 30d draft compaction default и UI knob удалены; retention deletion OFF |
+| P9 H | WITHDRAWN: six-month audit deletion и UI knob удалены; OFF, product consent сейчас не запрашиваем |
+| P10 | RETAINED fixed 60s auth-record sweep; не GC данных/истории |
+| §2 clock persistence | REVISED §3: persistent high-water mark, restart revoke before auth, snapshot rollback tests 4/14/16 |
+| §2.4 crash semantics | CORRECTED §5: transaction rollback vs durable commit, никаких частичных delete/audit gap; journal pins не снимаются по факту crash |
+| Vector 7 audit stub | 03 подтверждает отсутствие SecretRef в AuditEvent; это принято как пояснение, но compaction/stub replacement больше НЕ предлагается |
+| Missing vectors 11–14 | ADDED §8 ровно с этими номерами; disk-full negative дополнительно 15; snapshot restore 16 |
+| Configurable settings surface | WITHDRAWN: только fixed PROPOSED constants, никакого admin UI/settings расширения |
+
+## 10. Remaining decision points / routing
+
+1. Chief Architect/01: выбрать A или B backup-live semantics; A рекомендована, не
+   принята. До этого затронутые schema/GC BLOCKED, а не A04 Done.
+2. 03/01: принять/скорректировать proposed activity allowlist, auth restart revocation,
+   P6 admission constants и disk-pressure floor. Это security-contract review,
+   не согласование новой UI настройки или recovery-функции.
+3. Distributed login-flood availability/NAT tradeoff требует проверки и acceptance;
+   bounded admission не доказывает гарантированной доступности нового login.
+4. History/backup deletion policy отдельно не расширяем и не запрашиваем сейчас:
+   P7/P8/P9 OFF. Если понадобится — отдельное продуктово-архитектурное решение.
+
+## 11. Evidence and checks
+
+Локальные источники: `.hyper/tmp/t005/T005-A04-review-REPORT.md` (03, target 427a9de),
+`specs/001-selected-connections/research.md` R-05/R-06,
+`data-model.md` Admin/Session/Secret/ConfigRevision/AuditEvent/BackupEnvelope и
+«Удаление и восстановление», contracts/control-plane.md и network-agent.md,
+spec FR-019/021. Не выдаем чужие review checks за собственные runtime tests.
+
+| command | exitCode | executedAt UTC | artifactPath / result |
+|---|---|---|---|
+| git log --oneline -3; git status --porcelain; git show -s --format='%H parent %P' HEAD | 0 | 2026-10-23 (начало revision turn; точное время не фиксировалось) | tool output: HEAD 427a9de, clean; parent 5774d00 |
+| sed -n '30,110p' .hyper/tmp/t005/T005-A04-review-REPORT.md | 0 | 2026-10-23 (точное время не фиксировалось) | review findings/vectors, local stdout |
+| cat specs/001-selected-connections/contracts/control-plane.md; cat specs/001-selected-connections/data-model.md; date -u +%FT%TZ | 0 | 2026-10-23T19:59:28Z | local stdout, source semantics checked |
+| runtime/unit/security/GC/session tests | NOT_RUN | — | proposal only; no implementation fixtures/commands established here |
+
+Post-edit diff-check, staged-scope check и immutable commit/parent приводятся в
+completion report после исполнения. Эта запись не предсказывает их результат.
+
+**A04 OPEN; APPROVED/Done не присваивается.** Все значения PROPOSED; readiness,
+clock recovery, disk-full behavior и race safety пока не испытаны.

@@ -1,9 +1,12 @@
-# Raylane — versions.lock (T001, G1) — revision 2 (T001-fix-r1)
+# Raylane — versions.lock (T001, G1) — revision 3 (T001-fix-r2 docs)
 
-Status: RESEARCH LOCK v2, verified 2026-10-23. Author: agent 05 (researcher).
-Revision 2 addresses review-round-1 findings H1–H4/M1–M7/L1–L2
-(docs/verification/T001-review-round1.md). Disposition per finding is in
-docs/verification/T001-research.md §9.
+Status: RESEARCH LOCK v3 (doc-level corrections over rev2 pins; pins unchanged),
+verified 2026-10-23. Author: agent 05 (researcher).
+Revision history: rev1 = 521b018 (research lock v1), rev2 = 4e98e02 (round-1 fixes),
+rev3 = corrections to review target 9dd2b1e — this file's rev3 content is identical
+to the rev3 record in docs/verification/T001-research.md; the commit containing this
+line is the final docs-fix package (T-1) — its hash is reported in the completion
+report, not predicted here.
 Scope: source/release pins for the first reproducible baseline. "latest" is never
 used as a value; where a moving index was consulted, the exact resolved version and
 retrieval date are recorded. Unverified items are marked UNVERIFIED/BLOCKED, never
@@ -196,3 +199,13 @@ at T002/T005; not locked here — recorded as an OPEN GAP, not as "nothing missi
 
 See docs/verification/T001-research.md §5 (complete commands with HTTP status,
 retrieval timestamps, artifact paths) and §7 (mismatch/unavailability invariants).
+
+## T001 vs T002 boundary (explicit, T-4)
+
+T001 is a STATIC research baseline only. It does NOT give T002 an automatic PASS:
+T002's own dependency-closure generation (go.sum, package-lock.json), build
+validation and runnable checks are NOT_RUN here and must pass independently.
+There is no prerequisite cycle T001→T002→T001: T001 does not depend on T002 outputs
+(pins above are verified from upstream metadata, not from T002 artifacts); the
+runnable baseline depends on T002 checks passing. G1 (static lock evidence) is the
+only gate this package addresses; runnable G1 and G2–G4 remain OPEN.

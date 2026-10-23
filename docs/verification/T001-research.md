@@ -1,14 +1,22 @@
-# T001 — research log & verification evidence — revision 3 (T001-fix-r2)
+# T001 — research log & verification evidence — revision 4 (final docs fix)
 
 Task: T001 (G1) — release/capability/license matrix and provenance for the Xray source
 baseline, Go, Node, React, SQLite driver, dnsmasq/nft/iproute2, crypto/parser deps.
-Author: agent 05 (Researcher). Verification dates: rev1–rev3 2026-10-23 (UTC).
-Rev3 base: actual parent commit 9566a13 (04-consolidation; rev2 header cited the
-assignment base d7b75a8 — cosmetic mismatch, noted by 03). Rev3 target of review:
-4e98e02 (rev2). Rev3 answers round-2 reviews: 03's .hyper/tmp/t001/T001-review-r2-REPORT.md
-(R2-1..R2-5, CHANGES_REQUESTED docs-only; substantive pins/provenance/static capability
-PASS) and 04's round-1 evidence .hyper/tmp/bul/t001-04/REPORT.md (F-04-1..6).
-Dispositions: §9 (H/M/L + F-04-x) and §10 (R2-x). T001/G1 remain OPEN.
+Author: agent 05 (Researcher). Verification dates: rev1–rev3 2026-10-23 (UTC); rev4 is
+doc-only (network: 0 requests).
+
+Base/parent history, recorded exactly (assignment base ≠ commit parent):
+- assignment base for the task: 7ebd9852ef5144f1377f723601abc9ef60e1c66d;
+- rev1 (521b018) parent: c21bb12 (01 review-criteria commit);
+- rev2 (4e98e02) parent: 9566a13 (04-consolidation commit);
+- rev3 (9dd2b1e) parent: 11bececccaa93f4ea01fcec2395aaf176ec5c114 (per git show;
+  9566a13 is the grandparent — rev3's header saying "parent 9566a13" was wrong, T-2);
+- rev4 (this file) targets corrections to review target 9dd2b1e; its own commit hash
+  and parent are reported in the completion report after commit, never predicted
+  from the assignment message (T-2).
+
+Rev4 answers 04's round-3 report .hyper/tmp/bul/t001-04r3/REPORT.md (substantive PASS;
+bookkeeping T-1/T-2 FAIL, T-3 minor, T-4 partial). Dispositions: §11. T001/G1 remain OPEN.
 Constraints honored: public HTTPS GET only, no sudo/host changes/binary execution,
 no private sources/secrets, no push/deploy. tasks.md untouched. Budget: one bounded
 correction package (≈35 GETs, <2 MiB downloaded; no archives).
@@ -74,6 +82,31 @@ correction package (≈35 GETs, <2 MiB downloaded; no archives).
   8. allowInsecure semantic parity (PASSWALL_RESEARCH.md:66) — UNRESOLVED, must close
      before the affected subscription contract/compiler task (01 decision).
   9. Per-mask FinalMask JSON semantics valid for WireGuard UDP — UNVERIFIED (T005).
+
+## 3a. Explicitly UNRESEARCHED fields/semantics (per review criteria; from the existing
+matrix only — nothing invented)
+
+| Field/semantic | FR | Status | Closing task |
+|---|---|---|---|
+| Per-mask FinalMask JSON validity for WireGuard UDP dial (which mask types are semantically valid; only the DialUDP hook is proven) | FR-008 | UNVERIFIED | T005 contract tests |
+| FinalMask per-mask config JSON shapes (all mask types beyond tcp/udp/quicParams container) | FR-003/FR-008 | UNVERIFIED | T005 contract tests |
+| Happy Eyeballs exact RFC 8305 parity and its interaction with manual domainStrategy (product rule: HE on → manual strategy inactive) | FR-004 | UNVERIFIED | T005+ contract tests |
+| allowInsecure subscription-flag semantic parity with PassWall UI promise (PASSWALL_RESEARCH.md:66) | FR-017/US5 preconditions (subscription import semantics) | UNRESOLVED | must close before the affected subscription contract/compiler task (T005 scope recommended; 01 decision) |
+| XHTTP "Extra" full option surface mapping | FR-003 | UNVERIFIED | T005 contract tests |
+| ECH config details (keys, server-side generation semantics) | FR-003/FR-007 | UNVERIFIED (presence only) | T005 contract tests |
+| REALITY ML-DSA-65 parameter semantics | FR-003 | UNVERIFIED (presence only) | T005 contract tests |
+| dnsmasq TTL/cache semantics and shared-IP overlap behavior (R-04 gate) | FR-020 preconditions | UNVERIFIED | network acceptance stand |
+| IPv6 transit/profile proof (R-03 gate) | FR-020 | BLOCKED→gate | isolated synthetic stand |
+| Runtime kernel/nft/dnsmasq behavior on the stand | FR-020 | NOT_RUN | stand provisioning task |
+
+## 3b. T001 vs T002 boundary (explicit, T-4)
+
+T001 is a STATIC research baseline only and does NOT give T002 an automatic PASS:
+T002's own dependency-closure generation (go.sum, package-lock.json), build validation
+and runnable checks are NOT_RUN here and must pass independently. There is no
+prerequisite cycle T001→T002→T001: T001 does not depend on T002 outputs; the runnable
+baseline depends on T002 checks passing. G1 static lock evidence is the only gate this
+package addresses; runnable G1 and G2–G4 remain OPEN.
 - No component required for the T001 lock remains unpinned after rev2; the gaps above
   are downstream tasks, tracked honestly instead of "no missing pins".
 - Escalation posture unchanged: any failure of the T002 build gate or FinalMask
@@ -210,6 +243,15 @@ Round-1 (04 evidence): F-04-1..6 — dispositions:
 Also recorded per 01 r2 instruction: dnsmasq-base binary package is in main (from the
 main-pocket source), the `dnsmasq` meta package is in universe — Raylane needs only
 dnsmasq-base; no host sources change proposed (versions.lock §5).
+
+## 11. Disposition of round-3 findings (04 r3: T-1..T-4)
+
+| ID | Disposition |
+|---|---|
+| T-1 (versions.lock header still says revision 2) | FIXED. versions.lock header now states revision 3 with revision history (rev1 521b018, rev2 4e98e02, rev3 corrections to 9dd2b1e); the final docs-fix commit hash is reported in the completion report, not predicted in the file. |
+| T-2 (rev3 header claimed parent 9566a13; actual 11becec) | FIXED. Header of this file now distinguishes assignment base (7ebd985) from actual commit parents: rev1←c21bb12, rev2←9566a13, rev3←11bececccaa93f4ea01fcec2395aaf176ec5c114 (per `git show 9dd2b1e`). No parent prediction for new commits — reported post-commit. |
+| T-3 (no explicit list of unresearched fields) | FIXED. New §3a lists unresearched fields/semantics with FR references and closing tasks, drawn only from the existing capability matrix. |
+| T-4 (no explicit T002 no-auto-PASS statement) | FIXED. New §3b (and mirrored block in versions.lock) states: no automatic PASS for T002, closure/build checks NOT_RUN, no T001→T002→T001 cycle, G1 static only, G2–G4 OPEN. |
 
 | ID | Disposition |
 |---|---|

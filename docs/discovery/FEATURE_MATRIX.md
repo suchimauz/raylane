@@ -40,3 +40,5 @@
 | VLESS: Mux, mux_concurrency, xudp_concurrency | Сохранить (D-018) | Не задан | CONFIRMED | Проверка сочетаний transport/flow, без автоматического включения |
 
 | VLESS: DNS адреса узла — Auto/TCP/UDP/DoH | Сохранить (D-019) | Не задан | CONFIRMED | Серверы по умолчанию, Auto и bootstrap еще не определены |
+
+| VLESS: Auto/предпочтение IPv4/предпочтение IPv6/только IPv4/только IPv6 и Happy Eyeballs | Сохранить (D-020) | Не задан | CONFIRMED | Выбор адреса внешнего узла; глобальная IPv6-архитектура не выбрана |

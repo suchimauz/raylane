@@ -80,3 +80,5 @@
 | HTTP-прокси: обычный HTTP и HTTP поверх TLS | Оба варианта (D-044) | Не задан | CONFIRMED | Защита канала до прокси; REALITY не утвержден |
 
 | HTTP поверх TLS: SNI, ALPN, uTLS/fingerprint, pin, имя сертификата, PEM, cipher suites, ECH | Весь перечисленный набор (D-045) | Не задан | CONFIRMED | Проверка зависимостей/совместимости; без REALITY и автоотключения проверки |
+
+| SOCKS5/HTTP: DNS Auto/TCP/UDP/DoH, все стратегии IP и Happy Eyeballs | Весь набор для обоих (D-046) | Не задан | CONFIRMED | DNS самого прокси; defaults/Auto/bootstrap уточняются |

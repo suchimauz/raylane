@@ -39,20 +39,42 @@ info:
     * Reads never return a secret value, and never return a raw source URL
       that may carry userinfo. Secret fields are presence-only on read; a
       source URL is returned redacted.
-    * Writes never accept a masked placeholder as a new secret value. A secret
-      update is an explicit union of unchanged / replace / clear.
+    * A secret update is an explicit union of unchanged / replace / clear.
+      The union does NOT by itself reject a masked placeholder: the
+      placeholder's literal spelling is not specified yet, so the rejection
+      is a server-side validation rule, recorded as gap G-17, not a property
+      of this schema.
     * No read or write implicitly fetches a remote source, and no draft
       operation implicitly applies anything. Saving is never applying. In
       other words: there is no implicit fetch and no implicit apply anywhere
       in this API; a fetch happens only through an explicit refresh
       operation, and an apply happens only through the separate apply
       operation, which is not part of this partial artifact.
-    * Every mutation is optimistic-concurrency checked with an expected
-      revision.
+    * Every mutation that CAN be guarded by an optimistic revision is:
+      the four PATCH bodies require `expectedRevision`. The contract's
+      mutation line is broader than that, and the remaining mutations
+      (creates, deletes, the runtime stop, and the two refreshes) carry
+      `x-implementation-status: blocked` with a note, because the guard
+      mechanism for them is not specified and choosing one would be a
+      concurrency-design decision. This is gap G-18.
     * Stopping the runtime and releasing the protection against direct bypass
-      are separate operations with separate semantics.
+      are separate operations with separate semantics. The release operation
+      is not present in `paths` at all: its confirmation delivery is
+      undecided (gap G-07), and a declared-but-unusable route is a route
+      that can be mistaken for a working one.
     * Error responses carry a request identifier and a stable code, and never
       echo the raw body of a remote source.
+
+    What this contract does NOT guarantee
+    --------------------------------------
+    * `NodeDraft.fields` and `ConfigRevision.canonicalDocument` are free-form
+      objects. They are NOT guaranteed to be secret-free, and this file does
+      not claim they are. A value written into a free-form field would be
+      stored and returned verbatim. Two enforcement points are required
+      before any backend or UI is built on them — a typed capability
+      profile checked on write, and a read-side filter — and neither exists
+      yet. That is gap G-11, and it is a blocking prerequisite, not a
+      detail.
   license:
     name: MIT
     identifier: MIT
@@ -110,6 +132,15 @@ paths:
                       $ref: "#/components/schemas/NodeDraft"
     post:
       operationId: createNode
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. A create has no prior revision to compare against, and the
+        guard for it is not specified: the contract does not say whether a
+        create is guarded by the collection revision, by a global revision, or
+        not at all. That is a concurrency-design decision, so it is not made
+        here.
+        See gap G-18.
       tags: [nodes]
       summary: Create a node draft.
       description: |
@@ -141,6 +172,10 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -198,12 +233,25 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
     delete:
       operationId: deleteNode
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. This delete carries none: a delete of an object that has
+        just changed underneath is exactly the race the contract's mutation
+        line is about. The guard — an If-Match-style header, a body field, or
+        a different mechanism — is not specified, and choosing it here would
+        be a concurrency-design decision.
+        See gap G-18.
       tags: [nodes]
       summary: Delete a node draft.
       description: |
@@ -221,38 +269,12 @@ paths:
               $ref: "#/components/headers/XRequestId"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
-
-  /revisions/{revisionId}:
-    parameters:
-      - $ref: "#/components/parameters/RevisionId"
-      - $ref: "#/components/parameters/RequestId"
-    get:
-      operationId: getRevision
-      tags: [revisions]
-      summary: Read one configuration revision.
-      description: |
-        A revision is immutable. The canonical document it carries contains
-        secret references only, never secret values.
-      security:
-        - sessionCookie: []
-      responses:
-        "200":
-          description: The revision.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ConfigRevision"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
 
   /revisions/{revisionId}/validate:
     parameters:
@@ -281,6 +303,8 @@ paths:
                 $ref: "#/components/schemas/ValidationReport"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "422":
@@ -344,6 +368,14 @@ paths:
   /runtime/stop:
     post:
       operationId: stopRuntime
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. This stop carries none. The runtime's current generation is
+        the obvious candidate for the guard, but the contract does not say so,
+        and this operation is not attached to the release-protection flow (gap
+        G-07). The guard mechanism is unspecified.
+        See gap G-18.
       tags: [runtime]
       summary: Stop the runtime, keeping the protection in place.
       description: |
@@ -357,44 +389,6 @@ paths:
       responses:
         "202":
           description: The stop was accepted and is in progress.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/OperationAccepted"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "409":
-          $ref: "#/components/responses/Conflict"
-
-  /runtime/release-protection:
-    post:
-      operationId: releaseProtection
-      tags: [runtime]
-      summary: Release the protection against direct bypass.
-      description: |
-        **BLOCKED — this operation is declared but not usable.** The control
-        plane requires an expiring confirmation token bound to the current
-        session, the active generation and the protection state, issued
-        separately and consumed once. How that token is issued, delivered to
-        the client and returned to this endpoint is not decided: see gap G-07
-        in the companion document. Until it is, the endpoint must not be
-        implemented, and no working release path may be assumed.
-      security:
-        - sessionCookie: []
-      parameters:
-        - $ref: "#/components/parameters/RequestId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ReleaseProtectionRequest"
-      responses:
-        "202":
-          description: The release was accepted and is in progress.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -439,6 +433,13 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createRule
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. A create has no prior revision to compare against, and the
+        guard for it is not specified. Choosing one here would be a
+        concurrency-design decision.
+        See gap G-18.
       tags: [rules]
       summary: Create a destination rule in the draft.
       description: |
@@ -469,8 +470,12 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -478,26 +483,6 @@ paths:
     parameters:
       - $ref: "#/components/parameters/RuleId"
       - $ref: "#/components/parameters/RequestId"
-    get:
-      operationId: getRule
-      tags: [rules]
-      summary: Read one destination rule.
-      security:
-        - sessionCookie: []
-      responses:
-        "200":
-          description: The rule.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/DestinationRule"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
     patch:
       operationId: updateRule
       tags: [rules]
@@ -524,14 +509,25 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
     delete:
       operationId: deleteRule
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. This delete carries none. The guard mechanism is
+        unspecified, and choosing it here would be a concurrency-design
+        decision.
+        See gap G-18.
       tags: [rules]
       summary: Delete a destination rule from the draft.
       description: |
@@ -547,6 +543,8 @@ paths:
               $ref: "#/components/headers/XRequestId"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -585,6 +583,13 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createSubscription
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. A create has no prior revision to compare against, and the
+        guard for it is not specified. Choosing one here would be a
+        concurrency-design decision.
+        See gap G-18.
       tags: [sources]
       summary: Create subscription settings.
       description: |
@@ -615,6 +620,10 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -622,33 +631,17 @@ paths:
     parameters:
       - $ref: "#/components/parameters/SubscriptionId"
       - $ref: "#/components/parameters/RequestId"
-    get:
-      operationId: getSubscription
-      tags: [sources]
-      summary: Read subscription settings, with the URL redacted.
-      security:
-        - sessionCookie: []
-      responses:
-        "200":
-          description: The subscription settings.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SubscriptionSettings"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
     patch:
       operationId: updateSubscription
       tags: [sources]
       summary: Update subscription settings.
       description: |
         Updates the settings only; it never fetches the subscription. A
-        masked URL placeholder is not a new value and is not written back.
+        masked URL placeholder is not a new value and is not written back —
+        but that rule is enforced by server-side validation, not by this
+        schema, and the placeholder's literal spelling is not specified yet
+        (gap G-17). The read side is redacted, so the client cannot read the
+        current URL back and must keep that state itself.
       security:
         - sessionCookie: []
       requestBody:
@@ -671,10 +664,14 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -708,6 +705,13 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createRuleSource
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. A create has no prior revision to compare against, and the
+        guard for it is not specified. Choosing one here would be a
+        concurrency-design decision.
+        See gap G-18.
       tags: [sources]
       summary: Create rule-source settings.
       description: |
@@ -738,6 +742,10 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -745,26 +753,6 @@ paths:
     parameters:
       - $ref: "#/components/parameters/RuleSourceId"
       - $ref: "#/components/parameters/RequestId"
-    get:
-      operationId: getRuleSource
-      tags: [sources]
-      summary: Read rule-source settings, with the URL redacted.
-      security:
-        - sessionCookie: []
-      responses:
-        "200":
-          description: The rule-source settings.
-          headers:
-            X-Request-Id:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RuleSourceSettings"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
     patch:
       operationId: updateRuleSource
       tags: [sources]
@@ -793,10 +781,14 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -806,6 +798,14 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshSubscription
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. This refresh carries none. The contract does name a 409 for
+        a busy resource, which is a concurrency outcome but not an optimistic
+        revision check. The two are not the same thing, and the guard is not
+        specified.
+        See gap G-18.
       tags: [sources]
       summary: Refresh a subscription explicitly.
       description: |
@@ -827,6 +827,8 @@ paths:
                 $ref: "#/components/schemas/OperationAccepted"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -838,6 +840,14 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshRuleSource
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The contract states that EVERY mutation carries an optimistic
+        revision. This refresh carries none. The contract does name a 409 for
+        a busy resource, which is a concurrency outcome but not an optimistic
+        revision check. The two are not the same thing, and the guard is not
+        specified.
+        See gap G-18.
       tags: [sources]
       summary: Refresh a rule source explicitly.
       description: |
@@ -858,6 +868,8 @@ paths:
                 $ref: "#/components/schemas/OperationAccepted"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -877,6 +889,35 @@ components:
         administrator session; it does **not** specify how that session is
         established, how it is protected or how CSRF is enforced. See gaps
         G-01, G-02 and G-03 in the companion document.
+
+        The session-policy decision is INDEPENDENT of the backup A/B choice:
+        G-01..G-03 depend only on the session part of A04, while G-04..G-06
+        depend only on backup/restore/GC. The partial acceptance therefore
+        lets the session work proceed separately from the backup work.
+
+        The following session values are USER-ACCEPTED and are recorded here
+        as the policy the implementation must honour. They do not by
+        themselves make the session implementation ready:
+          * idle timeout 15 minutes (900 s); polling and reads do NOT extend
+            the idle deadline, and neither does a long edit without saving;
+          * absolute lifetime 12 hours (43 200 s), regardless of activity;
+          * after a control-plane restart, re-login is required.
+
+        The exact activity allowlist, the limiter constants and the
+        enforcement details remain PROPOSED and are not turned into
+        defaults here.
+
+        **UX condition on the accepted expiry:** loss of UNSAVED edits is
+        not permitted. Before any UI is built, a mechanism for preserving and
+        restoring unsaved edits across expiry, re-login and restart must be
+        defined and verified. The accepted expiry does not choose that
+        mechanism, and it does not permit storing secrets in browser storage
+        or in logs. Expiry and authentication must not be relaxed to
+        preserve edits.
+
+        A read API that is presence-only for secrets cannot tell a client
+        that a secret field is unchanged — that state must live in the
+        client. This is recorded with the placeholder rule in gap G-17.
 
   headers:
     XRequestId:
@@ -986,6 +1027,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    PayloadTooLarge:
+      description: |
+        The request body exceeds the limit the contract names for this
+        operation. The body carries the field errors and never a secret value
+        or a raw source body.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     SemanticValidationFailed:
       description: |
         The request is well-formed but semantically invalid. The body carries
@@ -1025,8 +1078,29 @@ components:
     SecretUpdate:
       description: |
         An explicit update of one secret field. `unchanged` keeps the stored
-        value, `replace` sets a new one, `clear` removes it. A masked
-        placeholder is not a value and is not accepted as a new secret.
+        value, `replace` sets a new one, `clear` removes it.
+
+        **A masked placeholder is not a value — but this schema does not
+        enforce that.** The union below accepts any string of 1..4096
+        characters as a `replace` value, including one that happens to look
+        like the masked placeholder the UI displays. The contract states the
+        rule ("masked placeholder is not a new value"); the rule is a
+        SERVER-SIDE validation, not a schema constraint, because the
+        placeholder's literal spelling is not yet specified (gap G-17).
+
+        Two things are therefore missing, and both are normative gaps rather
+        than properties of this schema:
+          * a reserved, explicitly specified placeholder constant, so that a
+            server rule can recognise it and refuse it (gap G-17);
+          * a typed UI state that distinguishes "unchanged" from "replaced",
+            because the read API is presence-only and cannot tell the client
+            that a field is unchanged — the client must keep that state
+            itself (gap G-17).
+
+        Until G-17 is closed, a `replace` carrying a placeholder-looking
+        value is SCHEMA-VALID here and must be rejected by the server
+        validation rule, not by this document. Do not read this schema as
+        evidence that a placeholder is already rejected.
       oneOf:
         - type: object
           additionalProperties: false
@@ -1116,10 +1190,28 @@ components:
         would freeze a product decision that the capability-profile task
         owns.
 
-        Free-form objects are used only because the alternative is a fake
-        schema. The security-relevant property is preserved regardless: no
-        secret value may appear here, and secrets travel only through the
-        explicit secret-update union.
+        **THIS SCHEMA DOES NOT GUARANTEE THAT THESE OBJECTS ARE SECRET-FREE.**
+        The three groups are free-form: any key, any value, any nesting
+        depth up to the size bound. A client can therefore put a secret value
+        in `fields.active`, and because the read model returns `fields`
+        verbatim, a value written there would be stored and returned in
+        clear text. That path bypasses both the presence-only secret view and
+        the typed secret-update union.
+
+        Two enforcement points are required before any backend or UI is built
+        on this schema, and neither exists yet:
+          * on WRITE: validate the submitted fields against the typed
+            capability profile, and reject any value that is not a
+            declared field of that protocol (gap G-11);
+          * on READ: filter the stored fields against the same profile
+            before returning them, so a value that slipped in cannot be
+            returned in clear text (gap G-11).
+
+        Until the capability profile exists and those two rules are
+        implemented, `fields` is UNVALIDATED CONTENT. No backend, no UI and
+        no downstream implementation may treat this schema as a security
+        boundary. The presence-only guarantee applies to the `secrets` map
+        only — it says nothing about `fields`.
       additionalProperties: false
       required: [active, inactive, unknown]
       properties:
@@ -1127,7 +1219,9 @@ components:
           type: object
           maxProperties: 256
           additionalProperties: true
-          description: Fields that take effect in the applied configuration.
+          description: |
+            Fields that take effect in the applied configuration. Unvalidated
+            free-form content until the capability profile exists (G-11).
         inactive:
           type: object
           maxProperties: 256
@@ -1135,7 +1229,8 @@ components:
           description: |
             Fields stored for a possible later return, but not used by the
             compiler. Switching an option off keeps its fields; collapsing a
-            section is not the same as switching the option off.
+            section is not the same as switching the option off. Unvalidated
+            free-form content until the capability profile exists (G-11).
         unknown:
           type: object
           maxProperties: 256
@@ -1143,7 +1238,8 @@ components:
           description: |
             Fields the importer did not recognise. They are preserved and
             never executed, and the node stays explicitly invalid until the
-            source or the support is fixed.
+            source or the support is fixed. Unvalidated free-form content
+            until the capability profile exists (G-11).
 
     NodeValidation:
       type: object
@@ -1238,8 +1334,12 @@ components:
           additionalProperties:
             $ref: "#/components/schemas/SecretUpdate"
           description: |
-            Secret updates, one entry per secret field. A masked placeholder
-            is not accepted as a value.
+            Secret updates, one entry per secret field.
+
+            A masked placeholder is not a new value — but that rule is
+            enforced by server-side validation, not by this schema, and the
+            placeholder's literal spelling is not yet specified (gap G-17).
+            See the `SecretUpdate` description.
 
     NodeDraftUpdate:
       type: object
@@ -1267,8 +1367,23 @@ components:
     ConfigRevision:
       type: object
       description: |
+        **REFERENCE ONLY — this schema is not currently attached to any
+        operation.**
+
+        The feature contract's operation table names no revision-read
+        operation: it names `POST /revisions/{id}/validate` and
+        `GET /operations/{id}`, `GET /state`, but no `GET /revisions/{id}`.
+        A read of a revision was therefore removed rather than invented.
+
+        The schema is kept here because a revision is a real entity of the
+        data model, and because the validation operation reports against
+        one. When a revision-read operation is specified, this schema is
+        attached to it.
+
         An immutable configuration revision. The canonical document holds
-        secret references only, never secret values.
+        secret references only, never secret values — this is a property of
+        the compiler that produces it, and it is not enforced by this
+        schema (see `canonicalDocument` below and gap G-12).
       additionalProperties: false
       required: [id, revision, createdAt]
       properties:
@@ -1286,9 +1401,16 @@ components:
           additionalProperties: true
           maxProperties: 256
           description: |
-            The canonical, secret-free document of this revision. Its exact
-            shape follows the compiler output and is not fixed by the
-            contracts yet (gap G-12).
+            The canonical document of this revision. Its exact shape follows
+            the compiler output and is not fixed by the contracts yet (gap
+            G-12).
+
+            **This schema does not guarantee that this document is
+            secret-free.** The object is free-form, so the property holds only
+            to the extent that the compiler emits secret references rather
+            than secret values. Until the compiler exists and its output
+            shape is fixed (G-12), this document is UNVALIDATED CONTENT and
+            must not be treated as a security boundary.
         validationReportId:
           $ref: "#/components/schemas/Identifier"
 
@@ -1647,7 +1769,10 @@ components:
           format: uri
           description: |
             The new source URL. A masked placeholder is not a new value and is
-            not written back.
+            not written back — but that rule is a server-side validation, not
+            a schema constraint, and the placeholder's literal spelling is
+            not specified yet (gap G-17). This field is write-only: the read
+            model returns `urlPresent` and `urlRedacted` instead.
         accessMode:
           $ref: "#/components/schemas/SourceAccessMode"
         serviceRouteRef:
@@ -1719,14 +1844,27 @@ components:
     ReleaseProtectionRequest:
       type: object
       description: |
-        **BLOCKED — the shape of this body is not final.** The contract
-        requires an expiring confirmation bound to the session, the active
-        generation and the protection state. How that confirmation reaches the
-        client and comes back is undecided (gap G-07), so this body carries
-        the fields that are known to be required and nothing that would
-        pretend the flow is settled.
+        **REFERENCE ONLY — this body is not currently attached to any
+        operation, and no operation may use it yet.**
+
+        The control plane requires an expiring confirmation bound to the
+        session, the active generation and the protection state. How that
+        confirmation reaches the client and comes back is undecided (gap
+        G-07), so there is no release endpoint to attach this body to. The
+        release-protection path was deliberately REMOVED from `paths` rather
+        than published in a blocked state: a declared-but-unusable route is
+        a route that can be mistaken for a working one.
+
+        The schema is kept here so the required fields are recorded while
+        the flow is designed. When the confirmation delivery is agreed, this
+        body is attached to the release operation together with the 403
+        response that a blocked release must return.
+
+        `expectedGeneration` is required, so the confirmation cannot be
+        replayed against a generation the administrator did not intend to
+        release.
       additionalProperties: false
-      required: [confirmation]
+      required: [confirmation, expectedGeneration]
       properties:
         confirmation:
           type: string

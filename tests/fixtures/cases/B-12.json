@@ -1,0 +1,57 @@
+{
+  "id": "B-12",
+  "family": "protocol",
+  "title": "WireGuard: Reserved длиной 2 байта",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "Reserved length out of contract",
+  "cap": "Reserved 0/3 bytes — release gate",
+  "trace": [
+    "FR-008",
+    "FR-009",
+    "Edge:Reserved неправильной длины",
+    "data-model:Валидаторы"
+  ],
+  "outcome": "Значение отличается от контракта и отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано. Reserved допускает 0 или 3 байта по целевому release.",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "wireguard",
+      "label": "SynthNodeWg",
+      "endpoint": "203.0.113.10:51820",
+      "publicKey": "936MaZHZsLaibKy96xJ1DQvbqAYZyC2r8LVb5gOma0Q=",
+      "privateKey": "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+      "presharedKey": "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0=",
+      "localAddresses": [
+        "192.0.2.2/32"
+      ],
+      "mtu": 1420,
+      "reserved": [
+        0,
+        0
+      ],
+      "keepAlive": 25,
+      "finalMask": null
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALIDATE_ERROR",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-12"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

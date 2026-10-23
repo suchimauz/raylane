@@ -1,0 +1,25 @@
+# SYNTHETIC fixture input -- not a real subscription, never fetched.
+proxies:
+  - name: SynthNodeA
+    type: vless
+    server: node1.example.test
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    network: ws
+    tls: true
+    servername: cdn.example.test
+    ws-opts:
+      path: /synth
+  - name: SynthNodeB
+    type: socks5
+    server: node2.example.test
+    port: 1080
+rules:
+  - DOMAIN-SUFFIX,example.test,DIRECT
+  - IP-CIDR,198.51.100.0/24,DIRECT,no-resolve
+  - MATCH,PROXY
+dns:
+  enable: true
+  ipv6: false
+  nameserver:
+    - 198.51.100.53

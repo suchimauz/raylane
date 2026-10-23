@@ -1,0 +1,44 @@
+{
+  "id": "I-01",
+  "family": "rules",
+  "title": "Пересечение block/direct/proxy",
+  "klass": "positive(reported)",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "Domain/IP rules SUPPORTED (design)",
+  "trace": [
+    "FR-020",
+    "US-05"
+  ],
+  "outcome": "Приоритет block → explicit direct → proxy → default direct; конфликт показывается при проверке",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "rules": [
+        "block example.test",
+        "direct example.test",
+        "proxy example.test"
+      ]
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID_WITH_CONFLICT_REPORT",
+    "compile": "PRIORITY_ORDER",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "I-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

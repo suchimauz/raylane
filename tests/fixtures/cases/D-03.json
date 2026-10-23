@@ -1,0 +1,42 @@
+{
+  "id": "D-03",
+  "family": "fetch",
+  "title": "Destination = link-local (169.254.169.254, metadata)",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "forbidden destination",
+  "cap": "n/a",
+  "trace": [
+    "FR-024",
+    "D-061"
+  ],
+  "outcome": "Отказ: link-local/metadata запрещены",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "url",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/D-03.txt",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "http://169.254.169.254/latest/meta-data/",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "REJECT_DESTINATION",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

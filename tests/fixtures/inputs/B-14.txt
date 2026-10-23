@@ -1,0 +1,1 @@
+trojan://pw@node2.example.test:443#SynthTrojan

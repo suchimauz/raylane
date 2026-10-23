@@ -1,0 +1,43 @@
+{
+  "id": "A-04",
+  "family": "parse",
+  "title": "Clash/Mihomo YAML с rules/DNS/groups",
+  "klass": "positive(scope-limited)",
+  "fail_closed": true,
+  "unsupported": "rules/dns/groups OUT_OF_SCOPE",
+  "cap": "n/a",
+  "trace": [
+    "FR-011",
+    "Constitution:не переносить rules/DNS/groups"
+  ],
+  "outcome": "Импортируются только выбранные узлы; rules/DNS/groups НЕ переносятся и НЕ исполняются",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "yaml",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/A-04.clash.yaml",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "proxies: [VLESS], rules: [...], dns: {...}",
+    "concrete": true,
+    "expansion_note": "placeholder 'proxies: [VLESS], rules: [...], dns: {...}' replaced by a real Clash/Mihomo document carrying all three sections"
+  },
+  "expect": {
+    "parse": "OK_FOR_PROXIES",
+    "validate": "PARTIAL",
+    "compile": "PROXIES_ONLY",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "A-04"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

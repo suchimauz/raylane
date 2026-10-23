@@ -1,0 +1,43 @@
+{
+  "id": "B-13",
+  "family": "protocol",
+  "title": "WireGuard: импорт обычного .conf",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": ".conf import OUT_OF_SCOPE",
+  "cap": "System WireGuard / .conf UNSUPPORTED BY PRODUCT",
+  "trace": [
+    "FR-008",
+    "D-049–051"
+  ],
+  "outcome": "Импорт .conf не входит в scope; отказ с причиной, не «неизвестный формат»",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "file",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/B-13.wireguard.conf",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "[Interface]\\nPrivateKey=...",
+    "concrete": true,
+    "expansion_note": "placeholder '[Interface]\\nPrivateKey=...' replaced by a real .conf document"
+  },
+  "expect": {
+    "parse": "REJECT_SCOPE",
+    "validate": "NOT_REACHED",
+    "compile": "NOT_REACHED",
+    "apply": "NOT_REACHED"
+  },
+  "expect_apply_policy": "NOT_REACHED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-13"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

@@ -1,0 +1,45 @@
+{
+  "id": "D-10",
+  "family": "fetch",
+  "title": "Permitted-класс в allowlist, но адрес ВНЕ разрешённой подсети",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "address outside allowlisted subnet",
+  "cap": "n/a",
+  "trace": [
+    "FR-024",
+    "D-061"
+  ],
+  "outcome": "Отказ: адрес не входит в разрешённую подсеть. Контраст с D-09 — здесь причина именно в несовпадении, не в запрещённом классе.",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "url",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/D-10.txt",
+      "encoding": "utf-8",
+      "allowlist": [
+        "198.51.100.0/28"
+      ]
+    },
+    "oracle_value": "http://198.51.100.77/list.txt",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "REJECT_NOT_IN_ALLOWLIST",
+    "compile": "NOT_REACHED",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-10"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

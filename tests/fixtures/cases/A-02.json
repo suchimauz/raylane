@@ -1,0 +1,44 @@
+{
+  "id": "A-02",
+  "family": "parse",
+  "title": "Синтаксически неверный JSON (несбалансированные скобки)",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a (parser gate)",
+  "trace": [
+    "FR-009",
+    "US-01",
+    "SC-002",
+    "Edge:Невалидный JSON"
+  ],
+  "outcome": "Сохранение отклоняется; ранее сохранённое значение НЕ перезаписывается",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "json",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/A-02.json",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "{\"protocol\":\"vless\", \"settings\": {",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "FAIL_SYNTAX",
+    "validate": "NOT_REACHED",
+    "compile": "NOT_REACHED",
+    "apply": "NOT_REACHED"
+  },
+  "expect_apply_policy": "NOT_REACHED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "A-02"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

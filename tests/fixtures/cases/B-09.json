@@ -1,0 +1,49 @@
+{
+  "id": "B-09",
+  "family": "protocol",
+  "title": "HTTP: обычное соединение + TLS с ECH",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "HTTP TLS + ECH SUPPORTED",
+  "trace": [
+    "FR-007",
+    "FR-003"
+  ],
+  "outcome": "Валидный черновик",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "http",
+      "label": "SynthNodeHttp",
+      "endpoint": "node3.example.test:8080",
+      "security": "none",
+      "tls": true,
+      "ech": true,
+      "alpn": [
+        "h2",
+        "http/1.1"
+      ]
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "PRODUCES_OUTBOUND",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-09"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

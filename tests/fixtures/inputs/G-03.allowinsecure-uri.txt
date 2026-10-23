@@ -1,0 +1,1 @@
+vless://11111111-2222-3333-4444-555555555555@node1.example.test:443?type=raw&security=tls&sni=cdn.example.test&allowInsecure=1#SynthNodeA

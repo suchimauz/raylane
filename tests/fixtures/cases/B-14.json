@@ -1,0 +1,42 @@
+{
+  "id": "B-14",
+  "family": "protocol",
+  "title": "Неподдерживаемый, но распознанный протокол 'trojan'",
+  "klass": "negative(skip)",
+  "fail_closed": false,
+  "unsupported": "recognized-but-unsupported",
+  "cap": "protocols: VLESS/SOCKS5/HTTP/WireGuard only",
+  "trace": [
+    "US-03:распознанный неподдерживаемый пропускается с отчётом",
+    "SC-003"
+  ],
+  "outcome": "Пропускается с записью в отчёте; остальные узлы списка не затрагиваются",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "uri",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/B-14.txt",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "trojan://pw@node2.example.test:443#SynthTrojan",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK_PROTOCOL_RECOGNIZED",
+    "validate": "SKIP_UNSUPPORTED",
+    "compile": "NOT_REACHED",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-14"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

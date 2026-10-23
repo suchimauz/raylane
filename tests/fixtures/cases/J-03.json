@@ -1,0 +1,72 @@
+{
+  "id": "J-03",
+  "family": "filter",
+  "title": "Фильтр discard, шаблон совпадает с активным узлом",
+  "klass": "negative(protected)",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-013",
+    "FR-010",
+    "SC-004"
+  ],
+  "outcome": "Используемый узел не удаляется фильтром; отмечается и объясняется",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "candidate",
+    "payload": {
+      "candidate": [
+        {
+          "label": "SynthNodeA",
+          "protocol": "vless",
+          "endpoint": "synthnodea.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0001"
+        },
+        {
+          "label": "SynthNodeB",
+          "protocol": "vless",
+          "endpoint": "synthnodeb.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0002"
+        },
+        {
+          "label": "SynthNodeC",
+          "protocol": "vless",
+          "endpoint": "synthnodec.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0003"
+        }
+      ],
+      "filter": {
+        "mode": "discard",
+        "pattern": "SynthNodeA"
+      },
+      "activeNode": "SynthNodeA"
+    },
+    "oracle_value": "active node matches",
+    "concrete": true,
+    "expansion_note": "prose 'active node matches' replaced by the concrete candidate plus the active node it names"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "KEEP_PROTECTED",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "J-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

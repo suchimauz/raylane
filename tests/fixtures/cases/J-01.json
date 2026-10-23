@@ -1,0 +1,71 @@
+{
+  "id": "J-01",
+  "family": "filter",
+  "title": "Фильтр keep, ни одно имя не совпало",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-013",
+    "US-03:ноль после фильтрации",
+    "SC-003"
+  ],
+  "outcome": "Ноль после фильтрации НЕ меняет прежний список и отметки исчезновения",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "candidate",
+    "payload": {
+      "candidate": [
+        {
+          "label": "SynthNodeA",
+          "protocol": "vless",
+          "endpoint": "synthnodea.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0001"
+        },
+        {
+          "label": "SynthNodeB",
+          "protocol": "vless",
+          "endpoint": "synthnodeb.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0002"
+        },
+        {
+          "label": "SynthNodeC",
+          "protocol": "vless",
+          "endpoint": "synthnodec.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0003"
+        }
+      ],
+      "filter": {
+        "mode": "keep",
+        "pattern": "nomatch-*"
+      }
+    },
+    "oracle_value": "3 nodes, none match",
+    "concrete": true,
+    "expansion_note": "prose '3 nodes, none match' replaced by the concrete candidate the filter is applied to"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "J-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

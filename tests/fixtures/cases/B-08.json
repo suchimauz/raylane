@@ -1,0 +1,46 @@
+{
+  "id": "B-08",
+  "family": "protocol",
+  "title": "SOCKS5: пустой пароль при заданном имени",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "invalid auth pair",
+  "cap": "SOCKS5 user/pass SUPPORTED",
+  "trace": [
+    "FR-007",
+    "FR-009",
+    "Edge:пустой пароль"
+  ],
+  "outcome": "Комбинация отклоняется с причиной (пустой пароль не равен «без авторизации»); узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано.",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "socks5",
+      "label": "SynthNodeSocks",
+      "endpoint": "node2.example.test:1080",
+      "auth": "userpass",
+      "username": "synthuser",
+      "password": ""
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALIDATE_ERROR",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-08"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

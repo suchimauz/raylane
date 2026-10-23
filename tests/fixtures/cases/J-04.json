@@ -1,0 +1,80 @@
+{
+  "id": "J-04",
+  "family": "filter",
+  "title": "Оба режима с приоритетом (keep+discard)",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-013",
+    "D-031",
+    "D-041–042"
+  ],
+  "outcome": "Приоритет режимов применяется документированно; результат детерминирован",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "candidate",
+    "payload": {
+      "candidate": [
+        {
+          "label": "SynthNodeA",
+          "protocol": "vless",
+          "endpoint": "synthnodea.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0001"
+        },
+        {
+          "label": "SynthNodeB",
+          "protocol": "vless",
+          "endpoint": "synthnodeb.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0002"
+        },
+        {
+          "label": "drop-SynthNodeD",
+          "protocol": "vless",
+          "endpoint": "drop-synthnoded.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0004"
+        },
+        {
+          "label": "SynthNodeE",
+          "protocol": "vless",
+          "endpoint": "synthnodee.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0005"
+        }
+      ],
+      "filter": {
+        "mode": "both",
+        "keep": "*",
+        "discard": "drop-*"
+      }
+    },
+    "oracle_value": "4 nodes",
+    "concrete": true,
+    "expansion_note": "prose '4 nodes' replaced by the concrete candidate the filter is applied to"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "J-04"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

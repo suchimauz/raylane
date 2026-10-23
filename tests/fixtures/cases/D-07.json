@@ -1,0 +1,42 @@
+{
+  "id": "D-07",
+  "family": "fetch",
+  "title": "Auto-загрузка без применённого служебного маршрута",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-014",
+    "FR-022",
+    "data-model:Subscription"
+  ],
+  "outcome": "Загрузка запрещена с ошибкой неопределённого маршрута",
+  "fixture_kind": "scenario",
+  "input": {
+    "kind": "scenario",
+    "payload": {
+      "accessMode": "auto",
+      "serviceRouteRef": null
+    },
+    "oracle_value": "accessMode=auto, serviceRoute=undefined",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "ERROR_UNDEFINED_ROUTE",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-07"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

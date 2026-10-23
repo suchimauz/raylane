@@ -1,0 +1,55 @@
+{
+  "id": "G-04",
+  "family": "capability",
+  "title": "IPv6-профиль (R-03 gate)",
+  "klass": "negative(gated)",
+  "fail_closed": true,
+  "unsupported": "IPv6 profile BLOCKED→gate",
+  "cap": "IPv6 profile BLOCKED (R-03)",
+  "trace": [
+    "FR-020",
+    "Edge:IPv6 endpoint"
+  ],
+  "outcome": "IPv6-перехват выключен по умолчанию; включение требует отдельного доказательства, не выводится из наличия поля",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "[2001:db8::10]:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "raw",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      }
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "BLOCKED_GATE",
+    "compile": "NOT_ATTEMPTED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "G-04"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

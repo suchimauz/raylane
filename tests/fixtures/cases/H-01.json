@@ -1,0 +1,57 @@
+{
+  "id": "H-01",
+  "family": "field",
+  "title": "MTU вне контракта",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "MTU SUPPORTED (range: T005)",
+  "trace": [
+    "FR-008",
+    "FR-009",
+    "Edge:MTU/Keep Alive вне контракта"
+  ],
+  "outcome": "Значение вне контракта поля отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано.",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "wireguard",
+      "label": "SynthNodeWg",
+      "endpoint": "203.0.113.10:51820",
+      "publicKey": "936MaZHZsLaibKy96xJ1DQvbqAYZyC2r8LVb5gOma0Q=",
+      "privateKey": "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+      "presharedKey": "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0=",
+      "localAddresses": [
+        "192.0.2.2/32"
+      ],
+      "mtu": 99999,
+      "reserved": [
+        0,
+        0,
+        0
+      ],
+      "keepAlive": 25,
+      "finalMask": null
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALIDATE_ERROR",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "H-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

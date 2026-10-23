@@ -1,0 +1,1778 @@
+{
+  "artifact": "T003-synthetic-fixture-oracle",
+  "author": "04 (bul)",
+  "base_commit": "b953b2605eb0d67a38b4432866f33f4d8203b0ba",
+  "status": "PROPOSED — oracle/spec for 02's tracked fixtures; runtime tests NOT_RUN",
+  "scope_note": "Только synthetic. Никаких реальных подписок, credentials, IP серверов. Адреса из RFC 5737/3849/2606.",
+  "stages": [
+    "parse",
+    "validate",
+    "compile",
+    "apply"
+  ],
+  "runtime_status_legend": {
+    "runtime_status": "Всегда NOT_RUN для всех кейсов: ни один сценарий не исполнялся (нет продукта, нет сети, нет runtime).",
+    "apply_observation": "Всегда null: фактического наблюдения стадии apply не существует.",
+    "expect.apply": "ОЖИДАЕМАЯ ПОЛИТИКА продукта для стадии apply, выведенная из spec. Это не результат исполнения.",
+    "vocabulary": {
+      "NOT_INVOKED": "Стадия apply не должна вызываться в этом сценарии (save/validate-операция).",
+      "BLOCKED": "Применение должно быть заблокировано с причиной.",
+      "NOT_REACHED": "Сценарий падает раньше стадии apply.",
+      "BLOCK_NEW_CONNECTIONS": "Ожидаемое поведение: новые соединения затронутых клиентов не выпускаются напрямую (FR-020).",
+      "STOPPED_GUARDED": "Ожидаемое поведение: штатная остановка сохраняет защиту proxy-направлений (FR-020).",
+      "BLOCKED_PENDING_APPLY_STAGE": "Валидный кандидат; применение не исполняется, т.к. стадия apply вне scope пакета."
+    }
+  },
+  "stage_definitions": {
+    "parse": "Синтаксис формата (URI/Base64/YAML/JSON). Ошибка -> сохранение отклоняется, прежнее значение цело.",
+    "validate": "Семантика против capability profile. Ошибка -> допустим save, apply блокируется (FR-009).",
+    "compile": "Построение канонического документа/outbound. Не выполняется, если validate не VALID.",
+    "apply": "Изменение активного состояния. Стадия apply НЕ ИСПОЛНЯЕТСЯ ни в одном кейсе (runtime NOT_RUN повсеместно). Поле expect.apply кодирует ОЖИДАЕМУЮ ПОЛИТИКУ продукта, а не наблюдение; допустимые метки перечислены в runtime_status_legend.vocabulary — их пять, а не одна."
+  },
+  "invariants": [
+    "save != apply: ни один сценарий save/import/update не меняет active state (SC-002)",
+    "нет неявного fetch: save/validate не инициируют сеть",
+    "NOT_RUN не равен PASS; UNVERIFIED не выдаётся за supported",
+    "expect.apply — ожидаемая политика, а не наблюдение: runtime_status=NOT_RUN и apply_observation=null во всех кейсах",
+    "неизвестное поле != неизвестный формат != неподдерживаемый протокол",
+    "отвергнутое обновление не меняет прежние узлы и отметки (SC-003)",
+    "секреты не попадают в отчёты/экспорт/логи (SC-006)"
+  ],
+  "known_gaps": [
+    {
+      "id": "GAP-WGKEY",
+      "title": "Malformed WireGuard key (не-base64 / не 32 байта) не покрыт отдельным кейсом",
+      "why_not_covered": "B-12 покрывает ДЛИНУ Reserved — это value-contract стадии validate с политикой «сохраняется как невалидный черновик». Malformed key — ДРУГАЯ проблема: он не разбирается как ключ вообще.",
+      "stage": "UNKNOWN",
+      "stage_reasoning": "FR-009 нормирует только явный случай: «семантическая невалидность блокирует применение, неверный JSON — сохранение». Про форму ключа WireGuard (base64, 32 байта) в spec.md, data-model.md, contracts/ и capabilities.md НОРМЫ НЕТ — проверено grep'ом, совпадений ноль. Отнести malformed key к стадии parse (отказ сохранения) или к validate (сохранить как черновик) нельзя без нормы: JSON, в котором ключ — просто строка неверной формы, синтаксически корректен, так что «неверный JSON» здесь не применим.",
+      "decision": "НЕ назначаю стадию и НЕ добавляю кейс. Кейс с выдуманным ожиданием был бы fabrication: он заставил бы 02 реализовать конкретную политику отказа, которую никто не утверждал.",
+      "needed_to_close": "Норма в spec: является ли форма WG-ключа частью синтаксиса импорта (parse) или семантики поля (validate). До появления нормы — UNKNOWN.",
+      "blocks_valid_positives": false
+    }
+  ],
+  "coverage": {
+    "denominators_source": "spec.md (авторитетный): FR-001..FR-024 = 24, US-01..US-05 = 5, SC-001..SC-007 = 7, итого 36.",
+    "method_note": "03 насчитал 38 (22FR+10US+6SC). Мой пересчёт по точным тегам: 21FR+5US+6SC=32. US в spec.md ровно пять (### US-01..### US-05), поэтому US=10 не воспроизводится; 38 не использую.",
+    "syntactic_trace_coverage": "32/36",
+    "syntactic_trace_coverage_note": "Тег встречается хотя бы в одном кейсе. Это НЕ означает, что поведение проверено фикстурой.",
+    "fixture_verifiable_denominator": 27,
+    "fixture_verifiable_covered": "27/27",
+    "fixture_verifiable_covered_note": "Все требования, которые В ПРИНЦИПЕ проверяемы фикстурой, покрыты тегом.",
+    "not_fixture_testable": 9,
+    "not_fixture_testable_reason": "FR-014 (реальный маршрут загрузки), FR-015 (реальный HTTP/TLS/proxy fetch), FR-016 (сеть LAN/маршрутизация), FR-017 (архитектурное ограничение), FR-018 (визуальные критерии), FR-020 (runtime-маршрутизация/DNS/readiness), FR-021 (вход/сессии/бэкап), FR-023 (реальная передача credentials через redirect), SC-007 (ручное восстановление) — требуют стенда или работающего продукта; фикстура кодирует только ожидание политики.",
+    "warning": "Ни одно из этих 9 не объявляется покрытым."
+  },
+  "canary_registry": [
+    {
+      "id": "CAN-0001",
+      "case": "B-07",
+      "field": "password",
+      "exact_value": "SYNTH-CANARY-0001-DO-NOT-USE",
+      "form": "literal text",
+      "note": "SOCKS5 пароль без имени пользователя; не должен попасть в сообщение об ошибке"
+    },
+    {
+      "id": "CAN-0002",
+      "case": "B-11",
+      "field": "privateKey",
+      "exact_value": "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+      "raw_hex": "5241594c414e452d53594e54482d57472d505249562d303030322d2d2d2d2d2d",
+      "form": "32 raw bytes, base64, 44 chars",
+      "note": "Синтетический seed b'RAYLANE-SYNTH-WG-PRIV-0002------'. НЕ настоящий ключ."
+    },
+    {
+      "id": "CAN-0003",
+      "case": "B-11",
+      "field": "presharedKey",
+      "exact_value": "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0=",
+      "raw_hex": "5241594c414e452d53594e54482d57472d50534b2d2d303030332d2d2d2d2d2d",
+      "form": "32 raw bytes, base64, 44 chars",
+      "note": "Синтетический seed b'RAYLANE-SYNTH-WG-PSK--0003------'. НЕ настоящий ключ."
+    },
+    {
+      "id": "CAN-0004",
+      "case": "C-02",
+      "field": "diagnostic export",
+      "exact_value": "SYNTH-CANARY-0004-DO-NOT-USE",
+      "form": "literal text",
+      "note": "обязан отсутствовать в диагностическом экспорте (FR-021/SC-006)"
+    },
+    {
+      "id": "CAN-0005",
+      "case": "C-01",
+      "field": "url userinfo password",
+      "exact_value": "SYNTH-CANARY-0005-DO-NOT-USE",
+      "form": "literal text",
+      "note": "извлекается в защищённое хранилище; в отображаемом URL маска; нет в журналах (D-061)"
+    },
+    {
+      "id": "CAN-0006",
+      "case": "C-03",
+      "field": "unknown imported value",
+      "exact_value": "SYNTH-CANARY-0006-DO-NOT-USE",
+      "form": "literal text",
+      "note": "считается потенциально секретным; хранится шифрованно; в отчёте редактировано (FR-019)"
+    }
+  ],
+  "canary_policy": {
+    "prefix": "SYNTH-CANARY",
+    "rule": "Каждый canary уникален, синтетичен, помечен DO-NOT-USE, не похож на настоящий секрет.",
+    "must_not_appear_in": [
+      "validation report",
+      "diagnostic export",
+      "logs",
+      "API read of secret values"
+    ]
+  },
+  "cases": [
+    {
+      "id": "A-01",
+      "family": "parse",
+      "title": "Валидный VLESS URI vless:// без extras",
+      "input": {
+        "kind": "uri",
+        "value": "vless://11111111-2222-3333-4444-555555555555@node1.example.test:443?type=raw&security=tls&sni=cdn.example.test#SynthNodeA"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "PRODUCES_OUTBOUND",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Узел сохраняется как валидный черновик; применение НЕ происходит",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-001",
+        "FR-002",
+        "US-01",
+        "SC-001"
+      ],
+      "cap": "VLESS outbound SUPPORTED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "A-02",
+      "family": "parse",
+      "title": "Синтаксически неверный JSON (несбалансированные скобки)",
+      "input": {
+        "kind": "json",
+        "value": "{\"protocol\":\"vless\", \"settings\": {"
+      },
+      "expect": {
+        "parse": "FAIL_SYNTAX",
+        "validate": "NOT_REACHED",
+        "compile": "NOT_REACHED",
+        "apply": "NOT_REACHED"
+      },
+      "outcome": "Сохранение отклоняется; ранее сохранённое значение НЕ перезаписывается",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-009",
+        "US-01",
+        "SC-002",
+        "Edge:Невалидный JSON"
+      ],
+      "cap": "n/a (parser gate)",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "A-03",
+      "family": "parse",
+      "title": "Base64-подписка с корректным списком URI",
+      "input": {
+        "kind": "base64",
+        "value": "BASE64(SYNTH-LIST-3-URIS)"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "PRODUCES_OUTBOUND",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Три узла; локальные ID присвоены приложением, не источником",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-011",
+        "FR-022",
+        "data-model:Subscription"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "A-04",
+      "family": "parse",
+      "title": "Clash/Mihomo YAML с rules/DNS/groups",
+      "input": {
+        "kind": "yaml",
+        "value": "proxies: [VLESS], rules: [...], dns: {...}"
+      },
+      "expect": {
+        "parse": "OK_FOR_PROXIES",
+        "validate": "PARTIAL",
+        "compile": "PROXIES_ONLY",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Импортируются только выбранные узлы; rules/DNS/groups НЕ переносятся и НЕ исполняются",
+      "klass": "positive(scope-limited)",
+      "fail_closed": true,
+      "unsupported": "rules/dns/groups OUT_OF_SCOPE",
+      "trace": [
+        "FR-011",
+        "Constitution:не переносить rules/DNS/groups"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "A-05",
+      "family": "parse",
+      "title": "Полностью неизвестный формат (не URI/YAML/JSON)",
+      "input": {
+        "kind": "opaque",
+        "value": "-----BEGIN SYNTH UNKNOWN FORMAT-----"
+      },
+      "expect": {
+        "parse": "FAIL_UNKNOWN_FORMAT",
+        "validate": "NOT_REACHED",
+        "compile": "NOT_REACHED",
+        "apply": "NOT_REACHED"
+      },
+      "outcome": "Ошибка неизвестного формата; НЕ маскируется под «неподдерживаемый протокол»",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "MUST_DISTINGUISH from unsupported-protocol",
+      "trace": [
+        "US-03:неизвестный формат не маскируется",
+        "Edge:неизвестное поле против неизвестного формата"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-01",
+      "family": "protocol",
+      "title": "VLESS положительный: ws + TLS + flow xtls-rprx-vision",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "transport": "ws",
+        "security": "tls",
+        "flow": "xtls-rprx-vision"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "PRODUCES_OUTBOUND",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Валидный черновик",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-001",
+        "FR-002",
+        "FR-003"
+      ],
+      "cap": "VLESS/ws/TLS/vision SUPPORTED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-02",
+      "family": "protocol",
+      "title": "VLESS: ветка несуществующего транспорта 'quic-legacy'",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "transport": "quic-legacy"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Семантически невалиден; сохраняется как невалидный черновик с причиной; применение запрещено",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "UNSUPPORTED transport value",
+      "trace": [
+        "FR-002",
+        "FR-009",
+        "US-01",
+        "SC-004"
+      ],
+      "cap": "transports raw/mkcp/ws/grpc/httpupgrade/xhttp only",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-03",
+      "family": "protocol",
+      "title": "VLESS: пустой flow ''",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "flow": ""
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "NO_FLOW_FIELD",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Пустой flow допустим и означает отсутствие flow",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-002",
+        "SETTINGS_REFERENCE:149"
+      ],
+      "cap": "flow '' SUPPORTED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-04",
+      "family": "protocol",
+      "title": "VLESS: произвольный flow 'xtls-rprx-direct'",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "flow": "xtls-rprx-direct"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Недопустимое значение flow отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано. Допустимы только '', vision, vision-udp443.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "UNSUPPORTED flow value",
+      "trace": [
+        "FR-002",
+        "FR-009",
+        "D-009–012"
+      ],
+      "cap": "flow: только 3 значения",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-05",
+      "family": "protocol",
+      "title": "VLESS: отмечена недопустимая комбинация (проверяем, что не выдаётся за supported)",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "transport": "xhttp",
+        "security": "reality",
+        "flow": "xtls-rprx-vision"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "UNVERIFIED_COMBINATION",
+        "compile": "NOT_ATTEMPTED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Комбинация НЕ объявляется поддержанной; результат UNVERIFIED, не PASS",
+      "klass": "negative(unverified)",
+      "fail_closed": true,
+      "unsupported": "наличие опций ≠ допустимость комбинации",
+      "trace": [
+        "FR-002:наличие опций не обещает допустимость",
+        "SC-001"
+      ],
+      "cap": "Arbitrary combination validity UNSUPPORTED BY DESIGN",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-06",
+      "family": "protocol",
+      "title": "SOCKS5: без авторизации",
+      "input": {
+        "kind": "manual",
+        "protocol": "socks5",
+        "auth": "none"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "PRODUCES_OUTBOUND",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Валидный черновик",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-001",
+        "FR-007"
+      ],
+      "cap": "SOCKS5 no-auth SUPPORTED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-07",
+      "family": "protocol",
+      "title": "SOCKS5: пароль без имени пользователя",
+      "input": {
+        "kind": "manual",
+        "protocol": "socks5",
+        "username": "",
+        "password": "SYNTH-CANARY-0001-DO-NOT-USE"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Комбинация отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано. Значение пароля НЕ попадает в сообщение об ошибке.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "invalid auth pair",
+      "trace": [
+        "FR-007",
+        "FR-009",
+        "Edge:Пароль без имени",
+        "FR-019"
+      ],
+      "cap": "SOCKS5 user/pass SUPPORTED",
+      "canaries": [
+        "SYNTH-CANARY-0001-DO-NOT-USE"
+      ],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-08",
+      "family": "protocol",
+      "title": "SOCKS5: пустой пароль при заданном имени",
+      "input": {
+        "kind": "manual",
+        "protocol": "socks5",
+        "username": "synthuser",
+        "password": ""
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Комбинация отклоняется с причиной (пустой пароль не равен «без авторизации»); узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "invalid auth pair",
+      "trace": [
+        "FR-007",
+        "FR-009",
+        "Edge:пустой пароль"
+      ],
+      "cap": "SOCKS5 user/pass SUPPORTED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-09",
+      "family": "protocol",
+      "title": "HTTP: обычное соединение + TLS с ECH",
+      "input": {
+        "kind": "manual",
+        "protocol": "http",
+        "tls": true,
+        "ech": true,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "PRODUCES_OUTBOUND",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Валидный черновик",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-007",
+        "FR-003"
+      ],
+      "cap": "HTTP TLS + ECH SUPPORTED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-10",
+      "family": "protocol",
+      "title": "HTTP: REALITY для HTTP-выхода",
+      "input": {
+        "kind": "manual",
+        "protocol": "http",
+        "security": "reality"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_BY_PRODUCT_POLICY",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Явный отказ ПРОДУКТА (не отказ движка); сообщение объясняет политику",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "REALITY для HTTP UNSUPPORTED BY PRODUCT",
+      "trace": [
+        "FR-007",
+        "D-045",
+        "capabilities:REALITY for HTTP"
+      ],
+      "cap": "REALITY for HTTP UNSUPPORTED BY PRODUCT",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-11",
+      "family": "protocol",
+      "title": "WireGuard: один peer, все заявленные поля валидны (структурно корректные ключи)",
+      "input": {
+        "kind": "manual",
+        "protocol": "wireguard",
+        "endpoint": "203.0.113.10:51820",
+        "publicKey": "936MaZHZsLaibKy96xJ1DQvbqAYZyC2r8LVb5gOma0Q=",
+        "privateKey": "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+        "presharedKey": "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0=",
+        "localAddresses": [
+          "192.0.2.2/32"
+        ],
+        "mtu": 1420,
+        "reserved": [
+          0,
+          0,
+          0
+        ],
+        "keepAlive": 25,
+        "finalMask": null
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "PRODUCES_OUTBOUND",
+        "apply": "BLOCKED_PENDING_APPLY_STAGE"
+      },
+      "outcome": "Валидный черновик. Все три ключа — корректная WG-форма (32 байта, base64, 44 символа с '='); publicKey действительно выведен из privateKey. Ключи хранятся как SecretRef, не в открытом виде. Применение не исполняется: стадия apply вне scope этого пакета.",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-001",
+        "FR-008",
+        "data-model:Secret"
+      ],
+      "cap": "WireGuard outbound SUPPORTED",
+      "canaries": [
+        "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+        "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0="
+      ],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-12",
+      "family": "protocol",
+      "title": "WireGuard: Reserved длиной 2 байта",
+      "input": {
+        "kind": "manual",
+        "protocol": "wireguard",
+        "reserved": [
+          0,
+          0
+        ]
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Значение отличается от контракта и отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано. Reserved допускает 0 или 3 байта по целевому release.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "Reserved length out of contract",
+      "trace": [
+        "FR-008",
+        "FR-009",
+        "Edge:Reserved неправильной длины",
+        "data-model:Валидаторы"
+      ],
+      "cap": "Reserved 0/3 bytes — release gate",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-13",
+      "family": "protocol",
+      "title": "WireGuard: импорт обычного .conf",
+      "input": {
+        "kind": "file",
+        "value": "[Interface]\\nPrivateKey=..."
+      },
+      "expect": {
+        "parse": "REJECT_SCOPE",
+        "validate": "NOT_REACHED",
+        "compile": "NOT_REACHED",
+        "apply": "NOT_REACHED"
+      },
+      "outcome": "Импорт .conf не входит в scope; отказ с причиной, не «неизвестный формат»",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": ".conf import OUT_OF_SCOPE",
+      "trace": [
+        "FR-008",
+        "D-049–051"
+      ],
+      "cap": "System WireGuard / .conf UNSUPPORTED BY PRODUCT",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "B-14",
+      "family": "protocol",
+      "title": "Неподдерживаемый, но распознанный протокол 'trojan'",
+      "input": {
+        "kind": "uri",
+        "value": "trojan://pw@node2.example.test:443#SynthTrojan"
+      },
+      "expect": {
+        "parse": "OK_PROTOCOL_RECOGNIZED",
+        "validate": "SKIP_UNSUPPORTED",
+        "compile": "NOT_REACHED",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Пропускается с записью в отчёте; остальные узлы списка не затрагиваются",
+      "klass": "negative(skip)",
+      "fail_closed": false,
+      "unsupported": "recognized-but-unsupported",
+      "trace": [
+        "US-03:распознанный неподдерживаемый пропускается с отчётом",
+        "SC-003"
+      ],
+      "cap": "protocols: VLESS/SOCKS5/HTTP/WireGuard only",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "C-01",
+      "family": "secrets",
+      "title": "URL подписки с userinfo",
+      "input": {
+        "kind": "url",
+        "value": "https://synthuser:SYNTH-CANARY-0005-DO-NOT-USE@subs.example.test/list.txt"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Credentials извлекаются в защищённое хранилище; в отображаемом URL — маска; в журналах значения нет",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-024",
+        "D-061",
+        "FR-019",
+        "SC-006"
+      ],
+      "cap": "n/a",
+      "canaries": [
+        "SYNTH-CANARY-0005-DO-NOT-USE"
+      ],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "C-02",
+      "family": "secrets",
+      "title": "Диагностический экспорт не содержит секретов",
+      "input": {
+        "kind": "action",
+        "value": "diagnostic-export"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Экспорт без значений секретов и без URL с credentials; проверяемая проверка",
+      "klass": "negative(leak-check)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-021",
+        "FR-019",
+        "SC-006"
+      ],
+      "cap": "n/a",
+      "canaries": [
+        "SYNTH-CANARY-0004-DO-NOT-USE"
+      ],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "C-03",
+      "family": "secrets",
+      "title": "Неизвестное импортное поле потенциально секретно",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "unknownField": "SYNTH-CANARY-0006-DO-NOT-USE"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "SAVED_INVALID_UNKNOWN_FIELD",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Узел сохраняется невалидным, поле не теряется, шифруется; в отчёте значение редактировано",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "unknown field ≠ unsupported protocol",
+      "trace": [
+        "FR-019",
+        "US-03:узел с неизвестными полями сохраняется невалидным",
+        "Edge:неизвестное поле"
+      ],
+      "cap": "n/a",
+      "canaries": [
+        "SYNTH-CANARY-0006-DO-NOT-USE"
+      ],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-01",
+      "family": "fetch",
+      "title": "Redirect на другой origin при наличии Authorization",
+      "input": {
+        "kind": "scenario",
+        "value": "302 -> https://other.example.test/x"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Исходные Authorization/Cookie/credentials НЕ передаются на новый origin",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-023",
+        "FR-024",
+        "D-061",
+        "US-04"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-02",
+      "family": "fetch",
+      "title": "Destination = loopback (127.0.0.1)",
+      "input": {
+        "kind": "url",
+        "value": "http://127.0.0.1:8080/list.txt"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_DESTINATION",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отказ: loopback запрещён, включая redirects",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "forbidden destination",
+      "trace": [
+        "FR-024",
+        "D-061"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-03",
+      "family": "fetch",
+      "title": "Destination = link-local (169.254.169.254, metadata)",
+      "input": {
+        "kind": "url",
+        "value": "http://169.254.169.254/latest/meta-data/"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_DESTINATION",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отказ: link-local/metadata запрещены",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "forbidden destination",
+      "trace": [
+        "FR-024",
+        "D-061"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-04",
+      "family": "fetch",
+      "title": "Частный LAN-источник без явного allowlist",
+      "input": {
+        "kind": "url",
+        "value": "http://192.0.2.50:8081/list.txt"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_PRIVATE_WITHOUT_ALLOWLIST",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отказ; требуется явное per-source разрешение адресов/подсетей",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "private source needs allowlist",
+      "trace": [
+        "FR-024",
+        "D-061"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-05",
+      "family": "fetch",
+      "title": "HTTPS→HTTP downgrade",
+      "input": {
+        "kind": "scenario",
+        "value": "https origin -> 302 -> http origin"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Разрешено, но downgrade явно отражается в результате, включая последующую ошибку",
+      "klass": "positive(reported)",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-015",
+        "US-04"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-06",
+      "family": "fetch",
+      "title": "Явный Proxy недоступен",
+      "input": {
+        "kind": "scenario",
+        "value": "proxy connect refused"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Ошибка БЕЗ прямого запроса (нет direct fallback)",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-014",
+        "US-04",
+        "SC-005"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-07",
+      "family": "fetch",
+      "title": "Auto-загрузка без применённого служебного маршрута",
+      "input": {
+        "kind": "scenario",
+        "value": "accessMode=auto, serviceRoute=undefined"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "ERROR_UNDEFINED_ROUTE",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Загрузка запрещена с ошибкой неопределённого маршрута",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-014",
+        "FR-022",
+        "data-model:Subscription"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-08",
+      "family": "fetch",
+      "title": "Неявный fetch при сохранении узла",
+      "input": {
+        "kind": "action",
+        "value": "save node"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Никакой сетевой загрузки не инициируется сохранением/валидацией",
+      "klass": "negative(no-side-effect)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-022",
+        "SC-002"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-09",
+      "family": "fetch",
+      "title": "Запрещённый класс адресов ЯВНО добавлен в per-source allowlist — всё равно отказ",
+      "input": {
+        "kind": "url",
+        "value": "http://127.0.0.1:8080/list.txt",
+        "allowlist": [
+          "127.0.0.1/32"
+        ]
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_DESTINATION_FORBIDDEN_OVER_ALLOWLIST",
+        "compile": "NOT_REACHED",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отказ, несмотря на явное разрешение: запрещённые классы (loopback/link-local/multicast/metadata) имеют ПРИОРИТЕТ над allowlist. Разрешение администратора не может их открыть. Ошибка объясняет приоритет, а не отсутствие разрешения.",
+      "klass": "negative(fail-closed)",
+      "fail_closed": true,
+      "unsupported": "forbidden class overrides allowlist",
+      "trace": [
+        "FR-024",
+        "D-061:forbidden приоритетнее allowlist",
+        "contracts/control-plane:D-061"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "D-10",
+      "family": "fetch",
+      "title": "Permitted-класс в allowlist, но адрес ВНЕ разрешённой подсети",
+      "input": {
+        "kind": "url",
+        "value": "http://198.51.100.77/list.txt",
+        "allowlist": [
+          "198.51.100.0/28"
+        ]
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_NOT_IN_ALLOWLIST",
+        "compile": "NOT_REACHED",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отказ: адрес не входит в разрешённую подсеть. Контраст с D-09 — здесь причина именно в несовпадении, не в запрещённом классе.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "address outside allowlisted subnet",
+      "trace": [
+        "FR-024",
+        "D-061"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "E-01",
+      "family": "reconcile",
+      "title": "Пустой корректный источник",
+      "input": {
+        "kind": "candidate",
+        "value": "empty list"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Прежний список и отметки исчезновения НЕ меняются; обновление не коммитится",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "US-03",
+        "FR-012",
+        "SC-003"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "E-02",
+      "family": "reconcile",
+      "title": "Одна повреждённая запись среди корректных",
+      "input": {
+        "kind": "candidate",
+        "value": "valid, BROKEN, valid"
+      },
+      "expect": {
+        "parse": "FAIL_WHOLE",
+        "validate": "REJECT_ALL",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отклоняется ВСЁ обновление без частичных изменений",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "US-03:повреждённая запись отклоняет все обновление",
+        "SC-003"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "E-03",
+      "family": "reconcile",
+      "title": "Исчезнувший узел, используемый правилом",
+      "input": {
+        "kind": "candidate",
+        "value": "node disappeared, referenced by active rule"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "KEEP_WITH_MARK",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Узел НЕ удаляется, помечается и объясняется; активная зависимость защищена",
+      "klass": "negative(protected)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "US-03",
+        "FR-010",
+        "FR-012",
+        "SC-004"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "E-04",
+      "family": "reconcile",
+      "title": "Дубликаты/неоднозначное совпадение внутри источника",
+      "input": {
+        "kind": "candidate",
+        "value": "two nodes same fingerprint"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_AMBIGUOUS",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Неоднозначность отклоняет весь candidate",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-022",
+        "data-model:SourceBinding"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "E-05",
+      "family": "reconcile",
+      "title": "Переименование узла при стабильном ID источника",
+      "input": {
+        "kind": "candidate",
+        "value": "same sourceStableId, new label"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Локальная идентичность сохраняется, прежние ссылки не рвутся",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-022",
+        "FR-012"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "F-01",
+      "family": "state",
+      "title": "Сохранение семантически невалидного узла",
+      "input": {
+        "kind": "action",
+        "value": "save invalid node"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "INVALID",
+        "compile": "NOT_ATTEMPTED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "save успешен, apply заблокирован; active state не изменён",
+      "klass": "negative(save-ok)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-009",
+        "SC-002",
+        "data-model:Node states"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "F-02",
+      "family": "state",
+      "title": "Проверка, что save не равен apply",
+      "input": {
+        "kind": "action",
+        "value": "save then read active"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Активное состояние идентично состоянию до операции (сравнение до/после)",
+      "klass": "negative(assertion)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-009",
+        "SC-002",
+        "FR-021"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "F-03",
+      "family": "state",
+      "title": "Цикл цепочки (pre-node → landing → pre-node)",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "chain": "cycle"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_CYCLE",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Цикл блокирует применение с причиной",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-006",
+        "FR-010",
+        "US-02"
+      ],
+      "cap": "chaining SUPPORTED, cycle validation OUR LAYER",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "F-04",
+      "family": "state",
+      "title": "Цепочка длиннее одного дополнительного слоя",
+      "input": {
+        "kind": "manual",
+        "chain": "3 layers"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "REJECT_TOO_MANY_LAYERS",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Конфигурация отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано. Допустим один дополнительный слой.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "arbitrary chain length OUT_OF_SCOPE",
+      "trace": [
+        "FR-006",
+        "FR-009",
+        "D-022–023"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "F-05",
+      "family": "state",
+      "title": "Удаление узла с активной ссылкой",
+      "input": {
+        "kind": "action",
+        "value": "delete referenced node"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "REJECT_DANGLING",
+        "compile": "N/A",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Удаление заблокировано; удаление только из черновика не снимает активную зависимость",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-010",
+        "US-02",
+        "SC-004"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "G-01",
+      "family": "capability",
+      "title": "Happy Eyeballs + ручная стратегия одновременно",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "dns": {
+          "happyEyeballs": true,
+          "strategy": "ipv4-only"
+        }
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "При включённом HE ручная стратегия неактивна — конфликт отклоняется, не «исправляется молча»",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-004",
+        "D-019–020"
+      ],
+      "cap": "Happy Eyeballs RFC8305 parity UNVERIFIED (T005)",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "G-02",
+      "family": "capability",
+      "title": "FinalMask JSON для WireGuard UDP",
+      "input": {
+        "kind": "manual",
+        "protocol": "wireguard",
+        "finalMask": {
+          "udp": [
+            {
+              "type": "synth"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "UNVERIFIED",
+        "compile": "NOT_ATTEMPTED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Механизм подтверждён, но семантика конкретных масок UNVERIFIED → применение блокируется, не PASS",
+      "klass": "negative(unverified)",
+      "fail_closed": true,
+      "unsupported": "per-mask semantics UNVERIFIED",
+      "trace": [
+        "FR-008",
+        "capabilities:FinalMask"
+      ],
+      "cap": "per-mask WireGuard validity UNVERIFIED (T005)",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "G-03",
+      "family": "capability",
+      "title": "Известное, но неутверждённое поле (allowInsecure из подписки)",
+      "input": {
+        "kind": "uri",
+        "value": "vless://...&allowInsecure=1"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "UNRESOLVED",
+        "compile": "NOT_ATTEMPTED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Семантический паритет с PassWall-флагом UNRESOLVED; не объявляется поддержанным",
+      "klass": "negative(unverified)",
+      "fail_closed": true,
+      "unsupported": "allowInsecure parity UNRESOLVED",
+      "trace": [
+        "FR-003",
+        "capabilities:allowInsecure"
+      ],
+      "cap": "allowInsecure passthrough UNVERIFIED",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "G-04",
+      "family": "capability",
+      "title": "IPv6-профиль (R-03 gate)",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "endpoint": "[2001:db8::10]:443"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "BLOCKED_GATE",
+        "compile": "NOT_ATTEMPTED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "IPv6-перехват выключен по умолчанию; включение требует отдельного доказательства, не выводится из наличия поля",
+      "klass": "negative(gated)",
+      "fail_closed": true,
+      "unsupported": "IPv6 profile BLOCKED→gate",
+      "trace": [
+        "FR-020",
+        "Edge:IPv6 endpoint"
+      ],
+      "cap": "IPv6 profile BLOCKED (R-03)",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "H-01",
+      "family": "field",
+      "title": "MTU вне контракта",
+      "input": {
+        "kind": "manual",
+        "protocol": "wireguard",
+        "mtu": 99999
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALIDATE_ERROR",
+        "compile": "NOT_REACHED",
+        "apply": "BLOCKED"
+      },
+      "outcome": "Значение вне контракта поля отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано.",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-008",
+        "FR-009",
+        "Edge:MTU/Keep Alive вне контракта"
+      ],
+      "cap": "MTU SUPPORTED (range: T005)",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "H-02",
+      "family": "field",
+      "title": "TFO/MPTCP по умолчанию выключены",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "tfo": null,
+        "mptcp": null
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "OMIT_OPTIONS",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Отсутствие полей означает выключено; ядро/интерфейсы не настраиваются автоматически",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "kernel auto-provisioning UNSUPPORTED BY DESIGN",
+      "trace": [
+        "FR-005",
+        "D-021",
+        "D-048"
+      ],
+      "cap": "TFO/MPTCP SUPPORTED, auto-provisioning UNSUPPORTED BY DESIGN",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "H-03",
+      "family": "field",
+      "title": "Скрытое неактивное значение при активной секции",
+      "input": {
+        "kind": "manual",
+        "protocol": "vless",
+        "inactiveFields": {
+          "sni": "inactive.example.test"
+        }
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "EXCLUDE_INACTIVE",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Неактивное значение хранится, но не используется и не теряется",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-009",
+        "data-model:Node"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "I-01",
+      "family": "rules",
+      "title": "Пересечение block/direct/proxy",
+      "input": {
+        "kind": "manual",
+        "rules": [
+          "block example.test",
+          "direct example.test",
+          "proxy example.test"
+        ]
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID_WITH_CONFLICT_REPORT",
+        "compile": "PRIORITY_ORDER",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Приоритет block → explicit direct → proxy → default direct; конфликт показывается при проверке",
+      "klass": "positive(reported)",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-020",
+        "US-05"
+      ],
+      "cap": "Domain/IP rules SUPPORTED (design)",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "I-02",
+      "family": "rules",
+      "title": "Классификация не готова",
+      "input": {
+        "kind": "scenario",
+        "value": "classification not ready"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "BLOCK_NEW_CONNECTIONS"
+      },
+      "outcome": "Новые соединения затронутых клиентов НЕ выходят напрямую; управление остаётся доступным",
+      "klass": "negative(fail-closed)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-020",
+        "SC-005"
+      ],
+      "cap": "runtime NOT_RUN",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "I-03",
+      "family": "rules",
+      "title": "Штатная остановка сохраняет защиту proxy-направлений",
+      "input": {
+        "kind": "scenario",
+        "value": "normal stop"
+      },
+      "expect": {
+        "parse": "N/A",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "STOPPED_GUARDED"
+      },
+      "outcome": "Прямой обход не появляется; снятие защиты — отдельное явное действие с предупреждением",
+      "klass": "negative(guard)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-020",
+        "D-058",
+        "data-model:Stop"
+      ],
+      "cap": "runtime NOT_RUN",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "J-01",
+      "family": "filter",
+      "title": "Фильтр keep, ни одно имя не совпало",
+      "input": {
+        "kind": "candidate",
+        "filter": {
+          "mode": "keep",
+          "pattern": "nomatch-*"
+        },
+        "value": "3 nodes, none match"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Ноль после фильтрации НЕ меняет прежний список и отметки исчезновения",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-013",
+        "US-03:ноль после фильтрации",
+        "SC-003"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "J-02",
+      "family": "filter",
+      "title": "Пустой keep-фильтр",
+      "input": {
+        "kind": "candidate",
+        "filter": {
+          "mode": "keep",
+          "pattern": ""
+        },
+        "value": "3 nodes"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "N/A",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Пустой шаблон трактуется по документированному правилу, не «удалить всё» молча",
+      "klass": "negative",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-013",
+        "Edge:Пустой keep-фильтр"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "J-03",
+      "family": "filter",
+      "title": "Фильтр discard, шаблон совпадает с активным узлом",
+      "input": {
+        "kind": "candidate",
+        "filter": {
+          "mode": "discard",
+          "pattern": "SynthNodeA"
+        },
+        "value": "active node matches"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "KEEP_PROTECTED",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Используемый узел не удаляется фильтром; отмечается и объясняется",
+      "klass": "negative(protected)",
+      "fail_closed": true,
+      "unsupported": "none",
+      "trace": [
+        "FR-013",
+        "FR-010",
+        "SC-004"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    },
+    {
+      "id": "J-04",
+      "family": "filter",
+      "title": "Оба режима с приоритетом (keep+discard)",
+      "input": {
+        "kind": "candidate",
+        "filter": {
+          "mode": "both",
+          "keep": "*",
+          "discard": "drop-*"
+        },
+        "value": "4 nodes"
+      },
+      "expect": {
+        "parse": "OK",
+        "validate": "VALID",
+        "compile": "N/A",
+        "apply": "NOT_INVOKED"
+      },
+      "outcome": "Приоритет режимов применяется документированно; результат детерминирован",
+      "klass": "positive",
+      "fail_closed": false,
+      "unsupported": "none",
+      "trace": [
+        "FR-013",
+        "D-031",
+        "D-041–042"
+      ],
+      "cap": "n/a",
+      "canaries": [],
+      "runtime_status": "NOT_RUN",
+      "apply_observation": null
+    }
+  ]
+}

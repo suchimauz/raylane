@@ -1,0 +1,45 @@
+{
+  "id": "F-05",
+  "family": "state",
+  "title": "Удаление узла с активной ссылкой",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-010",
+    "US-02",
+    "SC-004"
+  ],
+  "outcome": "Удаление заблокировано; удаление только из черновика не снимает активную зависимость",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "action",
+    "payload": {
+      "action": "delete referenced node",
+      "subject": {
+        "label": "SynthNodeA",
+        "referencedBy": "active rule"
+      }
+    },
+    "oracle_value": "delete referenced node",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "REJECT_DANGLING",
+    "compile": "N/A",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "F-05"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

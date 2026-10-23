@@ -1,0 +1,55 @@
+{
+  "id": "B-05",
+  "family": "protocol",
+  "title": "VLESS: отмечена недопустимая комбинация (проверяем, что не выдаётся за supported)",
+  "klass": "negative(unverified)",
+  "fail_closed": true,
+  "unsupported": "наличие опций ≠ допустимость комбинации",
+  "cap": "Arbitrary combination validity UNSUPPORTED BY DESIGN",
+  "trace": [
+    "FR-002:наличие опций не обещает допустимость",
+    "SC-001"
+  ],
+  "outcome": "Комбинация НЕ объявляется поддержанной; результат UNVERIFIED, не PASS",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "xhttp",
+      "security": "reality",
+      "sni": "cdn.example.test",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      }
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "UNVERIFIED_COMBINATION",
+    "compile": "NOT_ATTEMPTED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-05"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

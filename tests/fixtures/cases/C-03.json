@@ -1,0 +1,59 @@
+{
+  "id": "C-03",
+  "family": "secrets",
+  "title": "Неизвестное импортное поле потенциально секретно",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "unknown field ≠ unsupported protocol",
+  "cap": "n/a",
+  "trace": [
+    "FR-019",
+    "US-03:узел с неизвестными полями сохраняется невалидным",
+    "Edge:неизвестное поле"
+  ],
+  "outcome": "Узел сохраняется невалидным, поле не теряется, шифруется; в отчёте значение редактировано",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "raw",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "unknownField": "SYNTH-CANARY-0006-DO-NOT-USE"
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "SAVED_INVALID_UNKNOWN_FIELD",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [
+    "SYNTH-CANARY-0006-DO-NOT-USE"
+  ],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "C-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

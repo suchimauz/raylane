@@ -1,0 +1,45 @@
+{
+  "id": "B-10",
+  "family": "protocol",
+  "title": "HTTP: REALITY для HTTP-выхода",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "REALITY для HTTP UNSUPPORTED BY PRODUCT",
+  "cap": "REALITY for HTTP UNSUPPORTED BY PRODUCT",
+  "trace": [
+    "FR-007",
+    "D-045",
+    "capabilities:REALITY for HTTP"
+  ],
+  "outcome": "Явный отказ ПРОДУКТА (не отказ движка); сообщение объясняет политику",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "http",
+      "label": "SynthNodeHttp",
+      "endpoint": "node3.example.test:8080",
+      "security": "reality",
+      "tls": false
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "REJECT_BY_PRODUCT_POLICY",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-10"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

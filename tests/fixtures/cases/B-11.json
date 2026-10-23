@@ -1,0 +1,60 @@
+{
+  "id": "B-11",
+  "family": "protocol",
+  "title": "WireGuard: один peer, все заявленные поля валидны (структурно корректные ключи)",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "WireGuard outbound SUPPORTED",
+  "trace": [
+    "FR-001",
+    "FR-008",
+    "data-model:Secret"
+  ],
+  "outcome": "Валидный черновик. Все три ключа — корректная WG-форма (32 байта, base64, 44 символа с '='); publicKey действительно выведен из privateKey. Ключи хранятся как SecretRef, не в открытом виде. Применение не исполняется: стадия apply вне scope этого пакета.",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "wireguard",
+      "label": "SynthNodeWg",
+      "endpoint": "203.0.113.10:51820",
+      "publicKey": "936MaZHZsLaibKy96xJ1DQvbqAYZyC2r8LVb5gOma0Q=",
+      "privateKey": "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+      "presharedKey": "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0=",
+      "localAddresses": [
+        "192.0.2.2/32"
+      ],
+      "mtu": 1420,
+      "reserved": [
+        0,
+        0,
+        0
+      ],
+      "keepAlive": 25,
+      "finalMask": null
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "PRODUCES_OUTBOUND",
+    "apply": "BLOCKED_PENDING_APPLY_STAGE"
+  },
+  "expect_apply_policy": "BLOCKED_PENDING_APPLY_STAGE",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [
+    "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+    "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0="
+  ],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-11"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

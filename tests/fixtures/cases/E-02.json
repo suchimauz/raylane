@@ -1,0 +1,66 @@
+{
+  "id": "E-02",
+  "family": "reconcile",
+  "title": "Одна повреждённая запись среди корректных",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "US-03:повреждённая запись отклоняет все обновление",
+    "SC-003"
+  ],
+  "outcome": "Отклоняется ВСЁ обновление без частичных изменений",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "candidate",
+    "payload": {
+      "candidate": [
+        {
+          "label": "SynthNodeA",
+          "protocol": "vless",
+          "endpoint": "synthnodea.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0001"
+        },
+        {
+          "label": "SynthNodeB",
+          "protocol": "vless",
+          "endpoint": "",
+          "uuid": "not-a-uuid",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0002"
+        },
+        {
+          "label": "SynthNodeC",
+          "protocol": "vless",
+          "endpoint": "synthnodec.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0003"
+        }
+      ]
+    },
+    "oracle_value": "valid, BROKEN, valid",
+    "concrete": true,
+    "expansion_note": "prose 'valid, BROKEN, valid' replaced by a concrete three-node candidate whose middle node is broken"
+  },
+  "expect": {
+    "parse": "FAIL_WHOLE",
+    "validate": "REJECT_ALL",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "E-02"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

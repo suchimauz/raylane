@@ -1,0 +1,57 @@
+{
+  "id": "B-02",
+  "family": "protocol",
+  "title": "VLESS: ветка несуществующего транспорта 'quic-legacy'",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "UNSUPPORTED transport value",
+  "cap": "transports raw/mkcp/ws/grpc/httpupgrade/xhttp only",
+  "trace": [
+    "FR-002",
+    "FR-009",
+    "US-01",
+    "SC-004"
+  ],
+  "outcome": "Семантически невалиден; сохраняется как невалидный черновик с причиной; применение запрещено",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "quic-legacy",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      }
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALIDATE_ERROR",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-02"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

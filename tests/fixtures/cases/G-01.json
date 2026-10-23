@@ -1,0 +1,59 @@
+{
+  "id": "G-01",
+  "family": "capability",
+  "title": "Happy Eyeballs + ручная стратегия одновременно",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "Happy Eyeballs RFC8305 parity UNVERIFIED (T005)",
+  "trace": [
+    "FR-004",
+    "D-019–020"
+  ],
+  "outcome": "При включённом HE ручная стратегия неактивна — конфликт отклоняется, не «исправляется молча»",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "raw",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "dns": {
+        "happyEyeballs": true,
+        "strategy": "ipv4-only"
+      }
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALIDATE_ERROR",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "G-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

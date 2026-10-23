@@ -1,0 +1,42 @@
+{
+  "id": "A-05",
+  "family": "parse",
+  "title": "Полностью неизвестный формат (не URI/YAML/JSON)",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "MUST_DISTINGUISH from unsupported-protocol",
+  "cap": "n/a",
+  "trace": [
+    "US-03:неизвестный формат не маскируется",
+    "Edge:неизвестное поле против неизвестного формата"
+  ],
+  "outcome": "Ошибка неизвестного формата; НЕ маскируется под «неподдерживаемый протокол»",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "opaque",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/A-05.txt",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "-----BEGIN SYNTH UNKNOWN FORMAT-----",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "FAIL_UNKNOWN_FORMAT",
+    "validate": "NOT_REACHED",
+    "compile": "NOT_REACHED",
+    "apply": "NOT_REACHED"
+  },
+  "expect_apply_policy": "NOT_REACHED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "A-05"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

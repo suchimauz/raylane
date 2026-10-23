@@ -1,0 +1,43 @@
+{
+  "id": "G-03",
+  "family": "capability",
+  "title": "Известное, но неутверждённое поле (allowInsecure из подписки)",
+  "klass": "negative(unverified)",
+  "fail_closed": true,
+  "unsupported": "allowInsecure parity UNRESOLVED",
+  "cap": "allowInsecure passthrough UNVERIFIED",
+  "trace": [
+    "FR-003",
+    "capabilities:allowInsecure"
+  ],
+  "outcome": "Семантический паритет с PassWall-флагом UNRESOLVED; не объявляется поддержанным",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "uri",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/G-03.allowinsecure-uri.txt",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "vless://...&allowInsecure=1",
+    "concrete": true,
+    "expansion_note": "placeholder 'vless://...&allowInsecure=1' replaced by a full VLESS URI carrying that flag"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "UNRESOLVED",
+    "compile": "NOT_ATTEMPTED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "G-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

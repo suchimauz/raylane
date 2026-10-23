@@ -1,0 +1,48 @@
+{
+  "id": "D-05",
+  "family": "fetch",
+  "title": "HTTPS→HTTP downgrade",
+  "klass": "positive(reported)",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-015",
+    "US-04"
+  ],
+  "outcome": "Разрешено, но downgrade явно отражается в результате, включая последующую ошибку",
+  "fixture_kind": "scenario",
+  "input": {
+    "kind": "scenario",
+    "payload": {
+      "request": {
+        "method": "GET",
+        "url": "https://subs.example.test/list.txt"
+      },
+      "response": {
+        "status": 302,
+        "location": "http://plain.example.test/list.txt"
+      },
+      "final_url": "http://plain.example.test/list.txt"
+    },
+    "oracle_value": "https origin -> 302 -> http origin",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-05"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

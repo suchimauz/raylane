@@ -1,0 +1,57 @@
+{
+  "id": "F-03",
+  "family": "state",
+  "title": "Цикл цепочки (pre-node → landing → pre-node)",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "chaining SUPPORTED, cycle validation OUR LAYER",
+  "trace": [
+    "FR-006",
+    "FR-010",
+    "US-02"
+  ],
+  "outcome": "Цикл блокирует применение с причиной",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "raw",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "chain": "cycle"
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "REJECT_CYCLE",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "F-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

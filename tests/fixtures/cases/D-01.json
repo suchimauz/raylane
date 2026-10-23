@@ -1,0 +1,57 @@
+{
+  "id": "D-01",
+  "family": "fetch",
+  "title": "Redirect на другой origin при наличии Authorization",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-023",
+    "FR-024",
+    "D-061",
+    "US-04"
+  ],
+  "outcome": "Исходные Authorization/Cookie/credentials НЕ передаются на новый origin",
+  "fixture_kind": "scenario",
+  "input": {
+    "kind": "scenario",
+    "payload": {
+      "request": {
+        "method": "GET",
+        "url": "https://subs.example.test/list.txt",
+        "headers": {
+          "Authorization": "Bearer SYNTH-AUTH-TOKEN-DO-NOT-USE",
+          "Cookie": "session=SYNTH-SESSION-DO-NOT-USE"
+        }
+      },
+      "response": {
+        "status": 302,
+        "location": "https://other.example.test/x"
+      },
+      "carried_credentials": [
+        "Authorization",
+        "Cookie"
+      ]
+    },
+    "oracle_value": "302 -> https://other.example.test/x",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

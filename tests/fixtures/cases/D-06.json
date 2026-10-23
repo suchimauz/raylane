@@ -1,0 +1,49 @@
+{
+  "id": "D-06",
+  "family": "fetch",
+  "title": "Явный Proxy недоступен",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-014",
+    "US-04",
+    "SC-005"
+  ],
+  "outcome": "Ошибка БЕЗ прямого запроса (нет direct fallback)",
+  "fixture_kind": "scenario",
+  "input": {
+    "kind": "scenario",
+    "payload": {
+      "request": {
+        "method": "GET",
+        "url": "https://subs.example.test/list.txt",
+        "viaProxy": {
+          "scheme": "http",
+          "endpoint": "203.0.113.10:3128"
+        }
+      },
+      "transport_error": "connection refused"
+    },
+    "oracle_value": "proxy connect refused",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-06"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

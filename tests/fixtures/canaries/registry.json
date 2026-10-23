@@ -1,0 +1,92 @@
+{
+  "prefix": "SYNTH-CANARY",
+  "rule": "Каждый canary уникален, синтетичен, помечен DO-NOT-USE, не похож на настоящий секрет.",
+  "must_not_appear_in": [
+    "validation report",
+    "diagnostic export",
+    "logs",
+    "API read of secret values"
+  ],
+  "canaries": [
+    {
+      "id": "CAN-0001",
+      "case": "B-07",
+      "field": "password",
+      "exact_value": "SYNTH-CANARY-0001-DO-NOT-USE",
+      "form": "literal text",
+      "note": "SOCKS5 пароль без имени пользователя; не должен попасть в сообщение об ошибке",
+      "oracle_case": "B-07",
+      "exercised_in": [
+        "B-07"
+      ],
+      "do_not_use": true
+    },
+    {
+      "id": "CAN-0002",
+      "case": "B-11",
+      "field": "privateKey",
+      "exact_value": "UkFZTEFORS1TWU5USC1XRy1QUklWLTAwMDItLS0tLS0=",
+      "raw_hex": "5241594c414e452d53594e54482d57472d505249562d303030322d2d2d2d2d2d",
+      "form": "32 raw bytes, base64, 44 chars",
+      "note": "Синтетический seed b'RAYLANE-SYNTH-WG-PRIV-0002------'. НЕ настоящий ключ.",
+      "oracle_case": "B-11",
+      "exercised_in": [
+        "B-11"
+      ],
+      "do_not_use": true
+    },
+    {
+      "id": "CAN-0003",
+      "case": "B-11",
+      "field": "presharedKey",
+      "exact_value": "UkFZTEFORS1TWU5USC1XRy1QU0stLTAwMDMtLS0tLS0=",
+      "raw_hex": "5241594c414e452d53594e54482d57472d50534b2d2d303030332d2d2d2d2d2d",
+      "form": "32 raw bytes, base64, 44 chars",
+      "note": "Синтетический seed b'RAYLANE-SYNTH-WG-PSK--0003------'. НЕ настоящий ключ.",
+      "oracle_case": "B-11",
+      "exercised_in": [
+        "B-11"
+      ],
+      "do_not_use": true
+    },
+    {
+      "id": "CAN-0004",
+      "case": "C-02",
+      "field": "diagnostic export",
+      "exact_value": "SYNTH-CANARY-0004-DO-NOT-USE",
+      "form": "literal text",
+      "note": "обязан отсутствовать в диагностическом экспорте (FR-021/SC-006)",
+      "oracle_case": "C-02",
+      "exercised_in": [
+        "C-02"
+      ],
+      "do_not_use": true
+    },
+    {
+      "id": "CAN-0005",
+      "case": "C-01",
+      "field": "url userinfo password",
+      "exact_value": "SYNTH-CANARY-0005-DO-NOT-USE",
+      "form": "literal text",
+      "note": "извлекается в защищённое хранилище; в отображаемом URL маска; нет в журналах (D-061)",
+      "oracle_case": "C-01",
+      "exercised_in": [
+        "C-01"
+      ],
+      "do_not_use": true
+    },
+    {
+      "id": "CAN-0006",
+      "case": "C-03",
+      "field": "unknown imported value",
+      "exact_value": "SYNTH-CANARY-0006-DO-NOT-USE",
+      "form": "literal text",
+      "note": "считается потенциально секретным; хранится шифрованно; в отчёте редактировано (FR-019)",
+      "oracle_case": "C-03",
+      "exercised_in": [
+        "C-03"
+      ],
+      "do_not_use": true
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "id": "D-08",
+  "family": "fetch",
+  "title": "Неявный fetch при сохранении узла",
+  "klass": "negative(no-side-effect)",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-022",
+    "SC-002"
+  ],
+  "outcome": "Никакой сетевой загрузки не инициируется сохранением/валидацией",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "action",
+    "payload": {
+      "action": "save node",
+      "subject": {
+        "protocol": "vless",
+        "label": "SynthNodeA",
+        "endpoint": "node1.example.test:443",
+        "uuid": "11111111-2222-3333-4444-555555555555",
+        "transport": "raw",
+        "security": "tls",
+        "sni": "cdn.example.test",
+        "flow": "",
+        "tls": {
+          "serverName": "cdn.example.test",
+          "allowInsecure": false,
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ]
+        }
+      }
+    },
+    "oracle_value": "save node",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "D-08"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

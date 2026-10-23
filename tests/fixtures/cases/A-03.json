@@ -1,0 +1,44 @@
+{
+  "id": "A-03",
+  "family": "parse",
+  "title": "Base64-подписка с корректным списком URI",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-011",
+    "FR-022",
+    "data-model:Subscription"
+  ],
+  "outcome": "Три узла; локальные ID присвоены приложением, не источником",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "base64",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/A-03.subscription-list.b64",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "BASE64(SYNTH-LIST-3-URIS)",
+    "concrete": true,
+    "expansion_note": "placeholder 'BASE64(SYNTH-LIST-3-URIS)' replaced by the real base64 of a three-URI list"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "PRODUCES_OUTBOUND",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "A-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

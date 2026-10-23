@@ -1,0 +1,61 @@
+{
+  "id": "E-03",
+  "family": "reconcile",
+  "title": "Исчезнувший узел, используемый правилом",
+  "klass": "negative(protected)",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "US-03",
+    "FR-010",
+    "FR-012",
+    "SC-004"
+  ],
+  "outcome": "Узел НЕ удаляется, помечается и объясняется; активная зависимость защищена",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "candidate",
+    "payload": {
+      "candidate": [
+        {
+          "label": "SynthNodeB",
+          "protocol": "vless",
+          "endpoint": "synthnodeb.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0002"
+        },
+        {
+          "label": "SynthNodeC",
+          "protocol": "vless",
+          "endpoint": "synthnodec.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0003"
+        }
+      ],
+      "activeRuleReferences": "SynthNodeA"
+    },
+    "oracle_value": "node disappeared, referenced by active rule",
+    "concrete": true,
+    "expansion_note": "prose 'node disappeared, referenced by active rule' replaced by a concrete candidate missing that node plus the active rule that references it"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "KEEP_WITH_MARK",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "E-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

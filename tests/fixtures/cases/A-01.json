@@ -1,0 +1,44 @@
+{
+  "id": "A-01",
+  "family": "parse",
+  "title": "Валидный VLESS URI vless:// без extras",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "VLESS outbound SUPPORTED",
+  "trace": [
+    "FR-001",
+    "FR-002",
+    "US-01",
+    "SC-001"
+  ],
+  "outcome": "Узел сохраняется как валидный черновик; применение НЕ происходит",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "uri",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/A-01.txt",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "vless://11111111-2222-3333-4444-555555555555@node1.example.test:443?type=raw&security=tls&sni=cdn.example.test#SynthNodeA",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "PRODUCES_OUTBOUND",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "A-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

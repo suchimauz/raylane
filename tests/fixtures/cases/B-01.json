@@ -1,0 +1,57 @@
+{
+  "id": "B-01",
+  "family": "protocol",
+  "title": "VLESS положительный: ws + TLS + flow xtls-rprx-vision",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "VLESS/ws/TLS/vision SUPPORTED",
+  "trace": [
+    "FR-001",
+    "FR-002",
+    "FR-003"
+  ],
+  "outcome": "Валидный черновик",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "ws",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "wsPath": "/synth"
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "PRODUCES_OUTBOUND",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

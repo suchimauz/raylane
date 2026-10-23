@@ -1,0 +1,58 @@
+{
+  "id": "H-03",
+  "family": "field",
+  "title": "Скрытое неактивное значение при активной секции",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-009",
+    "data-model:Node"
+  ],
+  "outcome": "Неактивное значение хранится, но не используется и не теряется",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "raw",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "inactiveFields": {
+        "sni": "inactive.example.test"
+      }
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "EXCLUDE_INACTIVE",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "H-03"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

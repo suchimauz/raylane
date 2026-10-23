@@ -1,0 +1,59 @@
+{
+  "id": "F-01",
+  "family": "state",
+  "title": "Сохранение семантически невалидного узла",
+  "klass": "negative(save-ok)",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-009",
+    "SC-002",
+    "data-model:Node states"
+  ],
+  "outcome": "save успешен, apply заблокирован; active state не изменён",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "action",
+    "payload": {
+      "action": "save invalid node",
+      "subject": {
+        "protocol": "vless",
+        "label": "SynthNodeA",
+        "endpoint": "node1.example.test:443",
+        "uuid": "11111111-2222-3333-4444-555555555555",
+        "transport": "quic-legacy",
+        "security": "tls",
+        "sni": "cdn.example.test",
+        "flow": "",
+        "tls": {
+          "serverName": "cdn.example.test",
+          "allowInsecure": false,
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ]
+        }
+      }
+    },
+    "oracle_value": "save invalid node",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "INVALID",
+    "compile": "NOT_ATTEMPTED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "F-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

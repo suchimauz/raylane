@@ -1,0 +1,48 @@
+{
+  "id": "C-02",
+  "family": "secrets",
+  "title": "Диагностический экспорт не содержит секретов",
+  "klass": "negative(leak-check)",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-021",
+    "FR-019",
+    "SC-006"
+  ],
+  "outcome": "Экспорт без значений секретов и без URL с credentials; проверяемая проверка",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "action",
+    "payload": {
+      "action": "diagnostic-export",
+      "artifact": "diagnostics",
+      "format": "json",
+      "required_absent": [
+        "SYNTH-CANARY-0004-DO-NOT-USE"
+      ]
+    },
+    "oracle_value": "diagnostic-export",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [
+    "SYNTH-CANARY-0004-DO-NOT-USE"
+  ],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "C-02"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

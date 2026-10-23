@@ -1,0 +1,51 @@
+{
+  "id": "E-05",
+  "family": "reconcile",
+  "title": "Переименование узла при стабильном ID источника",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-022",
+    "FR-012"
+  ],
+  "outcome": "Локальная идентичность сохраняется, прежние ссылки не рвутся",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "candidate",
+    "payload": {
+      "candidate": [
+        {
+          "label": "SynthNodeA-renamed",
+          "protocol": "vless",
+          "endpoint": "synthnodea-renamed.example.test:443",
+          "uuid": "11111111-2222-3333-4444-555555555555",
+          "sourceId": "sub-0001",
+          "keyedFingerprint": "fp-0001",
+          "sourceStableId": "stable-0001"
+        }
+      ]
+    },
+    "oracle_value": "same sourceStableId, new label",
+    "concrete": true,
+    "expansion_note": "prose 'same sourceStableId, new label' replaced by a concrete candidate carrying that stable id under a new label"
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "E-05"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

@@ -1,0 +1,49 @@
+{
+  "id": "B-07",
+  "family": "protocol",
+  "title": "SOCKS5: пароль без имени пользователя",
+  "klass": "negative",
+  "fail_closed": true,
+  "unsupported": "invalid auth pair",
+  "cap": "SOCKS5 user/pass SUPPORTED",
+  "trace": [
+    "FR-007",
+    "FR-009",
+    "Edge:Пароль без имени",
+    "FR-019"
+  ],
+  "outcome": "Комбинация отклоняется с причиной; узел СОХРАНЯЕТСЯ как невалидный черновик; применение заблокировано. Значение пароля НЕ попадает в сообщение об ошибке.",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "socks5",
+      "label": "SynthNodeSocks",
+      "endpoint": "node2.example.test:1080",
+      "auth": "userpass",
+      "username": "",
+      "password": "SYNTH-CANARY-0001-DO-NOT-USE"
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALIDATE_ERROR",
+    "compile": "NOT_REACHED",
+    "apply": "BLOCKED"
+  },
+  "expect_apply_policy": "BLOCKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [
+    "SYNTH-CANARY-0001-DO-NOT-USE"
+  ],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "B-07"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

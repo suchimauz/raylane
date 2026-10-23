@@ -1,0 +1,43 @@
+{
+  "id": "I-02",
+  "family": "rules",
+  "title": "Классификация не готова",
+  "klass": "negative(fail-closed)",
+  "fail_closed": true,
+  "unsupported": "none",
+  "cap": "runtime NOT_RUN",
+  "trace": [
+    "FR-020",
+    "SC-005"
+  ],
+  "outcome": "Новые соединения затронутых клиентов НЕ выходят напрямую; управление остаётся доступным",
+  "fixture_kind": "scenario",
+  "input": {
+    "kind": "scenario",
+    "payload": {
+      "classification": "not ready",
+      "affectedClients": [
+        "192.0.2.2"
+      ]
+    },
+    "oracle_value": "classification not ready",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "N/A",
+    "validate": "N/A",
+    "compile": "N/A",
+    "apply": "BLOCK_NEW_CONNECTIONS"
+  },
+  "expect_apply_policy": "BLOCK_NEW_CONNECTIONS",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "I-02"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

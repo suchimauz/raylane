@@ -1,0 +1,58 @@
+{
+  "id": "H-02",
+  "family": "field",
+  "title": "TFO/MPTCP по умолчанию выключены",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "kernel auto-provisioning UNSUPPORTED BY DESIGN",
+  "cap": "TFO/MPTCP SUPPORTED, auto-provisioning UNSUPPORTED BY DESIGN",
+  "trace": [
+    "FR-005",
+    "D-021",
+    "D-048"
+  ],
+  "outcome": "Отсутствие полей означает выключено; ядро/интерфейсы не настраиваются автоматически",
+  "fixture_kind": "structured",
+  "input": {
+    "kind": "manual",
+    "payload": {
+      "protocol": "vless",
+      "label": "SynthNodeA",
+      "endpoint": "node1.example.test:443",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "transport": "raw",
+      "security": "tls",
+      "sni": "cdn.example.test",
+      "flow": "",
+      "tls": {
+        "serverName": "cdn.example.test",
+        "allowInsecure": false,
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "tfo": null,
+      "mptcp": null
+    },
+    "oracle_value": null,
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "OMIT_OPTIONS",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "H-02"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

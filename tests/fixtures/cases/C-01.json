@@ -1,0 +1,46 @@
+{
+  "id": "C-01",
+  "family": "secrets",
+  "title": "URL подписки с userinfo",
+  "klass": "positive",
+  "fail_closed": false,
+  "unsupported": "none",
+  "cap": "n/a",
+  "trace": [
+    "FR-024",
+    "D-061",
+    "FR-019",
+    "SC-006"
+  ],
+  "outcome": "Credentials извлекаются в защищённое хранилище; в отображаемом URL — маска; в журналах значения нет",
+  "fixture_kind": "literal",
+  "input": {
+    "kind": "url",
+    "payload": {
+      "kind": "file",
+      "path": "inputs/C-01.txt",
+      "encoding": "utf-8"
+    },
+    "oracle_value": "https://synthuser:SYNTH-CANARY-0005-DO-NOT-USE@subs.example.test/list.txt",
+    "concrete": true
+  },
+  "expect": {
+    "parse": "OK",
+    "validate": "VALID",
+    "compile": "N/A",
+    "apply": "NOT_INVOKED"
+  },
+  "expect_apply_policy": "NOT_INVOKED",
+  "expect_apply_is_policy_not_observation": true,
+  "runtime_status": "NOT_RUN",
+  "apply_observation": null,
+  "canaries": [
+    "SYNTH-CANARY-0005-DO-NOT-USE"
+  ],
+  "oracle_ref": {
+    "file": "oracle/T003-oracle.json",
+    "case": "C-01"
+  },
+  "synthetic": true,
+  "never_fetch": true
+}

@@ -38,3 +38,5 @@
 | VLESS: ALPN, uTLS/fingerprint, SHA-256 pin, имя сертификата, PEM проверки, cipher suites, ECH, REALITY ML-DSA-65 | Весь перечисленный набор выбран (D-017) | Не задан | CONFIRMED | Условные поля защиты без автоматического включения |
 
 | VLESS: Mux, mux_concurrency, xudp_concurrency | Сохранить (D-018) | Не задан | CONFIRMED | Проверка сочетаний transport/flow, без автоматического включения |
+
+| VLESS: DNS адреса узла — Auto/TCP/UDP/DoH | Сохранить (D-019) | Не задан | CONFIRMED | Серверы по умолчанию, Auto и bootstrap еще не определены |

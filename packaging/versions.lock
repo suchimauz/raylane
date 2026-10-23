@@ -22,7 +22,7 @@ Verification date: 2026-10-23 (UTC). Re-check before first runnable baseline.
 | tag | `v26.10.21` | `GET /repos/XTLS/Xray-core/releases/latest` on 2026-10-23 → tag_name v26.10.21, published_at 2026-10-21T12:07:11Z |
 | commit date | 2026-10-21T11:59:30Z | `GET /repos/XTLS/Xray-core/commits/1b1647cd…` commit.committer.date |
 | go directive | `go 1.27` | go.mod at that commit (raw.githubusercontent.com) |
-| core version const | Version_x = 26 | `core/core.go` at commit (Version_y/z injected at build; display "Xray 26.10.21" comes from release ldflags, not from a source constant — corrected per round-1 note) |
+| core version const | Version_x=26, Version_y=10, Version_z=21 (i.e. 26.10.21) | `core/core.go` L21–23 at pinned commit, fetched HTTP 200 on 2026-10-23 19:23 UTC (check 32; artifact r1/xray-core.go). Rev1's attempted `core/version.go` fetch returned HTTP 404 — that file does not exist; evidence is core/core.go (F-04-6) |
 | license | MPL-2.0 | LICENSE file at commit: "Mozilla Public License Version 2.0" |
 | repo | https://github.com/XTLS/Xray-core | public source |
 | release assets | `Xray-linux-64.zip` + `Xray-linux-64.zip.dgst` (algorithms present in file: MD5, SHA1, SHA2-256, SHA2-512) | asset list from releases/latest JSON; dgst fetched from `https://github.com/XTLS/Xray-core/releases/download/v26.10.21/Xray-linux-64.zip.dgst`, HTTP 200, 2026-10-23 |
@@ -30,20 +30,28 @@ Verification date: 2026-10-23 (UTC). Re-check before first runnable baseline.
 
 Trust levels (separate per G1; round-1 corrected):
 - source trust: VERIFIED (metadata level) — public repo; tag→commit mapping confirmed
-  via GitHub API on 2026-10-23.
+  via GitHub API on 2026-10-23. Additionally, GitHub's commit API reports
+  `.commit.verification = {verified: true, reason: "valid", verified_at:
+  2026-10-21T11:59:31Z}` for the pinned commit — a PGP signature VERIFIED BY THE
+  PROVIDER (GitHub web-flow signing/verification), not by us: local cryptographic
+  verification is NOT_RUN (F-04-3/R2-1). This raises source trust above rev1's record,
+  but must not be read as independently verified maintainer-key trust. The tag itself
+  is lightweight → no tag signature exists (distinct fact from commit signature).
+  Release ASSETS still carry no signature-like files in the observed asset list
+  (2026-10-23) — asset-signing channel: NOT observed (M1 wording, restricted to the
+  asset list).
 - release metadata trust: VERIFIED (metadata level) — official release object and
   digest file observed.
 - binary trust: NOT TRUSTED — the .dgst file is not cryptographically signed by any
-  channel observed on this release (asset list contains only .zip/.dgst files; no
-  .sig/.asc/cosign bundles were observed in the release asset list on 2026-10-23 —
-  this is an observation of the asset list, not a categorical claim about all
-  upstream signing channels, M1). Independent of this, orchestrator decision: the
-  upstream binary is NOT an accepted trusted runnable baseline; Raylane builds from
-  the pinned source commit. The digest above is recorded for provenance reference
-  only. Local archive-hash-vs-digest comparison: NOT_RUN (downloading/executing
-  binaries is out of scope and budget).
-- NOT done: any signature verification (no channel observed); reproducible-build
-  comparison source↔binary.
+  channel observed in the release asset list on 2026-10-23 (observation limited to
+  that list — M1; the commit-PGP channel above does not cover built assets).
+  Independent of this, orchestrator decision: the upstream binary is NOT an accepted
+  trusted runnable baseline; Raylane builds from the pinned source commit. The digest
+  above is recorded for provenance reference only. Local archive-hash-vs-digest
+  comparison: NOT_RUN (downloading/executing binaries is out of scope and budget).
+- NOT done: local crypto verification of the commit PGP signature (provider-reported
+  only); any asset signature verification (no asset-signature channel observed);
+  reproducible-build comparison source↔binary.
 
 Build provenance of upstream binary: release workflow (`.github/workflows/release.yml`
 at the pinned commit) uses `actions/setup-go@v7` with `go-version-file: go.mod` →
@@ -114,16 +122,20 @@ Exact versions verified against official metadata on 2026-10-23:
 
 | Component | GA (noble release pocket) | Current updates/security pocket (2026-10-23) | Proposed pin & rationale |
 |---|---|---|---|
-| dnsmasq | `2.90-2build2` (Sources.xz; revision-1 value `2.90-4build1` was WRONG — no such noble version in official metadata, H1 confirmed) | `2.91-0ubuntu0.24.04.2` (pocket Updates, status Published, date_published 2026-10-06; security lineage: 2.90-2ubuntu0.4 Security published 2026-07-14, superseded) | PIN: `2.91-0ubuntu0.24.04.2` from noble-updates. Rationale: current supported package with all published security fixes; GA 2.90-2build2 lacks subsequent security updates (USN lineage in Launchpad). Install-time command for the stand: `apt-get install dnsmasq-base=2.91-0ubuntu0.24.04.2` (NOT executed here). |
+| dnsmasq | `2.90-2build2` (Sources.xz; revision-1 value `2.90-4build1` was WRONG — no such noble version in official metadata, H1/F-04-1 confirmed) | `2.91-0ubuntu0.24.04.2` (pocket Updates, status Published, date_published 2026-10-06; security lineage: `2.90-2ubuntu0.4` in pocket Security, status Published since 2026-07-14 — still Published; its Updates-pocket copy was Superseded on 2026-09-02 by 2.91-0ubuntu0.24.04.1 — R2-4b wording) | PIN: `2.91-0ubuntu0.24.04.2` from noble-updates. Component note: `dnsmasq-base` binary package is in main (Sources.xz Package-List: dnsmasq-base built from main source); the `dnsmasq` meta package is in universe — we only need dnsmasq-base (+ dnsmasq-utils if needed), no host sources change. Rationale: current supported package with all published security fixes; GA 2.90-2build2 lacks subsequent security updates. Install-time command for the stand: `apt-get install dnsmasq-base=2.91-0ubuntu0.24.04.2` (NOT executed here). |
 | nftables | `1.0.9-1build1` | `1.0.9-1ubuntu0.1` (pocket Updates, Published 2026-03-10) | PIN: `1.0.9-1ubuntu0.1` from noble-updates (supersedes GA with fixes). |
-| iproute2 | `6.1.0-1ubuntu6` (Sources.xz GA) | `6.1.0-1ubuntu6.4` (pocket Updates, Published 2026-07-01; 6.1.0-1ubuntu6.2 — revision-1 value — is Superseded as of 2025-07-29, H1 confirmed) | PIN: `6.1.0-1ubuntu6.4` from noble-updates (current supported). |
+| iproute2 | `6.1.0-1ubuntu6` (Sources.xz GA) | `6.1.0-1ubuntu6.4` (pocket Updates, Published 2026-07-01; rev1 value `6.1.0-1ubuntu6.2` — pocket Updates, published 2025-07-29, later Superseded on 2026-04-29 by -1ubuntu6.3 — R2-4a wording; F-04-2's "never existed" was RETRACTED by 04/03 r2: it existed, now superseded) | PIN: `6.1.0-1ubuntu6.4` from noble-updates (current supported). |
 | Linux kernel (noble GA) | 6.8.x family | exact kernel package pin deferred to stand provisioning (hardware-dependent metapackage) | UNVERIFIED exact build; design requirement: nft tproxy + socket lookup + fwmark (present since kernel 4.18) — design-level only. |
 
-Build evidence for dnsmasq nftset (H2): noble Sources.xz Build-Depends for dnsmasq
-include `libnftables-dev` and `libnetfilter-conntrack-dev [linux-any]` → the noble
-source package builds the nftset backend (upstream enables HAVE_NFTSET when
-libnftables dev headers are present; debian/rules passes `COPTS=` with nftset per
-debian packaging). This is package-build-configuration evidence, NOT a runtime
+Build evidence for dnsmasq nftset (H2/R2-3): two records —
+(a) noble Sources.xz Build-Depends for dnsmasq include `libnftables-dev` and
+`libnetfilter-conntrack-dev [linux-any]` (check 19);
+(b) noble packaging debian/rules
+(`https://git.launchpad.net/ubuntu/+source/dnsmasq/plain/debian/rules?h=applied/ubuntu/noble`,
+fetched HTTP 200 on 2026-10-23 19:23 UTC, check 33, artifact r1/dnsmasq-debian-rules)
+contains `ifeq (,$(filter nonftset, $(DEB_BUILD_OPTIONS)))` → `COPTS += -DHAVE_NFTSET`
+(plus -DHAVE_CONNTRACK) → nftset ON by default in the noble build.
+This is package-build-configuration evidence, NOT a runtime
 check: `dnsmasq --version` on the stand remains NOT_RUN and REQUIRED before first
 use (gate restated in §7).
 

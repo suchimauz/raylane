@@ -32,7 +32,7 @@ raw.githubusercontent.com on 2026-10-23.
 | httpupgrade | SUPPORTED | transport_internet.go |
 | xhttp | SUPPORTED | XHTTP present at baseline (CONNECTION_GAPS / XR tree) |
 | TLS | SUPPORTED | infra/conf transport_internet TLSConfig |
-| REALITY | SUPPORTED | xtls/reality pinned v0.0.0-20261014…; infra conf |
+| REALITY | SUPPORTED | xtls/reality pinned v0.0.0-20261014101318-83f621788ca8 (complete version; proxy.golang.org Origin hash 83f621788ca88b83179810b12baa7ae518aacb83); infra conf |
 | flow "" | SUPPORTED | outbound.go normalization (SETTINGS_REFERENCE.md:149) |
 | flow xtls-rprx-vision | SUPPORTED | proxy/vless/outbound/outbound.go L246-275 @1b1647cd |
 | flow xtls-rprx-vision-udp443 | SUPPORTED (with documented UDP/443 rejection semantics for plain vision) | same source; vision-udp443 sets allowUDP443 |

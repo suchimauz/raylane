@@ -1,11 +1,14 @@
-# T001 — research log & verification evidence — revision 2 (T001-fix-r1)
+# T001 — research log & verification evidence — revision 3 (T001-fix-r2)
 
 Task: T001 (G1) — release/capability/license matrix and provenance for the Xray source
 baseline, Go, Node, React, SQLite driver, dnsmasq/nft/iproute2, crypto/parser deps.
-Author: agent 05 (Researcher). Verification dates: rev1 2026-10-23, rev2 2026-10-23 (UTC).
-Base for rev2: d7b75a8 (includes 01's review-round-1 record). Review target of round 1
-was 521b018; this revision answers docs/verification/T001-review-round1.md (H1–H4,
-M1–M7, L1–L2). Dispositions: §9. T001/G1 remain OPEN.
+Author: agent 05 (Researcher). Verification dates: rev1–rev3 2026-10-23 (UTC).
+Rev3 base: actual parent commit 9566a13 (04-consolidation; rev2 header cited the
+assignment base d7b75a8 — cosmetic mismatch, noted by 03). Rev3 target of review:
+4e98e02 (rev2). Rev3 answers round-2 reviews: 03's .hyper/tmp/t001/T001-review-r2-REPORT.md
+(R2-1..R2-5, CHANGES_REQUESTED docs-only; substantive pins/provenance/static capability
+PASS) and 04's round-1 evidence .hyper/tmp/bul/t001-04/REPORT.md (F-04-1..6).
+Dispositions: §9 (H/M/L + F-04-x) and §10 (R2-x). T001/G1 remain OPEN.
 Constraints honored: public HTTPS GET only, no sudo/host changes/binary execution,
 no private sources/secrets, no push/deploy. tasks.md untouched. Budget: one bounded
 correction package (≈35 GETs, <2 MiB downloaded; no archives).
@@ -130,6 +133,9 @@ Revision-2 checks (new, T001-fix-r1):
 | 29 | `curl https://packages.ubuntu.com/{dnsmasq,nftables,iproute2}/{noble,noble-updates,noble-security}` | 0 | mixed (several "Internal Server Error" pages, some empty) | 19:00 | r1/pkg-*.html — RECORDED AS UNRELIABLE; not used as evidence; Launchpad+archive used instead (negative check, not claimed as PASS) |
 | 30 | `curl https://raw.githubusercontent.com/modernc.org/sqlite/master/go.mod` | 0 | 404 body | 18:44 (rev1) | recorded ONLY as "this URL 404s" (M6); no mirror-absence inference |
 | 31 | `git diff --check` on rev2 changes | 0 | n/a | commit time | clean |
+| 32 | `curl https://raw.githubusercontent.com/XTLS/Xray-core/1b1647cd…/core/core.go -o r1/xray-core.go` | 0 | 200 | 19:23 | r1/xray-core.go — L21–23 `Version_x=26, Version_y=10, Version_z=21` (F-04-6 fix: successful fetch; rev1's `core/version.go` attempt was HTTP 404 — file does not exist, removed as evidence path) |
+| 33 | `curl "https://git.launchpad.net/ubuntu/+source/dnsmasq/plain/debian/rules?h=applied/ubuntu/noble" -o r1/dnsmasq-debian-rules` | 0 | 200 | 19:23 | r1/dnsmasq-debian-rules — L25–27 `ifeq (,$(filter nonftset,…))` → `COPTS += -DHAVE_NFTSET` (R2-3 evidence for H2) |
+| 34 | `git diff --check` on rev3 changes | 0 | n/a | commit time | clean |
 | NOT_RUN | local archive-hash vs .dgst comparison (no binary downloads allowed) | — | — | — | — |
 | NOT_RUN | `dnsmasq --version` / `nft --version` / host probing | — | — | — | forbidden by scope |
 | NOT_RUN | signature verification of upstream assets (no signature channel observed in asset list; binary path rejected by 01 anyway) | — | — | — | — |
@@ -174,6 +180,36 @@ Revision-2 checks (new, T001-fix-r1):
    separate research spin?
 
 ## 9. Disposition of round-1 findings
+
+Round-1 (03): H1–H4, M1–M7, L1–L2 — all FIXED in rev2 and re-verified substantively by
+03 in round 2 (see r2 report: "Round-1 dispositions re-checked (all substantively
+FIXED)"). Detail table retained below.
+
+Round-1 (04 evidence): F-04-1..6 — dispositions:
+
+| ID | Disposition |
+|---|---|
+| F-04-1 (dnsmasq 2.90-4build1 nonexistent) | FIXED in rev2. Correct noble versions with pockets: GA 2.90-2build2; pin 2.91-0ubuntu0.24.04.2 (noble-updates, Published 2026-10-06). Confirmed by 03 r2 item 2–3. |
+| F-04-2 (iproute2 6.1.0-1ubuntu6.2 "never existed") | RETRACTED BY 04/03 in r2 — the version EXISTS: pocket Updates, published 2025-07-29, Superseded on 2026-04-29 by -1ubuntu6.3 (04's round-1 query evidently filtered status=Published). Rev3 wording (R2-4a): publish date 2025-07-29 ≠ supersede date 2026-04-29. Pin 6.1.0-1ubuntu6.4 stands (noble-updates, Published 2026-07-01). |
+| F-04-3 (signature wording) | FIXED in rev3 (R2-1). versions.lock §1 now records: GitHub commit API reports verification.verified=true, reason="valid", verified_at 2026-10-21T11:59:31Z for the pinned commit — PROVIDER-REPORTED PGP verification (GitHub web-flow), local crypto verification NOT_RUN; tag v26.10.21 is lightweight → no tag signature; release ASSETS: no signature-like files in observed asset list (restricted observation). Not upgraded to "independently verified". |
+| F-04-4 (module path distortion) | FIXED in rev2. versions.lock §6 uses `github.com/apernet/quic-go v0.61.1-0.20260806010916-184d081eef3e` with complete versions for utls/reality/ghodss-yaml and proxy .info Origin hashes; rev3 also fixed truncated REALITY in capabilities.md (R2-5). |
+| F-04-5 (SQLite no exact pin) | FIXED in rev2 (H3): modernc.org/sqlite v1.61.0 pinned with gitlab tag commit and license at tag. ghodss/yaml complete version in lock §6. |
+| F-04-6 (xray-version.go 404) | FIXED in rev3 (R2-2). core/core.go successfully fetched HTTP 200 (check 32, artifact r1/xray-core.go): L21–23 Version_x=26, Version_y=10, Version_z=21. The 404 artifact (core/version.go does not exist) is recorded as a negative HTTP outcome, not evidence. |
+
+## 10. Disposition of round-2 findings (03 r2: R2-1..R2-5)
+
+| ID | Disposition |
+|---|---|
+| R2-1 (F-04-3 not dispositioned; PGP trust row missing) | FIXED. versions.lock §1 source-trust block records the provider-reported PGP verification explicitly (see F-04-3 row above); §9 F-04-x rows added. |
+| R2-2 (F-04-6: no successful core.go fetch/evidence) | FIXED. Check 32 + artifact r1/xray-core.go; versions.lock §1 version row cites core/core.go L21–23 with fetch time/HTTP status. |
+| R2-3 (H2: debian/rules evidence citation missing) | FIXED. Check 33: debian/rules fetched from git.launchpad.net (HTTP 200, 19:23 UTC), `COPTS += -DHAVE_NFTSET` lines recorded in versions.lock §5 with URL and artifact path. |
+| R2-4 (wording: supersede dates) | FIXED. (a) iproute2 -1ubuntu6.2: published 2025-07-29, superseded 2026-04-29 — dates separated. (b) dnsmasq 2.90-2ubuntu0.4: Security-pocket record still Published (2026-07-14); its Updates-pocket copy Superseded 2026-09-02 — phrasing corrected in versions.lock §5. |
+| R2-5 (capabilities REALITY truncated version) | FIXED. capabilities.md FR-002 REALITY row now shows v0.0.0-20261014101318-83f621788ca8 in full. |
+| info (rev2 base header) | FIXED. §header of this file states actual parent 9566a13 vs assignment base d7b75a8. |
+
+Also recorded per 01 r2 instruction: dnsmasq-base binary package is in main (from the
+main-pocket source), the `dnsmasq` meta package is in universe — Raylane needs only
+dnsmasq-base; no host sources change proposed (versions.lock §5).
 
 | ID | Disposition |
 |---|---|

@@ -32,3 +32,5 @@
 | VLESS без TLS/REALITY в первой версии | Не разрешать (D-010) | — | OUT_OF_SCOPE | Согласованное ограничение относительно PassWall |
 
 | VLESS flow: выключен, Vision, Vision-udp443 | Все три выбраны (D-011) | Не задан | CONFIRMED | Допустимые сочетания проверяются; TLS/REALITY обязательны |
+
+| VLESS: XHTTP Extra и FinalMask | Сохранить оба (D-014) | Не задан | CONFIRMED | Расширенные JSON-редакторы с проверкой и пояснениями |

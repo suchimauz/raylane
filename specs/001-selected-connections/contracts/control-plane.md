@@ -23,3 +23,7 @@ Typed secret update: unchanged / replace(value) / clear; masked placeholder не
 
 ## UI contract
 Отдельные состояния Unsaved / Saved draft / Invalid / Active / Applying / Rolling back / Degraded guarded. «Сохранить» никогда не вызывает Apply. Показывать active references при delete conflict. Подписочный editor предупреждает о замене правок. HTTP/TLS exception/downgrade имеют видимые разные предупреждения. Никаких обещаний success до terminal operation state. Доступность: keyboard flow, labels, non-color errors, reduced motion. Точные endpoints/schema закрепляются machine-readable schema перед параллельной работой UI/backend; изменения schema требуют 03 review.
+
+
+## Source URL security — D-061
+При вводе userinfo в URL извлечь credentials в SecretRef до persistence/ответа/audit; raw request body не логировать. Per-source LAN allowlist изменяется только администратором явно, не импортированным источником. Forbidden address classes имеют приоритет над allowlist. Проверять разрешение на каждом фактическом соединении/redirect; непроверяемый remote proxy resolve дает безопасный отказ, не direct retry. UI объясняет причину без секретного URL.

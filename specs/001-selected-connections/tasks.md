@@ -43,8 +43,8 @@
 
 ## Phase 6 — US-04: загрузчик и расписание
 Независимая приемка: controlled HTTP/TLS/proxy fixtures, никакого real endpoint. FR-014/015/022/023, SC-005/006.
-- [ ] T024 [US4] После T007/T020 реализовать access modes/Auto service route и bounded fetch/redirect/SSRF policy в internal/control/fetch.go; contracts for DNS rebinding/proxy-resolved destination fail-closed, explicit per-source TLS exception.
-- [ ] T025 [P] [US4] После T005/T003 реализовать fixture proxy/HTTP servers и leakage tests в tests/integration/fetch_test.go; 04 проверяет Proxy outage, downgrade reporting, cross-origin credential stripping, size/deadline limits и запрещенные адреса.
+- [ ] T024 [US4] После T007/T020 реализовать access modes/Auto service route и bounded fetch/redirect/SSRF policy в internal/control/fetch.go; contracts for DNS rebinding/proxy-resolved destination fail-closed, explicit per-source TLS exception; FR-024/D-061: URL credentials extraction, per-source LAN allowlist, absolute forbidden address classes.
+- [ ] T025 [P] [US4] После T005/T003 реализовать fixture proxy/HTTP servers и leakage tests в tests/integration/fetch_test.go; 04 проверяет Proxy outage, downgrade reporting, cross-origin credential stripping, size/deadline limits, URL credential redaction, per-source LAN allowlist и запрещенные адреса даже поверх allowlist (FR-024).
 - [ ] T026 [US4] После T006/T021/T024 реализовать single-flight scheduler с явной timezone, boot marker, coalescing missed runs и bounded retries в internal/control/scheduler.go и tests/integration/scheduler_test.go.
 - [ ] T027 [US4] После T023/T024/T026 реализовать download controls/warnings/UA presets, progress и busy response в web/src/features/subscriptions/download.tsx и internal/api/updates.go; автоматические режимы default off, success не apply.
 
@@ -62,7 +62,7 @@
 - [ ] T035 После T013/T017/T018/T023/T027/T033 выполнить independent E2E/accessibility/security regressions в tests/e2e/ и docs/verification/e2e.md; 04 evidence на immutable commit, 03 review угроз/auth/helper/exports.
 - [ ] T036 После T032/T035 измерить baseline/stress нагрузки плана и recovery в tests/network/performance/ и docs/verification/performance.md; 04 пишет actual metrics, failures и ограничения, не выдуманный SLA.
 - [ ] T037 После T001/T034/T035/T036 подготовить systemd ordering/package/upgrade artifacts в packaging/ и точные runnable команды feature quickstart.md; 02 воспроизводит чистую disposable install, 03/04 verify gate-before-transit и secret permissions.
-- [ ] T038 После T037 свести FR-001–023→tests→evidence в docs/verification/acceptance.md; 01 проверяет независимые 03/04 заключения и все gates, статус NOT_RUN блокирует соответствующую приемку. Live LAN/push/deploy не входят в это разрешение.
+- [ ] T038 После T037 свести FR-001–024→tests→evidence в docs/verification/acceptance.md; 01 проверяет независимые 03/04 заключения и все gates, статус NOT_RUN блокирует соответствующую приемку. Live LAN/push/deploy не входят в это разрешение.
 
 ## Зависимости и ограничение параллелизма
 Setup → foundation → US-01. Затем US-02 fake-helper и US-03 могут планироваться раздельно, но общий domain/schema не правится параллельно. US-04 зависит от parser/reconciliation; US-05 от compiler/helper/loader. Полный US-02 apply acceptance зависит от US-05 G2. T025 может идти параллельно T024: отдельные tests vs implementation, общий контракт предварительно заморожен. T010/T019 fixture tests независимы после prerequisites. Один 02 не становится несколькими разработчиками из-за [P]; 04 работает в своем worktree, 03 review readonly immutable commit. 05 исследует будущую задачу, не исправляет одновременно реализацию 02.

@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:raylane:contracts:helper.schema.json",
+  "title": "Raylane privileged-helper request envelope",
+  "description": "Declarative schema for a single request sent by the Raylane control plane to the restricted privileged helper over the local Unix socket. Source of truth: specs/001-selected-connections/contracts/network-agent.md (helper contract, design v0), with framing from contracts/control-plane.md. This schema constrains the REQUEST shape only. It does not implement the helper, does not describe the kernel/dataplane behaviour, and does not by itself enforce peer credentials, socket permissions, generation replay protection, symlink handling, or the save/apply separation. Those remain runtime obligations of the helper and the control plane. Every bound in this file is a technical proposal for review by agent 03, not an accepted product default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocolVersion",
+    "operationId",
+    "expectedGeneration",
+    "command",
+    "payloadHash",
+    "payload"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "#/$defs/protocolVersion",
+      "description": "Wire-format version of this envelope. A mismatch is a hard rejection, never a best-effort interpretation."
+    },
+    "operationId": {
+      "$ref": "#/$defs/operationId",
+      "description": "Unique identifier of this operation. Together with payloadHash it forms the idempotency key: a repeated operationId with a different payloadHash is rejected, and a repeated operationId with the same payloadHash is a replay of the same operation."
+    },
+    "expectedGeneration": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Numeric generation state the control plane believes the helper is currently in. The helper compares this against its own state and rejects the request when they differ, so a request prepared against a stale view cannot be applied. This is a request-side expectation only; it is not a lock and does not prevent a concurrent request, which is why the helper must also serialise its own operations."
+    },
+    "command": {
+      "$ref": "#/$defs/command",
+      "description": "The helper operation to perform. The enum is closed: any other value is rejected. There is deliberately no generic 'execute' command and no command that persists configuration, because saving a draft is a control-plane concern and must never reach the privileged helper."
+    },
+    "payloadHash": {
+      "$ref": "#/$defs/sha256",
+      "description": "SHA-256 over the canonical serialisation of the payload object, lowercase hex. Part of the idempotency key. The canonical serialisation form itself is not yet fixed by the contracts and is an open item for review."
+    },
+    "payload": {
+      "description": "Command-specific, typed payload. The properties accepted here are selected by the command through the conditional subschemas below; each variant is closed, so a payload carrying the fields of a different command is rejected.",
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "Inspect" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadInspect" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "ValidateManifest" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadValidateManifest" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "PrepareGeneration" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadPrepareGeneration" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "EngageGuard" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadEngageGuard" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "ActivateGeneration" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadActivateGeneration" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "VerifyGeneration" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadVerifyGeneration" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "RestoreGeneration" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadRestoreGeneration" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "StopGuarded" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadStopGuarded" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["command"],
+        "properties": { "command": { "const": "ReleaseProtection" } }
+      },
+      "then": {
+        "properties": { "payload": { "$ref": "#/$defs/payloadReleaseProtection" } }
+      }
+    }
+  ],
+  "$defs": {
+    "protocolVersion": {
+      "type": "string",
+      "enum": ["1"],
+      "description": "Envelope wire format version."
+    },
+    "command": {
+      "type": "string",
+      "enum": [
+        "Inspect",
+        "ValidateManifest",
+        "PrepareGeneration",
+        "EngageGuard",
+        "ActivateGeneration",
+        "VerifyGeneration",
+        "RestoreGeneration",
+        "StopGuarded",
+        "ReleaseProtection"
+      ],
+      "description": "Closed set of helper operations, taken verbatim from the helper contract."
+    },
+    "operationId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "RFC 4122 version 4 identifier, lowercase. The pattern is normative: the format keyword alone is annotation-only in common validators."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 digest, lowercase hex."
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+      "description": "Opaque local identifier. The pattern admits only letters, digits, underscore and hyphen, must start with a letter or digit, and excludes '.', '/', '\\\\', whitespace and every other character. A value that cannot express a path separator or a relative-path segment cannot be used to express a filesystem path, so path traversal is not representable in this schema rather than merely rejected by it."
+    },
+    "interfaceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 15,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+      "description": "Network interface name, bounded to the Linux IFNAMSIZ limit of 15 characters plus a terminator. The pattern excludes '/', whitespace and a leading '.', so it cannot name a path. The helper must still verify the name against its own approved-interface allowlist; this schema cannot know which interfaces exist."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "TCP or UDP port number."
+    },
+    "generationId": {
+      "$ref": "#/$defs/identifier",
+      "description": "Identifier of the specific generation object being operated on. Distinct from the envelope's expectedGeneration, which is the numeric state the control plane believes is current."
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "sha256"],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/identifier",
+          "description": "Helper-side identifier of the artefact. Not a filesystem path: the helper resolves the identifier against its own owned storage."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Content hash the helper must verify before using the artefact."
+        }
+      },
+      "description": "Reference to one helper-owned artefact by identifier and content hash. No path, no size, no ownership flag."
+    },
+    "destinationSetRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setId", "sha256"],
+      "properties": {
+        "setId": {
+          "$ref": "#/$defs/identifier",
+          "description": "Identifier of a canonical destination set defined by the control plane."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Content hash of the canonical set, so the helper verifies what it applies rather than trusting the reference."
+        }
+      }
+    },
+    "policyRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policyId", "sha256"],
+      "properties": {
+        "policyId": {
+          "$ref": "#/$defs/identifier",
+          "description": "Identifier of a policy object defined by the control plane."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Content hash of the policy object."
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generationId",
+        "listenerPorts",
+        "approvedInterfaces",
+        "destinationSets",
+        "policyRefs",
+        "engineArtifacts",
+        "dnsArtifacts",
+        "ipv6TProxyEnabled"
+      ],
+      "properties": {
+        "generationId": {
+          "$ref": "#/$defs/generationId",
+          "description": "Identifier of this generation."
+        },
+        "listenerPorts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/port" },
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Ports the generation expects to listen on."
+        },
+        "approvedInterfaces": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/interfaceName" },
+          "maxItems": 16,
+          "uniqueItems": true,
+          "description": "Interfaces the generation is approved to use. The helper re-checks these against its own allowlist and rejects an unsupported interface."
+        },
+        "destinationSets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/destinationSetRef" },
+          "maxItems": 512,
+          "description": "Canonical destination sets referenced by the generation."
+        },
+        "policyRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/policyRef" },
+          "maxItems": 512,
+          "description": "Policy objects referenced by the generation."
+        },
+        "engineArtifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactRef" },
+          "maxItems": 16,
+          "description": "Engine artefacts the generation needs, each with a content hash."
+        },
+        "dnsArtifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactRef" },
+          "maxItems": 16,
+          "description": "DNS artefacts the generation needs, each with a content hash."
+        },
+        "ipv6TProxyEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this generation enables IPv6 TProxy interception. Off by default per FR-020. The schema records the intent only; it cannot establish that an IPv6 profile is proven, so the helper must reject an enable that is not backed by a proven profile and must never apply it partially."
+        }
+      },
+      "description": "Typed manifest of permitted objects. It carries identifiers, hashes, ports and interface names only: no command text, no executable path, no environment variable, no raw filesystem path, and no secret value. Artefacts are referenced by identifier and content hash, so the helper resolves them from storage it owns and verifies their content rather than being told where to read from."
+    },
+    "payloadInspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0,
+      "description": "Read-only inspection of the helper's current state. Carries no payload: inspection must not be able to change anything."
+    },
+    "payloadValidateManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest"],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/manifest",
+          "description": "Candidate manifest to validate without applying."
+        }
+      },
+      "description": "Validation of a candidate manifest, including the engine configuration check, without applying anything."
+    },
+    "payloadPrepareGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest"],
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/manifest",
+          "description": "Manifest whose resources are to be prepared. Preparation must not rewrite active files in place."
+        }
+      },
+      "description": "Preparation of the resources of a generation, before the kernel switch."
+    },
+    "payloadEngageGuard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId", "manifestHash"],
+      "properties": {
+        "generationId": {
+          "$ref": "#/$defs/generationId",
+          "description": "Generation whose guard is to be engaged."
+        },
+        "manifestHash": {
+          "$ref": "#/$defs/sha256",
+          "description": "Content hash of the manifest that was validated for this generation, binding the guard to exactly that manifest."
+        }
+      },
+      "description": "Engagement of the new-flow gate for the affected traffic, preserving management and local exclusions. The helper confirms a durable guard generation."
+    },
+    "payloadActivateGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId", "manifestHash"],
+      "properties": {
+        "generationId": {
+          "$ref": "#/$defs/generationId",
+          "description": "Generation to switch to."
+        },
+        "manifestHash": {
+          "$ref": "#/$defs/sha256",
+          "description": "Content hash of the validated manifest for this generation. A mismatch against the prepared or guarded generation is a rejection, not a partial switch."
+        }
+      },
+      "description": "Switching the kernel batch to the prepared generation, within the atomicity of a single nft transaction. The helper confirms the generation only after verification."
+    },
+    "payloadVerifyGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId"],
+      "properties": {
+        "generationId": {
+          "$ref": "#/$defs/generationId",
+          "description": "Generation to verify."
+        }
+      },
+      "description": "Verification of an active generation, including readiness of DNS, engine and classification rather than a process-id check alone."
+    },
+    "payloadRestoreGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetGenerationId", "manifestHash"],
+      "properties": {
+        "targetGenerationId": {
+          "$ref": "#/$defs/generationId",
+          "description": "Generation to return to. This is a rollback to a previous generation of the network configuration; it is NOT a restore of a backup archive and carries no backup, passphrase or secret material."
+        },
+        "manifestHash": {
+          "$ref": "#/$defs/sha256",
+          "description": "Content hash of the manifest of the target generation."
+        }
+      },
+      "description": "Rollback to the previous generation after a failure. If the rollback itself fails, the helper remains in the degraded-guarded state; it must never report a successful restore that did not happen."
+    },
+    "payloadStopGuarded": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0,
+      "description": "Stop of the service while keeping protection in place. Deliberately carries no confirmation token and no release instruction: stopping must never remove the guard against direct bypass. Releasing protection is a separate command with a separate confirmation."
+    },
+    "payloadReleaseProtection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protectedGenerationId", "confirmationToken"],
+      "properties": {
+        "protectedGenerationId": {
+          "$ref": "#/$defs/generationId",
+          "description": "Generation whose protection is to be released. The helper must check this against the generation it is actually protecting and reject a mismatch; the schema can require the field but cannot perform that comparison."
+        },
+        "confirmationToken": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9._~+/=-]+$",
+          "description": "Single-use confirmation token bound by the control plane to the session, the active generation and the current protection state. The helper verifies the binding and the one-time nature itself; the schema can only require that a token-shaped value is present. Repeating the operation with an already consumed token must fail."
+        }
+      },
+      "description": "Explicit release of the protection against direct bypass. Requires a bound confirmation and produces an audit record. This is the only command that removes protection."
+    }
+  }
+}

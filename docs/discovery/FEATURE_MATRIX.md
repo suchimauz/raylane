@@ -84,3 +84,5 @@
 | SOCKS5/HTTP: DNS Auto/TCP/UDP/DoH, все стратегии IP и Happy Eyeballs | Весь набор для обоих (D-046) | Не задан | CONFIRMED | DNS самого прокси; defaults/Auto/bootstrap уточняются |
 
 | SOCKS5/HTTP: выключено/preproxy/landing/interface | Все режимы для обоих (D-047) | Не задан | CONFIRMED | Один дополнительный слой; проверка ссылок/циклов/совместимости |
+
+| SOCKS5/HTTP: TCP Fast Open и Multipath TCP | Оба для обоих протоколов (D-048) | Выключены | CONFIRMED | Проверять поддержку; без автоматических системных изменений |

@@ -17,3 +17,9 @@ logs/
 *.log
 .DS_Store
 __pycache__/
+
+# Build outputs — never commit compiled binaries or installed packages
+build/
+dist/
+node_modules/
+.vite/

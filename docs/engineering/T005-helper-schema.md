@@ -283,6 +283,7 @@ These belong in the contract test set once the proposal is accepted:
 | Same payload, member names in a different order | Identical `payloadHash` — canonicalisation is order-independent. |
 | Same payload, different whitespace between tokens | Identical `payloadHash`. |
 | Same payload, `\uXXXX`-escaped vs literal non-ASCII | Identical `payloadHash` — UTF-8 output is literal, not escaped. In the current payload type this vector is not reachable: every string value is constrained to printable ASCII, so no non-ASCII value can occur. |
+| Same payload, an ASCII character written as a `\uXXXX` escape rather than literally | Identical `payloadHash`. The escape is a *transport* representation: after parsing, a literal `A` and the escape sequence `\u0041` denote the same character, so the parsed values are equal and the canonical form is the same. This holds for the ASCII range **as well as** for non-ASCII characters — the difference is that an ASCII character has a literal form in the canonical output, while a non-ASCII one does not. It is not a case of "the escape is preserved": the escape is resolved before the hash is computed. |
 | `1` vs `1.0` in an integer-valued position | Both are schema-valid and I-JSON-valid; JCS canonicalises both to `1`, so the `payloadHash` is identical. No rejection on lexical form is required. |
 | Duplicate member name in `payload` | Rejected before hashing, at parse time. |
 | `expectedGeneration` at `2^53`, `2^53 + 1`, `2^63`, `10^30` | Rejected — outside the schema's safe-integer bound. |

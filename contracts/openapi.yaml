@@ -1,0 +1,1794 @@
+openapi: 3.1.0
+
+info:
+  title: Raylane control-plane API
+  version: "0.0.0-draft"
+  summary: Partial machine-readable contract for the Raylane control plane.
+  description: |
+    Declarative contract for the subset of the control-plane API that the
+    feature contracts already define and that does not depend on the open
+    A04 session-policy decision or on the blocked backup/retention work.
+
+    Scope and status
+    ---------------
+    This is a **partial** artifact. It covers node, draft-revision, validation,
+    operation-status, runtime-state, destination-rule and source-settings
+    operations, plus the explicit refresh operations. It does **not** cover
+    authentication, session, bootstrap, backup, restore, retention or garbage
+    collection: those are BLOCKED or undecided in
+    `docs/engineering/A04-contract-proposal.md` and are listed as gaps in
+    `docs/engineering/T005-openapi.md` rather than being invented here.
+
+    The companion document `docs/engineering/T005-openapi.md` is the gap
+    matrix. No endpoint in this file may be treated as implemented: no server,
+    route or handler exists. T005 is **not** done while
+    `contracts/openapi.yaml` remains partial.
+
+    Source of truth
+    ---------------
+    `specs/001-selected-connections/contracts/control-plane.md` (API
+    interface), `specs/001-selected-connections/data-model.md` (entities and
+    states), `specs/001-selected-connections/spec.md` (FR-009, FR-010,
+    FR-011, FR-013, FR-014, FR-019, FR-020, FR-021; US-01, US-02, US-03,
+    US-04), and `specs/001-selected-connections/plan.md` (architecture
+    boundaries). Where a field is not fixed by those documents it is marked
+    TODO in the gap matrix, not filled in with an assumption.
+
+    Security invariants this contract encodes
+    ------------------------------------------
+    * Reads never return a secret value, and never return a raw source URL
+      that may carry userinfo. Secret fields are presence-only on read; a
+      source URL is returned redacted.
+    * Writes never accept a masked placeholder as a new secret value. A secret
+      update is an explicit union of unchanged / replace / clear.
+    * No read or write implicitly fetches a remote source, and no draft
+      operation implicitly applies anything. Saving is never applying. In
+      other words: there is no implicit fetch and no implicit apply anywhere
+      in this API; a fetch happens only through an explicit refresh
+      operation, and an apply happens only through the separate apply
+      operation, which is not part of this partial artifact.
+    * Every mutation is optimistic-concurrency checked with an expected
+      revision.
+    * Stopping the runtime and releasing the protection against direct bypass
+      are separate operations with separate semantics.
+    * Error responses carry a request identifier and a stable code, and never
+      echo the raw body of a remote source.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: https://localhost/api/v1
+    description: |
+      Same-origin HTTPS listener of the control plane, on the trusted LAN only.
+      The panel is not published to the internet. The host is illustrative; the
+      deployment address is not fixed by any contract.
+
+tags:
+  - name: nodes
+    description: Node drafts — the editable, not-yet-applied state.
+  - name: revisions
+    description: Immutable configuration revisions and their validation.
+  - name: operations
+    description: Long-running operation status.
+  - name: runtime
+    description: Runtime state, stop and protection release.
+  - name: rules
+    description: Destination rules of the active and draft configuration.
+  - name: sources
+    description: Subscription and rule-source settings, and explicit refresh.
+
+paths:
+  /nodes:
+    get:
+      operationId: listNodes
+      tags: [nodes]
+      summary: List node drafts.
+      description: |
+        Returns the editable node drafts. Secret fields are reported as
+        presence only; no secret value and no raw source URL is returned.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The node drafts.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [nodes]
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/NodeDraft"
+    post:
+      operationId: createNode
+      tags: [nodes]
+      summary: Create a node draft.
+      description: |
+        Creates a draft. Creating a draft never touches the running
+        configuration. A node whose configuration is semantically invalid is
+        still storable as an explicitly invalid draft; a syntactically invalid
+        JSON body is rejected outright and does not replace a stored value.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeDraftWrite"
+      responses:
+        "201":
+          description: The created draft.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDraft"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /nodes/{nodeId}:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getNode
+      tags: [nodes]
+      summary: Read one node draft.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The node draft.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDraft"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateNode
+      tags: [nodes]
+      summary: Update a node draft.
+      description: |
+        Optimistic concurrency: the body carries the revision the client last
+        read. A stale revision is rejected with 409 and does not overwrite the
+        newer state. Saving a draft never applies it.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeDraftUpdate"
+      responses:
+        "200":
+          description: The updated draft.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDraft"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+    delete:
+      operationId: deleteNode
+      tags: [nodes]
+      summary: Delete a node draft.
+      description: |
+        A node that a saved or active configuration still references cannot be
+        deleted; the response lists those dependencies and the request is
+        rejected with 409. Removing a reference from the draft alone does not
+        release an active dependency.
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: The draft was deleted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /revisions/{revisionId}:
+    parameters:
+      - $ref: "#/components/parameters/RevisionId"
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getRevision
+      tags: [revisions]
+      summary: Read one configuration revision.
+      description: |
+        A revision is immutable. The canonical document it carries contains
+        secret references only, never secret values.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The revision.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigRevision"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /revisions/{revisionId}/validate:
+    parameters:
+      - $ref: "#/components/parameters/RevisionId"
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: validateRevision
+      tags: [revisions]
+      summary: Validate a revision without applying it.
+      description: |
+        Runs validation, including the engine configuration check, and returns
+        a report. Validation never applies anything: the running configuration
+        is untouched by this call. A validation status that was not executed is
+        reported as not-run, never as passed.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The validation report.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /operations/{operationId}:
+    parameters:
+      - $ref: "#/components/parameters/OperationId"
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getOperation
+      tags: [operations]
+      summary: Read the status of an operation.
+      description: |
+        Returns the actual phase of the operation, not an assumed one. A
+        failure is reported redacted.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The operation status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /state:
+    get:
+      operationId: getState
+      tags: [runtime]
+      summary: Read the runtime state.
+      description: |
+        Returns the actual phase, the draft and active identifiers, and the
+        readiness of each dimension. Management readiness is reported
+        separately from DNS, engine and classification readiness; a running
+        process is not treated as proof of readiness.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The runtime state.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /runtime/stop:
+    post:
+      operationId: stopRuntime
+      tags: [runtime]
+      summary: Stop the runtime, keeping the protection in place.
+      description: |
+        Stops the service and leaves the protection against direct bypass
+        active. This operation never releases the protection; releasing it is
+        a separate operation with a separate confirmation.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "202":
+          description: The stop was accepted and is in progress.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /runtime/release-protection:
+    post:
+      operationId: releaseProtection
+      tags: [runtime]
+      summary: Release the protection against direct bypass.
+      description: |
+        **BLOCKED — this operation is declared but not usable.** The control
+        plane requires an expiring confirmation token bound to the current
+        session, the active generation and the protection state, issued
+        separately and consumed once. How that token is issued, delivered to
+        the client and returned to this endpoint is not decided: see gap G-07
+        in the companion document. Until it is, the endpoint must not be
+        implemented, and no working release path may be assumed.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseProtectionRequest"
+      responses:
+        "202":
+          description: The release was accepted and is in progress.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rules:
+    get:
+      operationId: listRules
+      tags: [rules]
+      summary: List destination rules.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The destination rules.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [rules]
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DestinationRule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createRule
+      tags: [rules]
+      summary: Create a destination rule in the draft.
+      description: |
+        Creates the rule in the draft configuration. It does not affect the
+        running configuration. References are validated on write; a dangling
+        reference or a cycle is rejected.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DestinationRuleWrite"
+      responses:
+        "201":
+          description: The created rule.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DestinationRule"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /rules/{ruleId}:
+    parameters:
+      - $ref: "#/components/parameters/RuleId"
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getRule
+      tags: [rules]
+      summary: Read one destination rule.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The rule.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DestinationRule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateRule
+      tags: [rules]
+      summary: Update a destination rule in the draft.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DestinationRuleUpdate"
+      responses:
+        "200":
+          description: The updated rule.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DestinationRule"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+    delete:
+      operationId: deleteRule
+      tags: [rules]
+      summary: Delete a destination rule from the draft.
+      description: |
+        A rule referenced by the active configuration cannot be deleted; the
+        response lists the dependencies and the request is rejected with 409.
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: The rule was deleted from the draft.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /subscriptions:
+    get:
+      operationId: listSubscriptions
+      tags: [sources]
+      summary: List subscription settings.
+      description: |
+        Returns the subscription settings with the URL redacted. The raw URL is
+        never returned, because it may carry userinfo credentials.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The subscription settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [subscriptions]
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SubscriptionSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createSubscription
+      tags: [sources]
+      summary: Create subscription settings.
+      description: |
+        Stores the settings only. Creating a subscription never fetches it.
+        When the URL carries userinfo, the credentials are extracted into a
+        secret reference and the raw request body is not logged.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionSettingsWrite"
+      responses:
+        "201":
+          description: The created subscription settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionSettings"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /subscriptions/{subscriptionId}:
+    parameters:
+      - $ref: "#/components/parameters/SubscriptionId"
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getSubscription
+      tags: [sources]
+      summary: Read subscription settings, with the URL redacted.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The subscription settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateSubscription
+      tags: [sources]
+      summary: Update subscription settings.
+      description: |
+        Updates the settings only; it never fetches the subscription. A
+        masked URL placeholder is not a new value and is not written back.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscriptionSettingsUpdate"
+      responses:
+        "200":
+          description: The updated subscription settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionSettings"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /rule-sources:
+    get:
+      operationId: listRuleSources
+      tags: [sources]
+      summary: List rule-source settings.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The rule-source settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ruleSources]
+                properties:
+                  ruleSources:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RuleSourceSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createRuleSource
+      tags: [sources]
+      summary: Create rule-source settings.
+      description: |
+        Stores the settings only; it never fetches the source. A source of
+        ready-made lists is chosen explicitly by the administrator; there are
+        no automatically trusted source URLs.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleSourceSettingsWrite"
+      responses:
+        "201":
+          description: The created rule-source settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleSourceSettings"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /rule-sources/{ruleSourceId}:
+    parameters:
+      - $ref: "#/components/parameters/RuleSourceId"
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getRuleSource
+      tags: [sources]
+      summary: Read rule-source settings, with the URL redacted.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The rule-source settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleSourceSettings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateRuleSource
+      tags: [sources]
+      summary: Update rule-source settings.
+      description: |
+        Updates the settings only; it never fetches the source.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleSourceSettingsUpdate"
+      responses:
+        "200":
+          description: The updated rule-source settings.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleSourceSettings"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /subscriptions/{subscriptionId}/refresh:
+    parameters:
+      - $ref: "#/components/parameters/SubscriptionId"
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: refreshSubscription
+      tags: [sources]
+      summary: Refresh a subscription explicitly.
+      description: |
+        Starts an update job. The job updates the saved subscription
+        parameters only: it never applies the result to the running network
+        configuration. If a job is already running for this source, the
+        request is rejected with 409 rather than overwriting it.
+      security:
+        - sessionCookie: []
+      responses:
+        "202":
+          description: The refresh job was accepted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rule-sources/{ruleSourceId}/refresh:
+    parameters:
+      - $ref: "#/components/parameters/RuleSourceId"
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: refreshRuleSource
+      tags: [sources]
+      summary: Refresh a rule source explicitly.
+      description: |
+        Starts an update job that updates the draft version of the source
+        only. An erroneous or empty result does not replace the previous set,
+        and nothing is applied to the running network configuration.
+      security:
+        - sessionCookie: []
+      responses:
+        "202":
+          description: The refresh job was accepted.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: raylane_session
+      description: |
+        **Placeholder only.** The cookie name, the session mechanics, the
+        bootstrap path and the CSRF scheme are part of the A04 session-policy
+        decision, which is partially accepted and otherwise open. This
+        security scheme documents that the operations require an authenticated
+        administrator session; it does **not** specify how that session is
+        established, how it is protected or how CSRF is enforced. See gaps
+        G-01, G-02 and G-03 in the companion document.
+
+  headers:
+    XRequestId:
+      description: The request identifier, echoed for correlation.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
+
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        Optional client-supplied request identifier, echoed in the response
+        header and in error bodies. If absent, the control plane generates one.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
+    NodeId:
+      name: nodeId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    RevisionId:
+      name: revisionId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    RuleId:
+      name: ruleId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    SubscriptionId:
+      name: subscriptionId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    RuleSourceId:
+      name: ruleSourceId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+
+  responses:
+    InvalidJson:
+      description: The request body is not valid JSON.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: No authenticated administrator session.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: The session is authenticated but not permitted to perform this action.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The referenced object does not exist.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: |
+        A stale revision, a busy resource or a dependency conflict. The body
+        lists the conflicting references where the contract requires it.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    SemanticValidationFailed:
+      description: |
+        The request is well-formed but semantically invalid. The body carries
+        the field errors and never a secret value or a raw source body.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+      description: |
+        Opaque local identifier. The pattern excludes path separators and
+        whitespace, so an identifier cannot express a filesystem path.
+
+    Revision:
+      type: integer
+      minimum: 0
+      description: |
+        Optimistic-concurrency counter. A mutation states the revision it was
+        based on; a mismatch is a conflict and never overwrites a newer state.
+
+    Protocol:
+      type: string
+      enum: [vless, socks5, http, wireguard]
+      description: |
+        The selected external-node protocols. SOCKS4/SOCKS4a and a local
+        public proxy server are outside this selection.
+
+    SecretUpdate:
+      description: |
+        An explicit update of one secret field. `unchanged` keeps the stored
+        value, `replace` sets a new one, `clear` removes it. A masked
+        placeholder is not a value and is not accepted as a new secret.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [op]
+          properties:
+            op:
+              type: string
+              const: unchanged
+        - type: object
+          additionalProperties: false
+          required: [op, value]
+          properties:
+            op:
+              type: string
+              const: replace
+            value:
+              type: string
+              minLength: 1
+              maxLength: 4096
+        - type: object
+          additionalProperties: false
+          required: [op]
+          properties:
+            op:
+              type: string
+              const: clear
+      discriminator:
+        propertyName: op
+        mapping:
+          unchanged: "#/components/schemas/SecretUpdateUnchanged"
+          replace: "#/components/schemas/SecretUpdateReplace"
+          clear: "#/components/schemas/SecretUpdateClear"
+
+    SecretUpdateUnchanged:
+      type: object
+      additionalProperties: false
+      required: [op]
+      properties:
+        op:
+          type: string
+          const: unchanged
+
+    SecretUpdateReplace:
+      type: object
+      additionalProperties: false
+      required: [op, value]
+      properties:
+        op:
+          type: string
+          const: replace
+        value:
+          type: string
+          minLength: 1
+          maxLength: 4096
+
+    SecretUpdateClear:
+      type: object
+      additionalProperties: false
+      required: [op]
+      properties:
+        op:
+          type: string
+          const: clear
+
+    SecretPresence:
+      type: object
+      additionalProperties: false
+      required: [present]
+      properties:
+        present:
+          type: boolean
+          description: |
+            Whether a secret value is stored. The value itself is never
+            returned.
+
+    NodeFields:
+      type: object
+      description: |
+        The protocol-specific fields of a node, split into the fields that take
+        effect, the fields that are stored but inactive, and the fields that
+        are not recognised.
+
+        The concrete field set per protocol comes from the capability profile,
+        which is not yet written (gap G-11). Until it exists, this schema
+        carries the *structure* only: a free-form, size-bounded object per
+        group. That is deliberate — inventing a field list per protocol here
+        would freeze a product decision that the capability-profile task
+        owns.
+
+        Free-form objects are used only because the alternative is a fake
+        schema. The security-relevant property is preserved regardless: no
+        secret value may appear here, and secrets travel only through the
+        explicit secret-update union.
+      additionalProperties: false
+      required: [active, inactive, unknown]
+      properties:
+        active:
+          type: object
+          maxProperties: 256
+          additionalProperties: true
+          description: Fields that take effect in the applied configuration.
+        inactive:
+          type: object
+          maxProperties: 256
+          additionalProperties: true
+          description: |
+            Fields stored for a possible later return, but not used by the
+            compiler. Switching an option off keeps its fields; collapsing a
+            section is not the same as switching the option off.
+        unknown:
+          type: object
+          maxProperties: 256
+          additionalProperties: true
+          description: |
+            Fields the importer did not recognise. They are preserved and
+            never executed, and the node stays explicitly invalid until the
+            source or the support is fixed.
+
+    NodeValidation:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [valid-draft, invalid-draft]
+          description: |
+            Whether the draft may be applied. A semantically invalid
+            configuration is storable as an invalid draft; applying it is
+            refused with a reason.
+        errors:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+        warnings:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+
+    ValidationIssue:
+      type: object
+      additionalProperties: false
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The field the issue refers to.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: |
+            A human-readable explanation. It never contains a secret value.
+
+    NodeDraft:
+      type: object
+      description: The read model of a node draft.
+      additionalProperties: false
+      required: [id, protocol, revision, validation, fields]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        label:
+          type: string
+          maxLength: 256
+        revision:
+          $ref: "#/components/schemas/Revision"
+        validation:
+          $ref: "#/components/schemas/NodeValidation"
+        fields:
+          $ref: "#/components/schemas/NodeFields"
+        secrets:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/SecretPresence"
+          description: |
+            Presence-only view of the node's secret fields. Values are never
+            returned.
+        sourceId:
+          $ref: "#/components/schemas/Identifier"
+        sourceKey:
+          type: string
+          maxLength: 256
+          description: |
+            The key of this node within its subscription source, when the node
+            came from one.
+
+    NodeDraftWrite:
+      type: object
+      description: The write model of a node draft.
+      additionalProperties: false
+      required: [protocol, fields]
+      properties:
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        label:
+          type: string
+          maxLength: 256
+        fields:
+          $ref: "#/components/schemas/NodeFields"
+        secrets:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/SecretUpdate"
+          description: |
+            Secret updates, one entry per secret field. A masked placeholder
+            is not accepted as a value.
+
+    NodeDraftUpdate:
+      type: object
+      description: |
+        The patch model of a node draft. `expectedRevision` is mandatory: a
+        patch without it is a conflict, because the contract requires an
+        optimistic revision on every mutation.
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          $ref: "#/components/schemas/Revision"
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        label:
+          type: string
+          maxLength: 256
+        fields:
+          $ref: "#/components/schemas/NodeFields"
+        secrets:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/SecretUpdate"
+
+    ConfigRevision:
+      type: object
+      description: |
+        An immutable configuration revision. The canonical document holds
+        secret references only, never secret values.
+      additionalProperties: false
+      required: [id, revision, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        parentId:
+          $ref: "#/components/schemas/Identifier"
+        revision:
+          $ref: "#/components/schemas/Revision"
+        createdAt:
+          type: string
+          format: date-time
+        canonicalDocument:
+          type: object
+          additionalProperties: true
+          maxProperties: 256
+          description: |
+            The canonical, secret-free document of this revision. Its exact
+            shape follows the compiler output and is not fixed by the
+            contracts yet (gap G-12).
+        validationReportId:
+          $ref: "#/components/schemas/Identifier"
+
+    ValidationReport:
+      type: object
+      additionalProperties: false
+      required: [revisionId, status, errors, warnings]
+      properties:
+        revisionId:
+          $ref: "#/components/schemas/Identifier"
+        capabilityProfileId:
+          $ref: "#/components/schemas/Identifier"
+        status:
+          type: string
+          enum: [passed, failed, not-run]
+          description: |
+            The outcome of validation. A check that was not executed is
+            reported as not-run and never as passed.
+        errors:
+          type: array
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+        warnings:
+          type: array
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+
+    OperationPhase:
+      type: string
+      description: |
+        The phase of an operation, as defined by the data model. The apply
+        sequence is queued, validating, guarding, preparing, switching,
+        verifying, active; a failure after guarding adds rolling-back and
+        ends in restored or degraded-guarded. An update job runs queued,
+        fetching, parsing, reconciling and ends in committed, rejected or
+        failed.
+      enum:
+        - queued
+        - validating
+        - guarding
+        - preparing
+        - switching
+        - verifying
+        - active
+        - rolling-back
+        - restored
+        - degraded-guarded
+        - fetching
+        - parsing
+        - reconciling
+        - committed
+        - rejected
+        - failed
+        - stopped-guarded
+
+    OperationStatus:
+      type: object
+      additionalProperties: false
+      required: [id, phase]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        phase:
+          $ref: "#/components/schemas/OperationPhase"
+        appliedRevisionId:
+          $ref: "#/components/schemas/Identifier"
+        errorCode:
+          type: string
+          maxLength: 128
+          description: A stable code, without a secret value.
+        errorMessage:
+          type: string
+          maxLength: 1024
+          description: |
+            A redacted description of the failure. It never contains a secret
+            value, a token or a raw source body.
+
+    OperationAccepted:
+      type: object
+      additionalProperties: false
+      required: [operationId]
+      properties:
+        operationId:
+          $ref: "#/components/schemas/Identifier"
+        phase:
+          $ref: "#/components/schemas/OperationPhase"
+
+    Readiness:
+      type: object
+      description: |
+        Readiness of each dimension, reported separately. Management readiness
+        is distinct from DNS, engine and classification readiness; a running
+        process is not treated as proof of readiness.
+      additionalProperties: false
+      required: [management, dns, engine, classification]
+      properties:
+        management:
+          type: boolean
+        dns:
+          type: boolean
+        engine:
+          type: boolean
+        classification:
+          type: boolean
+
+    RuntimeState:
+      type: object
+      additionalProperties: false
+      required: [phase, readiness]
+      properties:
+        phase:
+          $ref: "#/components/schemas/OperationPhase"
+        draftRevisionId:
+          $ref: "#/components/schemas/Identifier"
+        activeRevisionId:
+          $ref: "#/components/schemas/Identifier"
+        activeGeneration:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: |
+            The generation of the active configuration, bounded to the JSON
+            safe-integer range so that every conforming parser represents it
+            exactly.
+        readiness:
+          $ref: "#/components/schemas/Readiness"
+        lastErrorCode:
+          type: string
+          maxLength: 128
+        lastErrorMessage:
+          type: string
+          maxLength: 1024
+          description: A redacted description; never a secret value.
+
+    DestinationRule:
+      type: object
+      description: |
+        A rule that assigns matching destinations to block, direct or proxy.
+      additionalProperties: false
+      required: [id, kind, matcher, revision]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        kind:
+          type: string
+          enum: [block, direct, proxy]
+        matcher:
+          type: object
+          additionalProperties: false
+          required: [type, value]
+          properties:
+            type:
+              type: string
+              enum: [domain, ip, cidr, set]
+            value:
+              type: string
+              minLength: 1
+              maxLength: 512
+              description: |
+                The matched domain, address, prefix or set reference. Its
+                normalisation is documented per kind; the normalisation rules
+                are not fixed by the contracts yet (gap G-13).
+        outboundRef:
+          $ref: "#/components/schemas/Identifier"
+        revision:
+          $ref: "#/components/schemas/Revision"
+
+    DestinationRuleWrite:
+      type: object
+      additionalProperties: false
+      required: [kind, matcher]
+      properties:
+        kind:
+          type: string
+          enum: [block, direct, proxy]
+        matcher:
+          type: object
+          additionalProperties: false
+          required: [type, value]
+          properties:
+            type:
+              type: string
+              enum: [domain, ip, cidr, set]
+            value:
+              type: string
+              minLength: 1
+              maxLength: 512
+        outboundRef:
+          $ref: "#/components/schemas/Identifier"
+
+    DestinationRuleUpdate:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          $ref: "#/components/schemas/Revision"
+        kind:
+          type: string
+          enum: [block, direct, proxy]
+        matcher:
+          type: object
+          additionalProperties: false
+          required: [type, value]
+          properties:
+            type:
+              type: string
+              enum: [domain, ip, cidr, set]
+            value:
+              type: string
+              minLength: 1
+              maxLength: 512
+        outboundRef:
+          $ref: "#/components/schemas/Identifier"
+
+    SourceAccessMode:
+      type: string
+      enum: [auto, direct, proxy]
+      description: |
+        How the source is reached. `auto` follows the applied service route;
+        when no route is applied, an automatic fetch is refused rather than
+        falling back to a direct request.
+
+    SourceSchedule:
+      type: object
+      description: |
+        The automatic run schedule of a source. Automatic runs are off by
+        default and are enabled per source; the concrete schedule kinds and
+        their fields are not fixed by the contracts yet (gap G-08), so the
+        structure is carried without inventing an enum.
+      additionalProperties: false
+      required: [automaticEnabled]
+      properties:
+        automaticEnabled:
+          type: boolean
+          default: false
+        kind:
+          type: string
+          maxLength: 64
+          description: The schedule kind, for example a daily time or an interval.
+        time:
+          type: string
+          maxLength: 64
+          description: The time of day, with its time zone shown explicitly.
+        intervalHours:
+          type: integer
+          minimum: 1
+          maximum: 24
+
+    SubscriptionFilter:
+      type: object
+      description: |
+        The filter applied to a subscription's nodes.
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [off, discard, keep]
+          description: |
+            Off, discard, keep, or the two priority modes. The exact priority
+            semantics and the global-inheritance form are not fixed by the
+            contracts yet (gap G-09).
+        priority:
+          type: string
+          enum: [discard-first, keep-first]
+          description: |
+            Which of the two priority modes applies, when the mode is one of
+            them.
+        globalInherited:
+          type: boolean
+          description: Whether the filter inherits the global settings.
+
+    SubscriptionSettings:
+      type: object
+      description: |
+        The settings of one subscription source. The URL is redacted: it may
+        carry userinfo credentials, so it is never returned verbatim.
+      additionalProperties: false
+      required: [id, accessMode, urlPresent, schedule]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        urlPresent:
+          type: boolean
+          description: Whether a source URL is stored.
+        urlRedacted:
+          type: string
+          maxLength: 512
+          description: |
+            A redacted rendering of the URL, without userinfo and without
+            query parameters that could carry a token.
+        accessMode:
+          $ref: "#/components/schemas/SourceAccessMode"
+        serviceRouteRef:
+          $ref: "#/components/schemas/Identifier"
+        tlsVerifyDisabled:
+          type: boolean
+          default: false
+          description: |
+            Whether certificate verification is disabled for this source.
+            Off by default, dangerous by nature, and it applies to this source
+            only — it is never propagated to other sources or to nodes.
+        userAgent:
+          type: string
+          maxLength: 512
+        filter:
+          $ref: "#/components/schemas/SubscriptionFilter"
+        schedule:
+          $ref: "#/components/schemas/SourceSchedule"
+        revision:
+          $ref: "#/components/schemas/Revision"
+
+    SubscriptionSettingsWrite:
+      type: object
+      additionalProperties: false
+      required: [url, accessMode]
+      properties:
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          format: uri
+          description: |
+            The source URL. When it carries userinfo, the credentials are
+            extracted into a secret reference before the request is persisted
+            or logged.
+        accessMode:
+          $ref: "#/components/schemas/SourceAccessMode"
+        serviceRouteRef:
+          $ref: "#/components/schemas/Identifier"
+        tlsVerifyDisabled:
+          type: boolean
+          default: false
+        userAgent:
+          type: string
+          maxLength: 512
+        filter:
+          $ref: "#/components/schemas/SubscriptionFilter"
+        schedule:
+          $ref: "#/components/schemas/SourceSchedule"
+
+    SubscriptionSettingsUpdate:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          $ref: "#/components/schemas/Revision"
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          format: uri
+          description: |
+            The new source URL. A masked placeholder is not a new value and is
+            not written back.
+        accessMode:
+          $ref: "#/components/schemas/SourceAccessMode"
+        serviceRouteRef:
+          $ref: "#/components/schemas/Identifier"
+        tlsVerifyDisabled:
+          type: boolean
+        userAgent:
+          type: string
+          maxLength: 512
+        filter:
+          $ref: "#/components/schemas/SubscriptionFilter"
+        schedule:
+          $ref: "#/components/schemas/SourceSchedule"
+
+    RuleSourceSettings:
+      type: object
+      description: |
+        The settings of one rule source. As with subscriptions, the URL is
+        redacted.
+      additionalProperties: false
+      required: [id, urlPresent, schedule]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier"
+        urlPresent:
+          type: boolean
+        urlRedacted:
+          type: string
+          maxLength: 512
+        schedule:
+          $ref: "#/components/schemas/SourceSchedule"
+        draftVersion:
+          type: string
+          maxLength: 128
+        activeVersion:
+          type: string
+          maxLength: 128
+        revision:
+          $ref: "#/components/schemas/Revision"
+
+    RuleSourceSettingsWrite:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          format: uri
+        schedule:
+          $ref: "#/components/schemas/SourceSchedule"
+
+    RuleSourceSettingsUpdate:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          $ref: "#/components/schemas/Revision"
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          format: uri
+        schedule:
+          $ref: "#/components/schemas/SourceSchedule"
+
+    ReleaseProtectionRequest:
+      type: object
+      description: |
+        **BLOCKED — the shape of this body is not final.** The contract
+        requires an expiring confirmation bound to the session, the active
+        generation and the protection state. How that confirmation reaches the
+        client and comes back is undecided (gap G-07), so this body carries
+        the fields that are known to be required and nothing that would
+        pretend the flow is settled.
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: |
+            The confirmation bound to the current session, generation and
+            protection state. It is consumed once; a replay is refused
+            without a second effect.
+        expectedGeneration:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          description: |
+            The generation the administrator believes is protected. The
+            boundary is the JSON safe-integer range, matching the helper
+            envelope.
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: A stable machine-readable code.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: |
+            A human-readable explanation. It never contains a secret value, a
+            token, or the raw body of a remote source.
+        fieldErrors:
+          type: array
+          maxItems: 128
+          items:
+            type: object
+            additionalProperties: false
+            required: [field, message]
+            properties:
+              field:
+                type: string
+                minLength: 1
+                maxLength: 256
+              message:
+                type: string
+                minLength: 1
+                maxLength: 1024
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: The request identifier, for correlation with the logs.
+        dependencies:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/Identifier"
+          description: |
+            The saved and active references that caused a dependency
+            conflict, so the caller can show what still depends on the
+            object.

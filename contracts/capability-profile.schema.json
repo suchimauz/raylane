@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:raylane:contracts:capability-profile.schema.json",
+  "title": "Raylane capability-profile document schema",
+  "description": "Declarative schema for the authored machine-readable capability profile that is the single source of per-protocol field truth (D1). Every field of every supported protocol is declared here and only here; the API write schema and the read projection are both derived from it. Three classes per field: known (typed, validated, nonsecret), secret (typed, stored as SecretRef, presence-only on read), and unknown (quarantined encrypted, never rendered, never compiled, excluded from reads). This schema describes the profile DOCUMENT, not the node payload. No runtime behaviour is specified or implied.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileVersion", "protocols"],
+  "properties": {
+    "profileVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of this profile document. A change to any declared field, type, default, dependency or secret classification bumps this version."
+    },
+    "protocols": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "One entry per supported protocol, keyed by the wire protocol name.",
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9_-]{0,31}$": {
+          "$ref": "#/$defs/protocolProfile"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "protocolProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fields"],
+      "properties": {
+        "fields": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "description": "The declared fields of this protocol. A field not present here is unknown and is quarantined; it is never rendered, never compiled and excluded from every read.",
+          "patternProperties": {
+            "^[a-zA-Z][a-zA-Z0-9_.]{0,63}$": {
+              "$ref": "#/$defs/fieldSpec"
+            }
+          }
+        }
+      }
+    },
+    "fieldSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "classification"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "integer", "boolean", "enum", "array", "object"],
+          "description": "The JSON type of this field's value."
+        },
+        "classification": {
+          "type": "string",
+          "enum": ["known", "secret"],
+          "description": "known = typed, validated, nonsecret, returned on read. secret = typed, stored as a SecretRef, presence-only on read; the value never appears in any read, export, report or log outside the encrypted backup envelope (D4)."
+        },
+        "secret": {
+          "type": "boolean",
+          "const": true,
+          "description": "Present only when classification=secret. Marks that this field's value is a secret and must be held as a SecretRef."
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the field must be present for a valid draft. Default false."
+        },
+        "default": {
+          "description": "The default applied when the field is absent. Only for classification=known. Must match the declared type."
+        },
+        "allowedValues": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Closed set of permitted values. Only when type=enum."
+        },
+        "itemType": {
+          "type": "string",
+          "enum": ["string", "integer"],
+          "description": "Element type. Only when type=array."
+        },
+        "minItems": { "type": "integer", "minimum": 0 },
+        "maxItems": { "type": "integer", "minimum": 1 },
+        "minimum": { "type": "integer" },
+        "maximum": { "type": "integer" },
+        "minLength": { "type": "integer", "minimum": 0 },
+        "maxLength": { "type": "integer", "minimum": 1 },
+        "pattern": { "type": "string" },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Field-level dependencies: a declared field that must be present or take a specific value when this field is present.",
+          "properties": {
+            "requires": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Fields that must be present when this field is present."
+            },
+            "incompatibleWith": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Fields that must NOT be present when this field is present."
+            }
+          }
+        },
+        "supported": {
+          "type": "boolean",
+          "description": "Whether the currently pinned engine supports this field. Default true. A declared-but-unsupported field is preserved as inactive and prevents apply until support is confirmed."
+        },
+        "activeByDefault": {
+          "type": "boolean",
+          "description": "Whether the field takes effect in the applied configuration. Default true. An inactive field is stored but not used by the compiler."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "classification": { "const": "secret" } } },
+          "then": {
+            "required": ["secret"],
+            "properties": { "secret": { "const": true } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "enum" } } },
+          "then": { "required": ["allowedValues"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "array" } } },
+          "then": { "required": ["itemType"] }
+        }
+      ]
+    }
+  }
+}

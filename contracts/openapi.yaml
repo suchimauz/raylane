@@ -3,36 +3,49 @@ openapi: 3.1.0
 info:
   title: Raylane control-plane API
   version: "0.0.0-draft"
-  summary: Partial machine-readable contract for the Raylane control plane.
+  summary: Machine-readable contract for the Raylane control plane (T005 contract batch).
   description: |
-    Declarative contract for the subset of the control-plane API that the
-    feature contracts already define and that does not depend on the open
-    A04 session-policy decision or on the blocked backup/retention work.
+    Declarative contract for the control-plane API that the feature
+    contracts define. This revision completes the T005 contract batch
+    (decisions D1-D8, see `docs/engineering/foundation-decisions.md`): it
+    adds authentication/session/bootstrap (D5), apply (D2/G-10),
+    release-protection with helper-issued confirmation (D6/G-07),
+    self-contained encrypted backup and draft-only restore (D4/G-04..G-06),
+    diagnostics export (G-14), the per-protocol capability profile
+    (D1/G-11), per-source LAN allowlists and forbidden-class-first fetch
+    policy (D7/G-16), bounded schedule and filter vocabularies
+    (G-08/G-09), destination matcher normalisation (G-13) and update-job
+    counters (G-15).
+
+    The optimistic-revision guard is now specified for every mutation class
+    (D3/G-18): entity mutations carry a required client `expectedRevision`,
+    refreshes carry a client `expectedRevision` plus the server-side
+    `capturedRevision` commit-check, creates are guarded by absence and
+    uniqueness transactionally, and generation-bound runtime operations
+    carry `expectedGeneration`.
 
     Scope and status
     ---------------
-    This is a **partial** artifact. It covers node, draft-revision, validation,
-    operation-status, runtime-state, destination-rule and source-settings
-    operations, plus the explicit refresh operations. It does **not** cover
-    authentication, session, bootstrap, backup, restore, retention or garbage
-    collection: those are BLOCKED or undecided in
-    `docs/engineering/A04-contract-proposal.md` and are listed as gaps in
-    `docs/engineering/T005-openapi.md` rather than being invented here.
+    Retention and garbage collection remain BLOCKED: nothing in this API
+    deletes revisions, drafts, secrets or audit records (cleanup stays OFF).
+    The canonical-document shape (G-12) follows the compiler, which does not
+    exist yet; the document is free-form until then and is not guaranteed
+    secret-free.
 
-    The companion document `docs/engineering/T005-openapi.md` is the gap
-    matrix. No endpoint in this file may be treated as implemented: no server,
-    route or handler exists. T005 is **not** done while
-    `contracts/openapi.yaml` remains partial.
+    No endpoint in this file may be treated as implemented: no server, route
+    or handler exists. The companion document
+    `docs/engineering/T005-openapi.md` is the gap matrix.
 
     Source of truth
     ---------------
     `specs/001-selected-connections/contracts/control-plane.md` (API
     interface), `specs/001-selected-connections/data-model.md` (entities and
     states), `specs/001-selected-connections/spec.md` (FR-009, FR-010,
-    FR-011, FR-013, FR-014, FR-019, FR-020, FR-021; US-01, US-02, US-03,
-    US-04), and `specs/001-selected-connections/plan.md` (architecture
-    boundaries). Where a field is not fixed by those documents it is marked
-    TODO in the gap matrix, not filled in with an assumption.
+    FR-011, FR-013, FR-014, FR-019, FR-020, FR-021; US-01..US-05),
+    `specs/001-selected-connections/plan.md` (architecture boundaries), and
+    `docs/engineering/foundation-decisions.md` (D1-D8). Where a field is not
+    fixed by those documents it is marked TODO in the gap matrix, not filled
+    in with an assumption.
 
     Security invariants this contract encodes
     ------------------------------------------
@@ -40,45 +53,26 @@ info:
       that may carry userinfo. Secret fields are presence-only on read; a
       source URL is returned redacted.
     * A secret update is an explicit union of unchanged / replace / clear.
-      "Leave this field alone" is expressed with `op: unchanged` — the
-      client already knows whether it edited the field, and the presence-only
-      read API protects the VALUE rather than reporting edit state. The one
-      reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__` is refused: a
-      `replace` carrying exactly that string is not schema-valid, is
-      rejected with 422, and is never stored or echoed. Every other string
-      is legitimate, including mask-like strings — a pattern-based
-      rejection would refuse legitimate passwords.
+      The one reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__` is refused
+      on an exact match; every other string is legitimate, including
+      mask-like strings.
     * No read or write implicitly fetches a remote source, and no draft
-      operation implicitly applies anything. Saving is never applying. In
-      other words: there is no implicit fetch and no implicit apply anywhere
-      in this API; a fetch happens only through an explicit refresh
-      operation, and an apply happens only through the separate apply
-      operation, which is not part of this partial artifact.
-    * Every mutation that CAN be guarded by an optimistic revision is:
-      the four PATCH bodies require `expectedRevision`. The contract's
-      mutation line is broader than that, and the remaining mutations
-      (creates, deletes, the runtime stop, and the two refreshes) carry
-      `x-implementation-status: blocked` with a note, because the guard
-      mechanism for them is not specified and choosing one would be a
-      concurrency-design decision. This is gap G-18.
-    * Stopping the runtime and releasing the protection against direct bypass
-      are separate operations with separate semantics. The release operation
-      is not present in `paths` at all: its confirmation delivery is
-      undecided (gap G-07), and a declared-but-unusable route is a route
-      that can be mistaken for a working one.
+      operation implicitly applies anything. Saving is never applying.
+    * Stopping the runtime and releasing the protection against direct
+      bypass are separate operations. Release requires a single-use
+      confirmation issued by the helper and verified by the helper against
+      its own state.
     * Error responses carry a request identifier and a stable code, and never
       echo the raw body of a remote source.
 
     What this contract does NOT guarantee
     --------------------------------------
-    * `NodeDraft.fields` and `ConfigRevision.canonicalDocument` are free-form
-      objects. They are NOT guaranteed to be secret-free, and this file does
-      not claim they are. A value written into a free-form field would be
-      stored and returned verbatim. Two enforcement points are required
-      before any backend or UI is built on them — a typed capability
-      profile checked on write, and a read-side filter — and neither exists
-      yet. That is gap G-11, and it is a blocking prerequisite, not a
-      detail.
+    * `ConfigRevision.canonicalDocument` is a free-form object until the
+      compiler fixes its shape (G-12); it is not guaranteed secret-free.
+    * The enforcement of the capability profile (write validation and
+      read-side filtering) is a runtime obligation; this contract records
+      the profile as the source of truth but the schema alone does not
+      execute the filtering.
   license:
     name: MIT
     identifier: MIT
@@ -851,31 +845,6 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshSubscription
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The client-side optimistic-revision guard for this refresh is NOT
-        defined by any normative source, and the two sources that could
-        define it disagree.
-          * data-model.md L3 and control-plane.md L3 are BLANKET: every
-            mutation requires expectedRevision. Read literally, that covers
-            this refresh.
-          * control-plane.md L16 names the refresh's outcome as "202 job;
-            busy 409; never apply" and does NOT name expectedRevision.
-        The single-running-job rule and the capturedRevision commit check
-        that the data model states for an UpdateJob are SERVER-SIDE commit
-        discipline — they prevent a job from committing over a concurrent
-        change. They are not a client-supplied guard: the refresh request
-        carries no client view of the source state that could be stale.
-        Clearing the marker would therefore silently pick the weaker
-        reading and weaken the blanket norm without changing the norm.
-        Both readings are open until the norm is scoped:
-          * R1 — scope the blanket to state-changing entity mutations
-            (PATCH/DELETE), leaving the refresh guarded by the job rule;
-          * R2 — carry a required client expectedRevision, which for a
-            subscription can anchor on its revision field, but for a rule
-            source has NO such anchor (see the note on refreshRuleSource).
-        Neither is chosen here.
-        See gap G-18.
       tags: [sources]
       summary: Refresh a subscription explicitly.
       description: |
@@ -884,15 +853,23 @@ paths:
         configuration. If a job is already running for this source, the
         request is rejected with 409 rather than overwriting it.
 
-        The server-side commit discipline is normative: one running job per
-        source, and the job commits only if the revision it captured still
-        matches, so a revision conflict rejects the candidate rather than
-        overwriting manual changes. That discipline is not the same as a
-        client-supplied expectedRevision, and this operation does not
-        currently carry one — see the implementation note above and gap
-        G-18.
+        Client optimistic-revision guard (D3): the request requires
+        `expectedRevision` bound to the subscription's settings `revision`.
+        A mismatch is 409. The server-side commit discipline is also
+        normative: one running job per source, and the job commits only if
+        the `capturedRevision` it recorded still matches at commit time,
+        so a concurrent change after the job started rejects the candidate
+        rather than overwriting it. The client guard and the server
+        commit-check protect different races; neither substitutes for the
+        other.
       security:
         - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshSourceRequest"
       responses:
         "202":
           description: The refresh job was accepted.
@@ -903,6 +880,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -911,6 +890,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
 
   /rule-sources/{ruleSourceId}/refresh:
     parameters:
@@ -918,39 +899,6 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshRuleSource
-      x-implementation-status: blocked
-      x-implementation-note: |
-        The client-side optimistic-revision guard for this refresh is NOT
-        defined by any normative source, and the two sources that could
-        define it disagree:
-          * data-model.md L3 and control-plane.md L3 are BLANKET: every
-            mutation requires expectedRevision. Read literally, that covers
-            this refresh.
-          * control-plane.md L16 names the refresh's outcome as "202 job;
-            busy 409; never apply" and does NOT name expectedRevision.
-        The single-running-job rule and the capturedRevision commit check
-        that the data model states for an UpdateJob are SERVER-SIDE commit
-        discipline — they prevent a job from committing over a concurrent
-        change. They are not a client-supplied guard.
-        Both readings are open until the norm is scoped:
-          * R1 — scope the blanket to state-changing entity mutations
-            (PATCH/DELETE), leaving the refresh guarded by the job rule;
-          * R2 — carry a required client expectedRevision, which for a rule
-            source has NO anchor (see the note below).
-        Neither is chosen here.
-        ADDITIONAL EXISTING INCONSISTENCY: if the reading R2 is chosen —
-        a required client expectedRevision — then this operation has no
-        anchor for it. The RuleSetSource entity in data-model.md carries
-        draftVersion and activeVersion, which are versions of the FETCHED
-        SET CONTENT, not a revision of the source's settings; it has no
-        settings revision. The PATCH on this same entity already requires
-        expectedRevision with exactly this missing anchor. That is a
-        pre-existing inconsistency, not something introduced here, and it is
-        NOT resolved by quietly binding expectedRevision to draftVersion:
-        draftVersion is the wrong field, and binding to it would be a
-        silent redefinition. The data model has to supply the anchor, or the
-        norm has to be scoped, and neither is this artifact's call.
-        See gap G-18.
       tags: [sources]
       summary: Refresh a rule source explicitly.
       description: |
@@ -960,13 +908,23 @@ paths:
         job is already running for this source, the request is rejected with
         409 rather than overwriting it.
 
-        The server-side commit discipline is normative: one running job per
-        source, and the job commits only if the revision it captured still
-        matches. That discipline is not the same as a client-supplied
-        expectedRevision, and this operation does not currently carry one —
-        see the implementation note above and gap G-18.
+        Client optimistic-revision guard (D3): the request requires
+        `expectedRevision` bound to the rule source's SETTINGS `revision`
+        (a distinct field from `draftVersion`/`activeVersion`, which are
+        content versions of the fetched set). A mismatch is 409. The
+        server-side commit discipline is also normative: one running job
+        per source, and the job commits only if its `capturedRevision`
+        still matches at commit time. The client guard and the server
+        commit-check protect different races; neither substitutes for the
+        other.
       security:
         - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshSourceRequest"
       responses:
         "202":
           description: The refresh job was accepted.
@@ -977,6 +935,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -985,6 +945,291 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+  /session:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Log in and establish an admin session.
+      description: |
+        Authenticates the administrator and sets a secure, HttpOnly,
+        SameSite session cookie. On failure the response is a generic
+        invalid-credentials error with a rate limit; it is never a
+        per-field oracle. Session policy (D5/A04): idle 900 seconds
+        (polling and reads do not extend it), absolute 43200 seconds,
+        re-login required after a control-plane restart.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionCredentials"
+      responses:
+        "204":
+          description: The session was established; the cookie is set.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+    delete:
+      operationId: logout
+      tags: [auth]
+      summary: Log out and revoke the current session.
+      description: |
+        Revokes the current session and its confirmation tokens. The
+        response is idempotent.
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: The session was revoked.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /bootstrap:
+    post:
+      operationId: bootstrap
+      tags: [auth]
+      summary: One-time bootstrap of the first admin.
+      description: |
+        Creates the first admin from a locally issued one-time token over an
+        authorized local channel. Consume token + insert admin + permanent
+        bootstrapConsumed is one atomic transaction; exactly one concurrent
+        request wins. After an admin exists, the endpoint is closed. Session
+        policy (D5): re-login is required after a control-plane restart.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "204":
+          description: The admin was created and bootstrap is permanently closed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+  /revisions/{revisionId}/apply:
+    parameters:
+      - $ref: "#/components/parameters/RevisionId"
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: applyRevision
+      tags: [revisions]
+      summary: Apply a validated revision to the running network configuration.
+      description: |
+        Starts an apply of the revision (G-10, D2). Artefact bytes are
+        delivered to the privileged helper with StageArtifact; the generation
+        is prepared, the new-flow guard engaged, the kernel batch switched
+        within one nft transaction, and the generation verified. The active
+        revision is committed only on the confirmed result; a crash between
+        confirmation and commit is reconciled from the apply journal. The
+        apply is asynchronous and returns an operation id. An invalid
+        revision is refused with 422; a revision or generation conflict is
+        409.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplyRevisionRequest"
+      responses:
+        "202":
+          description: The apply was accepted as an operation.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /runtime/release-protection:
+    post:
+      operationId: releaseProtection
+      tags: [runtime]
+      summary: Release the protection against direct bypass, with a bound confirmation.
+      description: |
+        Releases the protection (D6). Requires a single-use confirmation
+        bound to the session, the generation and the protection state. The
+        confirmation was issued to the authorized session by a helper
+        RegisterReleaseConfirmation operation; the helper itself verifies the
+        binding to the current generation and protection state, the freshness
+        (at most 120 seconds) and the single use. Releasing protection is
+        separate from Stop and is an authorized, confirmed, audited
+        operation.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseProtectionConfirm"
+      responses:
+        "200":
+          description: The protection was released.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+  /backups:
+    post:
+      operationId: createBackup
+      tags: [backup]
+      summary: Create a self-contained encrypted backup export.
+      description: |
+        Produces a self-contained encrypted backup file the administrator
+        holds (D4). The encrypted payload carries sufficient configuration
+        and secret values for restoration to a clean target. It contains no
+        master key, sessions, admin credentials, release/bootstrap tokens,
+        raw audit logs or passphrase. The product keeps no permanent backup
+        registry. The passphrase is carried in the request body, never
+        logged.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupRequest"
+      responses:
+        "200":
+          description: The encrypted backup export.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+
+  /restores:
+    post:
+      operationId: restoreBackup
+      tags: [backup]
+      summary: Restore an encrypted backup into a new draft revision.
+      description: |
+        Restores an encrypted backup into a new draft revision only, never
+        applying it (D4). Authenticates/decrypts and validates
+        format/version/bounds before creating state; recreates secret-store
+        records under the target key and remaps references consistently in
+        the same transaction as the new draft. A missing reference in a
+        purportedly complete archive is an error, not a normal successful
+        restore. Failure exposes no partial draft/secret records; the active
+        state is unchanged.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreRequest"
+      responses:
+        "201":
+          description: A new draft revision was created from the backup.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigRevision"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/SemanticValidationFailed"
+
+  /diagnostics/export:
+    post:
+      operationId: exportDiagnostics
+      tags: [diagnostics]
+      summary: Export an allowlisted nonsecret diagnostics artifact.
+      description: |
+        Produces a diagnostics artifact (G-14) containing only allowlisted,
+        nonsecret operational state. The allowlist is fixed: it excludes
+        secret values, source URLs, session/confirmation tokens, admin
+        credentials and full configurations. The artifact is for support and
+        debugging; it is never a substitute for a backup.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: The allowlisted diagnostics artifact.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
 components:
   securitySchemes:
@@ -1315,39 +1560,34 @@ components:
     NodeFields:
       type: object
       description: |
-        The protocol-specific fields of a node, split into the fields that take
-        effect, the fields that are stored but inactive, and the fields that
-        are not recognised.
+        The protocol-specific fields of a node. The concrete field set per
+        protocol is declared in the capability profile
+        (`contracts/capability-profile.json`, schema
+        `contracts/capability-profile.schema.json`, decision D1), which is the
+        single source of per-protocol field truth.
 
-        The concrete field set per protocol comes from the capability profile,
-        which is not yet written (gap G-11). Until it exists, this schema
-        carries the *structure* only: a free-form, size-bounded object per
-        group. That is deliberate — inventing a field list per protocol here
-        would freeze a product decision that the capability-profile task
-        owns.
+        Every submitted field is classified by the profile:
+          * **known** — typed, validated against the profile's type, bounds,
+            defaults, allowed values and dependencies; returned on read.
+          * **secret** — typed, stored as a `SecretRef`, presence-only on read;
+            the value never appears in any read, export, report or log outside
+            the encrypted backup envelope (D4).
+          * **unknown** (a field not declared in the profile) — quarantined
+            encrypted (`unknownFieldsEncrypted`), never rendered, never
+            compiled, and excluded from every read and export.
 
-        **THIS SCHEMA DOES NOT GUARANTEE THAT THESE OBJECTS ARE SECRET-FREE.**
-        The three groups are free-form: any key, any value, any nesting
-        depth up to the size bound. A client can therefore put a secret value
-        in `fields.active`, and because the read model returns `fields`
-        verbatim, a value written there would be stored and returned in
-        clear text. That path bypasses both the presence-only secret view and
-        the typed secret-update union.
+        Derived write validation: a field that is not declared in the profile,
+        or whose value does not satisfy its declared type, bounds, allowed
+        values or dependencies, is rejected on write (422) or quarantined
+        (unknown) and the node is marked invalid-draft. A semantic-invalid
+        draft remains saveable; malformed JSON cannot replace saved state.
+        A node carrying an unresolved/unsupported capability is not applicable.
 
-        Two enforcement points are required before any backend or UI is built
-        on this schema, and neither exists yet:
-          * on WRITE: validate the submitted fields against the typed
-            capability profile, and reject any value that is not a
-            declared field of that protocol (gap G-11);
-          * on READ: filter the stored fields against the same profile
-            before returning them, so a value that slipped in cannot be
-            returned in clear text (gap G-11).
-
-        Until the capability profile exists and those two rules are
-        implemented, `fields` is UNVALIDATED CONTENT. No backend, no UI and
-        no downstream implementation may treat this schema as a security
-        boundary. The presence-only guarantee applies to the `secrets` map
-        only — it says nothing about `fields`.
+        Derived read projection: the read model returns only known nonsecret
+        fields. Secret fields are returned as `SecretPresence` (presence-only)
+        via the separate `secrets` map. Unknown quarantined fields are never
+        returned. Never send an unknown or secret field through a free-form
+        public object.
       additionalProperties: false
       required: [active, inactive, unknown]
       properties:
@@ -1356,26 +1596,27 @@ components:
           maxProperties: 256
           additionalProperties: true
           description: |
-            Fields that take effect in the applied configuration. Unvalidated
-            free-form content until the capability profile exists (G-11).
+            Fields that take effect in the applied configuration. Validated
+            against the capability profile on write and filtered on read.
         inactive:
           type: object
           maxProperties: 256
           additionalProperties: true
           description: |
-            Fields stored for a possible later return, but not used by the
-            compiler. Switching an option off keeps its fields; collapsing a
-            section is not the same as switching the option off. Unvalidated
-            free-form content until the capability profile exists (G-11).
+            Declared fields stored for a possible later return, but not used by
+            the compiler (the profile's `activeByDefault` is false, or the
+            field is declared but `supported` is false). Switching an option
+            off keeps its fields; collapsing a section is not the same as
+            switching the option off.
         unknown:
           type: object
           maxProperties: 256
           additionalProperties: true
           description: |
-            Fields the importer did not recognise. They are preserved and
-            never executed, and the node stays explicitly invalid until the
-            source or the support is fixed. Unvalidated free-form content
-            until the capability profile exists (G-11).
+            Fields the importer or client submitted that the capability profile
+            does not declare. They are quarantined encrypted, preserved and
+            never executed; the node stays explicitly invalid until the source
+            or the support is fixed. Never returned on read.
 
     NodeValidation:
       type: object
@@ -1505,23 +1746,16 @@ components:
     ConfigRevision:
       type: object
       description: |
-        **REFERENCE ONLY — this schema is not currently attached to any
-        operation.**
+        An immutable configuration revision. Returned by a restore (the
+        restore creates a new draft revision) and reported against by
+        validation. The feature contract's operation table names no
+        general revision-read operation, so this schema is attached only to
+        the restore response.
 
-        The feature contract's operation table names no revision-read
-        operation: it names `POST /revisions/{id}/validate` and
-        `GET /operations/{id}`, `GET /state`, but no `GET /revisions/{id}`.
-        A read of a revision was therefore removed rather than invented.
-
-        The schema is kept here because a revision is a real entity of the
-        data model, and because the validation operation reports against
-        one. When a revision-read operation is specified, this schema is
-        attached to it.
-
-        An immutable configuration revision. The canonical document holds
-        secret references only, never secret values — this is a property of
-        the compiler that produces it, and it is not enforced by this
-        schema (see `canonicalDocument` below and gap G-12).
+        The canonical document holds secret references only, never secret
+        values — this is a property of the compiler that produces it, and
+        it is not enforced by this schema (see `canonicalDocument` below
+        and gap G-12).
       additionalProperties: false
       required: [id, revision, createdAt]
       properties:
@@ -1539,9 +1773,10 @@ components:
           additionalProperties: true
           maxProperties: 256
           description: |
-            The canonical document of this revision. Its exact shape follows
-            the compiler output and is not fixed by the contracts yet (gap
-            G-12).
+            The canonical document of this revision (G-12). Its exact shape
+            follows the compiler output; the compiler contract, which does
+            not exist yet, fixes the document shape and guarantees that it
+            carries secret references only, never secret values.
 
             **This schema does not guarantee that this document is
             secret-free.** The object is free-form, so the property holds only
@@ -1777,52 +2012,80 @@ components:
     SourceSchedule:
       type: object
       description: |
-        The automatic run schedule of a source. Automatic runs are off by
-        default and are enabled per source; the concrete schedule kinds and
-        their fields are not fixed by the contracts yet (gap G-08), so the
-        structure is carried without inventing an enum.
+        The automatic run schedule of a source (G-08). Automatic runs are off
+        by default and are enabled per source. FR-014 requires manual,
+        after-boot, daily, by-weekday and 1-24-hour interval scheduling. The
+        kind is a closed enum; each kind uses only its own fields. Missed runs
+        are coalesced into one after recovery. The schedule's time zone is
+        shown explicitly in the UI.
       additionalProperties: false
-      required: [automaticEnabled]
+      required: [automaticEnabled, kind]
       properties:
         automaticEnabled:
           type: boolean
           default: false
         kind:
           type: string
-          maxLength: 64
-          description: The schedule kind, for example a daily time or an interval.
+          enum: [manual, after-boot, daily, weekly, interval]
+          description: |
+            `manual` — no automatic runs. `after-boot` — run once after the
+            control plane starts. `daily` — run at `time` each day. `weekly`
+            — run at `time` on the weekdays in `weekdays`. `interval` — run
+            every `intervalHours` hours.
         time:
           type: string
-          maxLength: 64
-          description: The time of day, with its time zone shown explicitly.
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+          description: |
+            The time of day in 24-hour HH:MM form, interpreted in the
+            explicitly displayed time zone. Required for `daily` and
+            `weekly`.
+        weekdays:
+          type: array
+          items:
+            type: string
+            enum: [mon, tue, wed, thu, fri, sat, sun]
+          minItems: 1
+          maxItems: 7
+          uniqueItems: true
+          description: The weekdays the schedule runs on. Required for `weekly`.
         intervalHours:
           type: integer
           minimum: 1
           maximum: 24
+          description: The interval in hours. Required for `interval`.
 
     SubscriptionFilter:
       type: object
       description: |
-        The filter applied to a subscription's nodes.
+        The filter applied to a subscription's nodes (G-09). FR-013 lists off,
+        discard, keep and two priority modes, plus global inheritance.
       additionalProperties: false
       required: [mode]
       properties:
         mode:
           type: string
-          enum: [off, discard, keep]
+          enum: [off, discard, keep, priority-discard-first, priority-keep-first]
           description: |
-            Off, discard, keep, or the two priority modes. The exact priority
-            semantics and the global-inheritance form are not fixed by the
-            contracts yet (gap G-09).
-        priority:
-          type: string
-          enum: [discard-first, keep-first]
-          description: |
-            Which of the two priority modes applies, when the mode is one of
-            them.
+            `off` — no filter. `discard` — drop nodes matching `patterns`.
+            `keep` — keep only nodes matching `patterns`. `priority-discard-first`
+            — evaluate discard patterns before keep patterns; a node matching
+            both is discarded. `priority-keep-first` — evaluate keep patterns
+            before discard patterns; a node matching both is kept.
+        patterns:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 512
+          maxItems: 256
+          description: The filter patterns, applied according to the mode.
         globalInherited:
           type: boolean
-          description: Whether the filter inherits the global settings.
+          default: false
+          description: |
+            Whether the filter inherits the global settings. When true, the
+            subscription-specific `mode` and `patterns` are ignored and the
+            global filter applies.
 
     SubscriptionSettings:
       type: object
@@ -1861,6 +2124,17 @@ components:
           $ref: "#/components/schemas/SubscriptionFilter"
         schedule:
           $ref: "#/components/schemas/SourceSchedule"
+        lanAllowlistCIDRs:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
+          description: |
+            The per-source LAN CIDR allowlist (D7/G-16). Only the
+            administrator changes it; imported content never does. Forbidden
+            address classes are evaluated first and always win over the
+            allowlist, for IPv4 and IPv6 (including IPv4-mapped IPv6).
         revision:
           $ref: "#/components/schemas/Revision"
 
@@ -1892,6 +2166,12 @@ components:
           $ref: "#/components/schemas/SubscriptionFilter"
         schedule:
           $ref: "#/components/schemas/SourceSchedule"
+        lanAllowlistCIDRs:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
 
     SubscriptionSettingsUpdate:
       type: object
@@ -1924,14 +2204,23 @@ components:
           $ref: "#/components/schemas/SubscriptionFilter"
         schedule:
           $ref: "#/components/schemas/SourceSchedule"
+        lanAllowlistCIDRs:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
 
     RuleSourceSettings:
       type: object
       description: |
         The settings of one rule source. As with subscriptions, the URL is
-        redacted.
+        redacted. `revision` is the SETTINGS revision (optimistic-concurrency
+        guard); `draftVersion`/`activeVersion` are content versions of the
+        fetched set. Client `expectedRevision` on PATCH/DELETE/refresh is
+        always bound to `revision`, never to `draftVersion`/`activeVersion`.
       additionalProperties: false
-      required: [id, urlPresent, schedule]
+      required: [id, urlPresent, schedule, revision]
       properties:
         id:
           $ref: "#/components/schemas/Identifier"
@@ -1948,6 +2237,17 @@ components:
         activeVersion:
           type: string
           maxLength: 128
+        lanAllowlistCIDRs:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
+          description: |
+            The per-source LAN CIDR allowlist (D7/G-16). Only the
+            administrator changes it; imported content never does. Forbidden
+            address classes are evaluated first and always win, for IPv4 and
+            IPv6 (including IPv4-mapped IPv6).
         revision:
           $ref: "#/components/schemas/Revision"
 
@@ -1963,6 +2263,12 @@ components:
           format: uri
         schedule:
           $ref: "#/components/schemas/SourceSchedule"
+        lanAllowlistCIDRs:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
 
     RuleSourceSettingsUpdate:
       type: object
@@ -1978,6 +2284,12 @@ components:
           format: uri
         schedule:
           $ref: "#/components/schemas/SourceSchedule"
+        lanAllowlistCIDRs:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 64
 
     StopRuntimeRequest:
       type: object
@@ -2003,39 +2315,143 @@ components:
             The boundary is the JSON safe-integer range, matching the helper
             envelope.
 
-    ReleaseProtectionRequest:
+    RefreshSourceRequest:
       type: object
       description: |
-        **REFERENCE ONLY — this body is not currently attached to any
-        operation, and no operation may use it yet.**
+        The body of an explicit source refresh (D3). The client optimistic-
+        revision guard binds `expectedRevision` to the source's SETTINGS
+        `revision` (for a rule source, the settings revision, never
+        `draftVersion`/`activeVersion`). A mismatch is 409.
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          $ref: "#/components/schemas/Revision"
 
-        The control plane requires an expiring confirmation bound to the
-        session, the active generation and the protection state. How that
-        confirmation reaches the client and comes back is undecided (gap
-        G-07), so there is no release endpoint to attach this body to. The
-        release-protection path was deliberately REMOVED from `paths` rather
-        than published in a blocked state: a declared-but-unusable route is
-        a route that can be mistaken for a working one.
+    SessionCredentials:
+      type: object
+      description: |
+        Login credentials. The response is a generic invalid-credentials
+        error on failure and a rate limit, never a per-field oracle.
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 256
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
 
-        The schema is kept here so the required fields are recorded while
-        the flow is designed. When the confirmation delivery is agreed, this
-        body is attached to the release operation together with the 403
-        response that a blocked release must return.
+    BootstrapRequest:
+      type: object
+      description: |
+        One-time bootstrap. Carries the locally issued one-time token and the
+        initial admin credentials. The bootstrap channel is a local
+        authorized channel, not LAN HTTP. Consume token + insert admin +
+        permanent bootstrapConsumed is one atomic transaction; exactly one
+        concurrent request wins. After an admin exists, re-issuance and the
+        endpoint are closed.
+      additionalProperties: false
+      required: [token, username, password]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The one-time bootstrap token, issued locally.
+        username:
+          type: string
+          minLength: 1
+          maxLength: 256
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
 
-        `expectedGeneration` is required, so the confirmation cannot be
-        replayed against a generation the administrator did not intend to
+    ApplyRevisionRequest:
+      type: object
+      description: |
+        The body of an apply request (G-10/D2). Applying a revision reaches
+        the privileged helper: artefact bytes are delivered with StageArtifact,
+        the generation is prepared, the guard engaged, the kernel switched and
+        the generation verified, and the active revision is committed only on
+        the confirmed result. The apply is asynchronous and returns an
+        operation id.
+      additionalProperties: false
+      properties:
+        note:
+          type: string
+          maxLength: 256
+          description: An optional human note recorded on the apply journal.
+
+    BackupRequest:
+      type: object
+      description: |
+        The body of a backup request (D4). The passphrase protects the
+        encrypted export; it is carried in the request body, never in a query
+        string or a log. The export is a self-contained encrypted file that
+        the administrator holds; the product keeps no permanent backup
+        registry.
+      additionalProperties: false
+      required: [passphrase]
+      properties:
+        passphrase:
+          type: string
+          minLength: 8
+          maxLength: 1024
+          description: |
+            The backup passphrase. Used to derive the encryption key via a
+            standard KDF; it is never stored, logged or returned.
+
+    RestoreRequest:
+      type: object
+      description: |
+        The body of a restore request (D4). Carries the encrypted backup and
+        its passphrase. Restore authenticates/decrypts and validates
+        format/version/bounds before creating state, recreates secret-store
+        records under the target key and remaps references consistently in
+        the same transaction as the new draft. Failure exposes no partial
+        draft/secret records; the active state is unchanged and no implicit
+        apply occurs.
+      additionalProperties: false
+      required: [passphrase, archive]
+      properties:
+        passphrase:
+          type: string
+          minLength: 8
+          maxLength: 1024
+        archive:
+          type: string
+          minLength: 1
+          maxLength: 52428800
+          description: |
+            The encrypted backup archive, base64-encoded, bounded to 50 MiB
+            of encoded text. Validated before any state is created.
+
+    ReleaseProtectionConfirm:
+      type: object
+      description: |
+        The body that confirms a release of protection (D6). The confirmation
+        token was issued to the authorized session by a helper
+        RegisterReleaseConfirmation operation; the helper itself verifies the
+        binding to the current generation and protection state, the freshness
+        and the single use. `expectedGeneration` guards against replaying the
+        confirmation against a generation the administrator did not intend to
         release.
       additionalProperties: false
       required: [confirmation, expectedGeneration]
       properties:
         confirmation:
           type: string
-          minLength: 1
+          minLength: 32
           maxLength: 512
           description: |
-            The confirmation bound to the current session, generation and
-            protection state. It is consumed once; a replay is refused
-            without a second effect.
+            The single-use confirmation token bound to the session, the
+            generation and the protection state. Consumed once; a replay is
+            refused without a second effect.
         expectedGeneration:
           type: integer
           minimum: 0
@@ -2044,6 +2460,66 @@ components:
             The generation the administrator believes is protected. The
             boundary is the JSON safe-integer range, matching the helper
             envelope.
+
+    UpdateJobCounters:
+      type: object
+      description: |
+        The counters an update job reports (G-15). Counts are informational
+        and describe the job's own run, never a measured coverage claim.
+      additionalProperties: false
+      properties:
+        fetchedBytes:
+          type: integer
+          minimum: 0
+        nodesSeen:
+          type: integer
+          minimum: 0
+        nodesAdded:
+          type: integer
+          minimum: 0
+        nodesUpdated:
+          type: integer
+          minimum: 0
+        nodesRemoved:
+          type: integer
+          minimum: 0
+        rulesSeen:
+          type: integer
+          minimum: 0
+        entriesKept:
+          type: integer
+          minimum: 0
+        entriesDiscarded:
+          type: integer
+          minimum: 0
+
+    DestinationMatcher:
+      type: object
+      description: |
+        A destination matcher (G-13). Domain and IP matching is normalised in
+        a documented way before comparison; the matcher value is carried with
+        its kind. Unsupported-format regex or YAML tags are not executed.
+      additionalProperties: false
+      required: [kind, value]
+      properties:
+        kind:
+          type: string
+          enum: [domain, ip, cidr, setRef]
+          description: |
+            `domain` — an exact or suffix domain match, normalised to
+            lowercase with a single trailing dot removed. `ip` — a single
+            IPv4 or IPv6 address, normalised to its canonical form. `cidr` —
+            an IPv4 or IPv6 CIDR, normalised to its network address and
+            prefix length. `setRef` — a reference to a canonical destination
+            set.
+        value:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: |
+            The matcher value, normalised per the kind. The normalisation
+            rules per kind are fixed by the compiler contract and applied
+            before the value is stored or compared.
 
     ErrorResponse:
       type: object

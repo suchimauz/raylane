@@ -21,6 +21,18 @@ Review status: agent 03 reviewed the schema at `6f10cce` and returned
 partial acceptance and adding four open items plus two format proposals. Those
 additions and proposals are incorporated below.
 
+> **UPDATE — helper schema extended (D2, D6).** The schema now carries two
+> additional closed commands beyond the original nine: `StageArtifact` (D2,
+> bounded inline artefact byte delivery on the existing authenticated socket —
+> closes open item 8 at the contract level) and `RegisterReleaseConfirmation`
+> (D6, helper-issued single-use release confirmation with a bounded pending
+> registration). The `payloadHash` canonical serialisation remains RFC 8785
+> payload-only UTF-8 SHA-256 with duplicate-key rejection; the vetted-library
+> conformance evidence is still outstanding (separate authorization, D8). The
+> open items and status table below describe the pre-batch state and are
+> retained as history; authoritative rationale is in
+> `docs/engineering/foundation-decisions.md`.
+
 ## Status
 
 | Part | State |

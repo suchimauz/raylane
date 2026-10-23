@@ -15,6 +15,22 @@ do not depend on the open A04 decision or the blocked backup work.
 **This artifact is partial, and T005 is not done.** Downstream implementation
 is blocked until the contract is complete and reviewed.
 
+> **UPDATE — T005 contract batch complete (D1–D8).** This document's gap
+> matrix below described the *partial* state before the foundation batch. The
+> batch added `contracts/capability-profile.schema.json` +
+> `contracts/capability-profile.json` (D1), extended
+> `contracts/helper.schema.json` with `StageArtifact` and
+> `RegisterReleaseConfirmation` (D2, D6), and completed
+> `contracts/openapi.yaml` to 28 operations over 21 paths (apply, auth,
+> backup/restore, release-protection, diagnostics, per-source allowlists,
+> schedule/filter vocabularies, update counters, matcher normalisation).
+> The gap matrix is retained below as the historical record of what each gap
+> was; the authoritative rationale and the remaining genuine gaps (G-06 GC,
+> G-12 canonical-document shape, JCS/dependency conformance, all runtime
+> behaviour) are in `docs/engineering/foundation-decisions.md`. No endpoint
+> is implemented; no code was written. Independent 03 review and 04 tests of
+> the immutable result are still required for T005 acceptance.
+
 ## Status
 
 | Part | State |

@@ -1,0 +1,113 @@
+{
+  "profileVersion": 1,
+  "protocols": {
+    "vless": {
+      "fields": {
+        "server": { "type": "string", "classification": "known", "required": true, "minLength": 1, "maxLength": 253 },
+        "serverPort": { "type": "integer", "classification": "known", "required": true, "minimum": 1, "maximum": 65535 },
+        "uuid": { "type": "string", "classification": "secret", "secret": true, "required": true, "minLength": 1, "maxLength": 128 },
+        "transport": {
+          "type": "enum", "classification": "known", "required": true,
+          "allowedValues": ["raw", "mkcp", "ws", "grpc", "httpupgrade", "xhttp"]
+        },
+        "security": {
+          "type": "enum", "classification": "known", "required": true,
+          "allowedValues": ["tls", "reality", "none"]
+        },
+        "flow": {
+          "type": "enum", "classification": "known",
+          "allowedValues": ["", "xtls-rprx-vision", "xtls-rprx-vision-udp443"]
+        },
+        "sni": { "type": "string", "classification": "known", "minLength": 1, "maxLength": 253 },
+        "alpn": { "type": "array", "classification": "known", "itemType": "string", "maxItems": 8 },
+        "fingerprint": { "type": "string", "classification": "known", "maxLength": 64 },
+        "publicKey": { "type": "string", "classification": "known", "maxLength": 256 },
+        "shortId": { "type": "string", "classification": "known", "maxLength": 16 },
+        "spiderX": { "type": "string", "classification": "known", "maxLength": 256 },
+        "mldsa65Seed": { "type": "string", "classification": "secret", "secret": true, "maxLength": 128, "dependencies": { "requires": ["security"], "incompatibleWith": [] } },
+        "xhttpExtra": { "type": "object", "classification": "known" },
+        "finalMask": { "type": "object", "classification": "known", "activeByDefault": false },
+        "pinSHA256": { "type": "array", "classification": "known", "itemType": "string", "maxItems": 16 },
+        "verifyName": { "type": "string", "classification": "known", "maxLength": 253 },
+        "verifyPEM": { "type": "string", "classification": "known", "maxLength": 8192 },
+        "cipherSuites": { "type": "string", "classification": "known", "maxLength": 512 },
+        "echConfig": { "type": "string", "classification": "known", "maxLength": 4096 },
+        "muxEnabled": { "type": "boolean", "classification": "known", "default": false },
+        "xudpConcurrency": { "type": "integer", "classification": "known", "minimum": 1, "maximum": 256 },
+        "dnsStrategy": {
+          "type": "enum", "classification": "known", "default": "auto",
+          "allowedValues": ["auto", "prefer_ipv4", "prefer_ipv6", "ipv4_only", "ipv6_only", "happy_eyeballs"]
+        },
+        "tfo": { "type": "boolean", "classification": "known", "default": false, "supported": false },
+        "mptcp": { "type": "boolean", "classification": "known", "default": false, "supported": false },
+        "chainMode": {
+          "type": "enum", "classification": "known", "default": "off",
+          "allowedValues": ["off", "predecessor", "final", "outbound_interface"]
+        },
+        "chainNodeId": { "type": "string", "classification": "known", "maxLength": 64 }
+      }
+    },
+    "socks5": {
+      "fields": {
+        "server": { "type": "string", "classification": "known", "required": true, "minLength": 1, "maxLength": 253 },
+        "serverPort": { "type": "integer", "classification": "known", "required": true, "minimum": 1, "maximum": 65535 },
+        "username": { "type": "string", "classification": "secret", "secret": true, "maxLength": 128 },
+        "password": { "type": "string", "classification": "secret", "secret": true, "maxLength": 256 },
+        "udpAssociate": { "type": "boolean", "classification": "known", "default": true },
+        "dnsStrategy": {
+          "type": "enum", "classification": "known", "default": "auto",
+          "allowedValues": ["auto", "prefer_ipv4", "prefer_ipv6", "ipv4_only", "ipv6_only", "happy_eyeballs"]
+        },
+        "tfo": { "type": "boolean", "classification": "known", "default": false, "supported": false },
+        "mptcp": { "type": "boolean", "classification": "known", "default": false, "supported": false },
+        "chainMode": {
+          "type": "enum", "classification": "known", "default": "off",
+          "allowedValues": ["off", "predecessor", "final", "outbound_interface"]
+        },
+        "chainNodeId": { "type": "string", "classification": "known", "maxLength": 64 }
+      }
+    },
+    "http": {
+      "fields": {
+        "server": { "type": "string", "classification": "known", "required": true, "minLength": 1, "maxLength": 253 },
+        "serverPort": { "type": "integer", "classification": "known", "required": true, "minimum": 1, "maximum": 65535 },
+        "username": { "type": "string", "classification": "secret", "secret": true, "maxLength": 128 },
+        "password": { "type": "string", "classification": "secret", "secret": true, "maxLength": 256 },
+        "tls": { "type": "boolean", "classification": "known", "default": false },
+        "sni": { "type": "string", "classification": "known", "minLength": 1, "maxLength": 253 },
+        "alpn": { "type": "array", "classification": "known", "itemType": "string", "maxItems": 8 },
+        "fingerprint": { "type": "string", "classification": "known", "maxLength": 64 },
+        "pinSHA256": { "type": "array", "classification": "known", "itemType": "string", "maxItems": 16 },
+        "verifyName": { "type": "string", "classification": "known", "maxLength": 253 },
+        "verifyPEM": { "type": "string", "classification": "known", "maxLength": 8192 },
+        "cipherSuites": { "type": "string", "classification": "known", "maxLength": 512 },
+        "echConfig": { "type": "string", "classification": "known", "maxLength": 4096 },
+        "dnsStrategy": {
+          "type": "enum", "classification": "known", "default": "auto",
+          "allowedValues": ["auto", "prefer_ipv4", "prefer_ipv6", "ipv4_only", "ipv6_only", "happy_eyeballs"]
+        },
+        "tfo": { "type": "boolean", "classification": "known", "default": false, "supported": false },
+        "mptcp": { "type": "boolean", "classification": "known", "default": false, "supported": false },
+        "chainMode": {
+          "type": "enum", "classification": "known", "default": "off",
+          "allowedValues": ["off", "predecessor", "final", "outbound_interface"]
+        },
+        "chainNodeId": { "type": "string", "classification": "known", "maxLength": 64 }
+      }
+    },
+    "wireguard": {
+      "fields": {
+        "endpoint": { "type": "string", "classification": "known", "required": true, "minLength": 1, "maxLength": 253 },
+        "endpointPort": { "type": "integer", "classification": "known", "required": true, "minimum": 1, "maximum": 65535 },
+        "publicKey": { "type": "string", "classification": "known", "required": true, "minLength": 1, "maxLength": 128 },
+        "privateKey": { "type": "string", "classification": "secret", "secret": true, "required": true, "minLength": 1, "maxLength": 128 },
+        "preSharedKey": { "type": "string", "classification": "secret", "secret": true, "maxLength": 128 },
+        "localAddresses": { "type": "array", "classification": "known", "itemType": "string", "required": true, "minItems": 1, "maxItems": 16 },
+        "mtu": { "type": "integer", "classification": "known", "minimum": 576, "maximum": 9000, "default": 1420 },
+        "reserved": { "type": "string", "classification": "known", "pattern": "^([0-9a-fA-F]{2}){0,3}$" },
+        "keepAlive": { "type": "integer", "classification": "known", "minimum": 0, "maximum": 65535, "default": 0 },
+        "finalMask": { "type": "object", "classification": "known", "activeByDefault": false }
+      }
+    }
+  }
+}

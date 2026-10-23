@@ -44,90 +44,220 @@
   "allOf": [
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "Inspect" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "Inspect"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadInspect" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadInspect"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "ValidateManifest" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "ValidateManifest"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadValidateManifest" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadValidateManifest"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "PrepareGeneration" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "PrepareGeneration"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadPrepareGeneration" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadPrepareGeneration"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "EngageGuard" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "EngageGuard"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadEngageGuard" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadEngageGuard"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "ActivateGeneration" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "ActivateGeneration"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadActivateGeneration" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadActivateGeneration"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "VerifyGeneration" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "VerifyGeneration"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadVerifyGeneration" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadVerifyGeneration"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "RestoreGeneration" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "RestoreGeneration"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadRestoreGeneration" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadRestoreGeneration"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "StopGuarded" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "StopGuarded"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadStopGuarded" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadStopGuarded"
+          }
+        }
       }
     },
     {
       "if": {
-        "required": ["command"],
-        "properties": { "command": { "const": "ReleaseProtection" } }
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "ReleaseProtection"
+          }
+        }
       },
       "then": {
-        "properties": { "payload": { "$ref": "#/$defs/payloadReleaseProtection" } }
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadReleaseProtection"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "StageArtifact"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadStageArtifact"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "const": "RegisterReleaseConfirmation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/payloadRegisterReleaseConfirmation"
+          }
+        }
       }
     }
   ],
   "$defs": {
     "protocolVersion": {
       "type": "string",
-      "enum": ["1"],
+      "enum": [
+        "1"
+      ],
       "description": "Envelope wire format version."
     },
     "command": {
@@ -141,7 +271,9 @@
         "VerifyGeneration",
         "RestoreGeneration",
         "StopGuarded",
-        "ReleaseProtection"
+        "ReleaseProtection",
+        "StageArtifact",
+        "RegisterReleaseConfirmation"
       ],
       "description": "Closed set of helper operations, taken verbatim from the helper contract."
     },
@@ -183,7 +315,10 @@
     "artifactRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["artifactId", "sha256"],
+      "required": [
+        "artifactId",
+        "sha256"
+      ],
       "properties": {
         "artifactId": {
           "$ref": "#/$defs/identifier",
@@ -199,7 +334,10 @@
     "destinationSetRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["setId", "sha256"],
+      "required": [
+        "setId",
+        "sha256"
+      ],
       "properties": {
         "setId": {
           "$ref": "#/$defs/identifier",
@@ -214,7 +352,10 @@
     "policyRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["policyId", "sha256"],
+      "required": [
+        "policyId",
+        "sha256"
+      ],
       "properties": {
         "policyId": {
           "$ref": "#/$defs/identifier",
@@ -246,39 +387,51 @@
         },
         "listenerPorts": {
           "type": "array",
-          "items": { "$ref": "#/$defs/port" },
+          "items": {
+            "$ref": "#/$defs/port"
+          },
           "maxItems": 32,
           "uniqueItems": true,
           "description": "Ports the generation expects to listen on."
         },
         "approvedInterfaces": {
           "type": "array",
-          "items": { "$ref": "#/$defs/interfaceName" },
+          "items": {
+            "$ref": "#/$defs/interfaceName"
+          },
           "maxItems": 16,
           "uniqueItems": true,
           "description": "Interfaces the generation is approved to use. The helper re-checks these against its own allowlist and rejects an unsupported interface."
         },
         "destinationSets": {
           "type": "array",
-          "items": { "$ref": "#/$defs/destinationSetRef" },
+          "items": {
+            "$ref": "#/$defs/destinationSetRef"
+          },
           "maxItems": 512,
           "description": "Canonical destination sets referenced by the generation."
         },
         "policyRefs": {
           "type": "array",
-          "items": { "$ref": "#/$defs/policyRef" },
+          "items": {
+            "$ref": "#/$defs/policyRef"
+          },
           "maxItems": 512,
           "description": "Policy objects referenced by the generation."
         },
         "engineArtifacts": {
           "type": "array",
-          "items": { "$ref": "#/$defs/artifactRef" },
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          },
           "maxItems": 16,
           "description": "Engine artefacts the generation needs, each with a content hash."
         },
         "dnsArtifacts": {
           "type": "array",
-          "items": { "$ref": "#/$defs/artifactRef" },
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          },
           "maxItems": 16,
           "description": "DNS artefacts the generation needs, each with a content hash."
         },
@@ -299,7 +452,9 @@
     "payloadValidateManifest": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["manifest"],
+      "required": [
+        "manifest"
+      ],
       "properties": {
         "manifest": {
           "$ref": "#/$defs/manifest",
@@ -311,7 +466,9 @@
     "payloadPrepareGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["manifest"],
+      "required": [
+        "manifest"
+      ],
       "properties": {
         "manifest": {
           "$ref": "#/$defs/manifest",
@@ -323,7 +480,10 @@
     "payloadEngageGuard": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generationId", "manifestHash"],
+      "required": [
+        "generationId",
+        "manifestHash"
+      ],
       "properties": {
         "generationId": {
           "$ref": "#/$defs/generationId",
@@ -339,7 +499,10 @@
     "payloadActivateGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generationId", "manifestHash"],
+      "required": [
+        "generationId",
+        "manifestHash"
+      ],
       "properties": {
         "generationId": {
           "$ref": "#/$defs/generationId",
@@ -355,7 +518,9 @@
     "payloadVerifyGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generationId"],
+      "required": [
+        "generationId"
+      ],
       "properties": {
         "generationId": {
           "$ref": "#/$defs/generationId",
@@ -367,7 +532,10 @@
     "payloadRestoreGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["targetGenerationId", "manifestHash"],
+      "required": [
+        "targetGenerationId",
+        "manifestHash"
+      ],
       "properties": {
         "targetGenerationId": {
           "$ref": "#/$defs/generationId",
@@ -389,7 +557,10 @@
     "payloadReleaseProtection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protectedGenerationId", "confirmationToken"],
+      "required": [
+        "protectedGenerationId",
+        "confirmationToken"
+      ],
       "properties": {
         "protectedGenerationId": {
           "$ref": "#/$defs/generationId",
@@ -404,6 +575,71 @@
         }
       },
       "description": "Explicit release of the protection against direct bypass. Requires a bound confirmation and produces an audit record. This is the only command that removes protection."
+    },
+    "payloadStageArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactKind",
+        "declaredSize",
+        "declaredSha256",
+        "contentBase64"
+      ],
+      "properties": {
+        "artifactKind": {
+          "type": "string",
+          "enum": [
+            "engineConfig",
+            "dnsConfig",
+            "destinationSet",
+            "policy"
+          ],
+          "description": "Typed purpose of the staged artefact. Closed enum: only artefact kinds the helper knows how to validate and place. No peer-supplied file name, path or kind outside this set."
+        },
+        "declaredSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576,
+          "description": "Declared byte size of the decoded content. The helper validates the actual decoded size against this bound before materialising large data; a mismatch is a rejection."
+        },
+        "declaredSha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Declared SHA-256 of the decoded bytes. The helper recomputes the hash over the received bytes and rejects on mismatch; nothing is finalised on a mismatch."
+        },
+        "contentBase64": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1398102,
+          "description": "Base64-encoded artefact bytes, inline on the existing authenticated socket. Bounded so the framing is validated before allocation. The helper decodes, bounds-checks, hashes, validates the permitted artefact profile and atomically finalises into helper-owned storage under a helper-generated staging identity. No peer string is used as a path."
+        }
+      },
+      "description": "Bounded inline staging of artefact bytes on the existing authenticated Unix socket (D2). Peer credentials are authenticated before any byte is read. The helper generates the staging identity, recomputes SHA-256, validates the permitted artefact profile and atomically finalises into helper-owned storage. No partial artefact becomes referenceable. Bounded pre-apply staging failures may remove their own partial temporary writes but do not authorise retention/secret/history cleanup. Generated artefacts may contain secrets and are never logged or public-read."
+    },
+    "payloadRegisterReleaseConfirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionIdentifier",
+        "targetGeneration",
+        "protectionStateResource"
+      ],
+      "properties": {
+        "sessionIdentifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Opaque control-plane session identifier (not the cookie). Binds the pending confirmation to the authenticated session that requested it. The control plane owns session authentication and revocation; the helper records the identifier for binding only."
+        },
+        "targetGeneration": {
+          "$ref": "#/$defs/generationId",
+          "description": "Generation the confirmation is bound to. The helper validates at release time that this matches the generation it is being asked to release."
+        },
+        "protectionStateResource": {
+          "$ref": "#/$defs/identifier",
+          "description": "Identifier of the current protection-state identity/resource. A change in protection state invalidates pending confirmations bound to the prior state."
+        }
+      },
+      "description": "Registration/issuance of a pending release confirmation (D6), separate from ReleaseProtection. The helper generates an opaque CSPRNG nonce, stores a bounded pending entry with the token digest, session identifier, target generation, protection-state identity and its own monotonic expiry (at most 120 seconds). The token is returned to the control plane in the operation result for delivery to the authorized session. Helper restart invalidates all previous pending confirmations (a fresh boot epoch or equivalent empty positive-registration set) even if the active generation is unchanged; a protection-state or generation change also invalidates prior confirmations. No signature scheme or cross-process clock comparison is invented."
     }
   }
 }

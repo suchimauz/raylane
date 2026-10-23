@@ -1,3 +1,13 @@
+> **UPDATE — A04 partially resolved by the T005 foundation batch (D4, D5).**
+> Backup: alternative **A — self-contained encrypted export** is chosen (D4);
+> persistent backup metadata/pinning (B) is declined; cleanup stays OFF. The
+> envelope carries configuration AND secret values for restore to a clean
+> target; restore is draft-only and atomic. Session constants are unchanged
+> (idle 900 s, absolute 43200 s, re-login after restart); unsaved-edit
+> preservation is RAM-only and is a UI implementation gate (D5). The
+> PROPOSED limiter constants and activity allowlist remain open where not
+> fixed by D5. Authoritative rationale: `docs/engineering/foundation-decisions.md`.
+
 # A04 — security-contract proposal (r3: scoped session-policy consent)
 
 **Частичный пользовательский consent; остальные defaults PROPOSED. A04 OPEN.** Researcher 05; 2026-10-23.

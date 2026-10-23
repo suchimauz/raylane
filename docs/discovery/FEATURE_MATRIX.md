@@ -34,3 +34,5 @@
 | VLESS flow: выключен, Vision, Vision-udp443 | Все три выбраны (D-011) | Не задан | CONFIRMED | Допустимые сочетания проверяются; TLS/REALITY обязательны |
 
 | VLESS: XHTTP Extra и FinalMask | Сохранить оба (D-014) | Не задан | CONFIRMED | Расширенные JSON-редакторы с проверкой и пояснениями |
+
+| VLESS: ALPN, uTLS/fingerprint, SHA-256 pin, имя сертификата, PEM проверки, cipher suites, ECH, REALITY ML-DSA-65 | Весь перечисленный набор выбран (D-017) | Не задан | CONFIRMED | Условные поля защиты без автоматического включения |

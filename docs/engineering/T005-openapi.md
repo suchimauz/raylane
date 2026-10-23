@@ -27,7 +27,7 @@ is blocked until the contract is complete and reviewed.
 | Release-protection operation | **Not represented** (route removed) — G-07. |
 | Per-protocol node field model | **Not represented** — G-11, **blocking**. |
 | Placeholder rejection | **CLOSED** — reserved sentinel `__RAYLANE_SECRET_UNCHANGED_V1__`, exact-match only — G-17. |
-| Optimistic-revision guard beyond PATCH | **Specified for 5 of 9**; the four creates remain unresolved — G-18. |
+| Optimistic-revision guard beyond PATCH | **Specified for 5 of 9**; the four creates AND both refreshes remain unresolved — G-18. |
 | Any server, route or handler | Does not exist. Nothing was executed. |
 
 No endpoint in `contracts/openapi.yaml` may be treated as implemented. No
@@ -159,15 +159,15 @@ now **removed**, because they were not true:
   covered by `expectedRevision`. **G-17 is closed.**
 - ~~"Every mutation is optimistic-concurrency checked with an expected
   revision."~~ The guard is now specified for every mutation **except the
-  four creates**. The four `PATCH` bodies require `expectedRevision`; the
-  two DELETEs carry a required `expectedRevision` query parameter; the
-  runtime stop carries a required `expectedGeneration` body; and the two
-  refreshes keep the guard the data model already specifies for an update
-  job — one running job per source, so a second refresh is 409, and the
-  job commits only if the revision it captured still matches. The four
-  creates stay marked `x-implementation-status: blocked`, because a create
+  four creates and the two refreshes**. The four `PATCH` bodies require
+  `expectedRevision`; the two DELETEs carry a required `expectedRevision`
+  query parameter; and the runtime stop carries a required
+  `expectedGeneration` body. Six operations remain marked
+  `x-implementation-status: blocked`: the four creates, because a create
   has no prior revision to compare against and the domain model has no
-  collection-level revision entity — see **G-18**.
+  collection-level revision entity; and the two refreshes, because the
+  client-side guard for them is not defined by any normative source and
+  the two candidate sources disagree — see **G-18**.
 - ~~"The security-relevant property is preserved regardless: no secret value
   may appear here [in `NodeFields`], and secrets travel only through the
   explicit secret-update union."~~ `NodeFields` is three free-form objects
@@ -235,67 +235,62 @@ browser storage or in logs.
 | G-15 | Update-job counters | TODO | The counters an update job reports. | The data model lists counters on `UpdateJob` without fixing them. |
 | G-16 | Peer / LAN allowlist for source fetches | TODO | The per-source LAN allowlist field and its administration. | FR-023 and D-061 require a per-source allowlist that only the administrator changes, and forbidden address classes to take priority over it. The mechanism is not fixed, so the field is not invented. |
 | G-17 | Reserved sentinel for "leave this secret unchanged" | **CLOSED** | — | The one missing piece was the spelling of the reserved value, and 01 has now fixed it: the reserved sentinel is `__RAYLANE_SECRET_UNCHANGED_V1__`. The rule is exact equality only — a `replace` whose value equals the sentinel exactly is not schema-valid (`not: {const: ...}`) and is rejected with 422 and a field error; the sentinel is never stored and never echoed. Every other string stays a legitimate value, including mask-like strings such as `••••` or `********`, because a pattern-based rejection would refuse legitimate passwords. The earlier framing of this gap was wrong on two counts and is corrected here: the "typed UI unchanged state" is NOT missing — `op: unchanged` is already in the union — and the presence-only read API does NOT need to report edit state, because it protects the VALUE while the client already knows whether it edited the field. The concurrent-change case is covered separately by `expectedRevision`. |
-| G-18 | Optimistic-revision guard for the four creates | TODO | Whether a create is unguarded, or is guarded against a collection-level revision. | **This gap is now scoped to the four creates only.** The other five mutations that previously carried an unresolved marker now have a specified guard: the two DELETEs carry a required `expectedRevision` query parameter, the runtime stop carries a required `expectedGeneration` body, and the two refreshes keep the guard the data model already specifies for an update job (one running job per source, so a second refresh is 409, and the job commits only if the revision it captured still matches). Each of those five had a normative source — `control-plane.md` L3 "все mutation ... optimistic revision", `data-model.md` "все mutation требуют expectedRevision" and the UpdateJob invariants — and needed only wire-coding, which is this artifact's own competence. For a create, the guard genuinely is not determined: a create adds a new object and overwrites nothing, so there is no prior revision of that object to compare against, and the domain model has NO collection-level revision entity to compare against either (the per-entity revisions belong to the object being created, and `ConfigRevision` is the immutable applied revision). Both readings — unguarded, or collection-revision — are consistent with the contracts, and choosing one would be a concurrency-design decision, so the four creates stay marked `x-implementation-status: blocked` pending a one-line decision. They are NOT resolved by assuming the unguarded reading. |
+| G-18 | Optimistic-revision guard for the four creates and the two refreshes | TODO | (a) For a create: whether it is unguarded, or is guarded against a collection-level revision. (b) For a refresh: which normative reading governs, and which field anchors the client revision. | **This gap covers six operations: the four creates and the two refreshes.**
 
-## Technical choices made here, and why
+For the **four creates**, the guard is genuinely undetermined. A create adds a new
+object and overwrites nothing, so there is no prior revision of that object to
+compare against, and the domain model has NO collection-level revision entity to
+compare against either — the per-entity revisions (Node, Subscription,
+DestinationRule) belong to the object being created, and `ConfigRevision` is the
+immutable applied revision. Both readings — unguarded, or collection-revision —
+are consistent with the contracts, and choosing one would be a concurrency-design
+decision, so the four creates stay marked `x-implementation-status: blocked`. They
+are NOT resolved by assuming the unguarded reading.
 
-These are small, non-substantive choices consistent with the existing
-specification. They are listed so that agent 03 can see them rather than
-discover them.
+For the **two refreshes**, an earlier revision of this artifact removed the
+marker on the grounds that the data model already specifies the guard for an
+update job. That was wrong, and agent 03's review rejected it. The two
+normative sources **disagree**:
 
-| Choice | Rationale |
-|---|---|
-| Identifier pattern `^[A-Za-z0-9][A-Za-z0-9_-]*$`, max 64 | Same shape as the helper schema's identifier, so the two contracts speak the same language. It excludes path separators, so an identifier cannot express a filesystem path. |
-| `Revision` as a non-negative integer | The data model defines optimistic revisions; a counter is the direct reading. |
-| Protocol enum `vless, socks5, http, wireguard` | Exactly the four protocols of FR-001, in the contract's own terms. SOCKS4/SOCKS4a and a local public proxy server are outside the selection. |
-| Destination rule kind enum `block, direct, proxy` | Exactly the three kinds named in the data model. |
-| Matcher type enum `domain, ip, cidr, set` | Exactly the four matcher kinds named in the data model. |
-| `SourceAccessMode` enum `auto, direct, proxy` | Exactly the three modes named in FR-014. |
-| Free-form objects only for `NodeFields` | G-11. A per-protocol field list would be a product decision. The consequence is now stated rather than hidden: the free-form groups are unvalidated content, and the write-side validation and read-side filter are named as prerequisites. |
-| `X-Request-Id` header plus a `requestId` body field | The control-plane contract names `requestId` in the error body. The header is the conventional way to correlate it with logs, and it is echoed on every response. |
-| `not-run` in the validation status enum | The helper contract and the data model both require that a check that was not executed is never reported as passed. |
-| The `stopped-guarded` phase in `OperationPhase` | FR-020 names the stopped-but-still-protected state; the data model names it as a distinct state from `active`. |
-| Sizes on free-form objects and arrays (256 / 512 / 16 / 32) | Technical bounds in the same spirit as the helper schema's bounds, and marked as such. |
+- `data-model.md` L3 and `control-plane.md` L3 are **blanket**: every mutation
+  requires `expectedRevision`, with no exception for the refresh;
+- `control-plane.md` L16 names the refresh's outcome as "202 job; busy 409;
+  never apply" and does **not** name `expectedRevision`.
 
-## Checks
+The single-running-job rule and the captured-`Revision` commit check that the
+data model states for an `UpdateJob` are **server-side commit discipline** — they
+stop a job from committing over a concurrent change. They are not a
+client-supplied guard: a refresh request carries no client view of the source
+state that could be stale. Clearing the marker would therefore have silently
+picked the weaker reading and weakened the blanket norm **without changing the
+norm** — which is exactly what the task forbids. The markers are back, and the
+two readings are named for 01:
 
-All checks are offline and use only the locally installed **PyYAML 6.0.1**
-(`/usr/lib/python3/dist-packages/yaml`). No OpenAPI validator is installed on
-this machine — `openapi_spec_validator` is absent — so **full OpenAPI
-conformance validation is NOT_RUN**, and the checks below are the structural
-and invariant checks that could be performed with what is available. The
-corpus is synthetic and lives in the ignored scratch directory
-`.hyper/tmp/buj/t005corr/`; it is not committed, because the task's allowed
-files are the OpenAPI artifact and this document.
+- **R1** — scope the blanket lines to state-changing entity mutations
+  (PATCH/DELETE), leaving the refresh guarded by the job rule. The wire does not
+  change.
+- **R2** — carry a required client `expectedRevision`. For a subscription this
+  can anchor on its revision field; for a rule source it **cannot** — see below.
 
-| Check | Result | Command |
-|---|---|---|
-| YAML parses | PASS | `yaml.safe_load(open('contracts/openapi.yaml'))` → exit 0 |
-| OpenAPI version is 3.1.x | PASS | `openapi: 3.1.0` |
-| All `$ref` targets resolve | PASS | 47 refs, 0 unresolved |
-| Every operation has an `operationId` | PASS | 21 operations |
-| `operationId`s are unique | PASS | 21 unique |
-| Every operation declares `responses` | PASS | 21/21 |
-| Every operation requires the session scheme | PASS | 21/21 declare `sessionCookie` |
-| No read model exposes a raw secret value | PASS | `SecretPresence` has only `present` |
-| Secret write union is explicit and closed | PASS | `unchanged` / `replace` / `clear`, `additionalProperties: false` |
-| Every update body requires `expectedRevision` | PASS | 4/4 |
-| Generation fields use the safe-integer bound | PASS | `maximum: 9007199254740991` |
-| Read models are closed | PASS | 6/6 `additionalProperties: false` |
-| Release-protection route absent | PASS | no `/runtime/release-protection` in `paths` |
-| `expectedGeneration` required | PASS | `ReleaseProtectionRequest.required = [confirmation, expectedGeneration]` |
-| The four item GETs are absent | PASS | no `getRevision` / `getRule` / `getSubscription` / `getRuleSource` |
-| The four creates are marked, and only they | PASS | 4 × `x-implementation-status: blocked`, each naming G-18 |
-| The five resolved mutations carry a specified guard | PASS | 2 × DELETE `expectedRevision` query, 1 × stop `expectedGeneration` body, 2 × refresh cited job guard |
-| The reserved sentinel is refused by the schema | PASS | `replace.value` = `not: {const: __RAYLANE_SECRET_UNCHANGED_V1__}` |
-| The sentinel is refused, mask-like strings are not | PASS | jsonschema vectors: exact sentinel rejected; 5 near-misses and 6 mask-like strings accepted |
+**An additional pre-existing inconsistency.** If R2 is chosen, the rule-source
+refresh has no anchor for the client revision, and neither does the PATCH on that
+same entity, which already requires `expectedRevision`. The `RuleSetSource`
+entity in `data-model.md` carries `draftVersion` and `activeVersion`, which are
+versions of the **fetched set content**, not a revision of the source's
+settings; it has no settings revision at all. This is not introduced by this
+artifact — it is already there — and it is deliberately **not** resolved by
+binding `expectedRevision` to `draftVersion`: that is the wrong field, and
+binding to it would be a silent redefinition of what the field means. The data
+model has to supply the anchor, or the norm has to be scoped, and neither is this
+artifact's call. It is recorded here so that the R1/R2 decision is made with the
+inconsistency in view.
 | G-17 is closed | PASS | reserved sentinel fixed by 01; the "typed UI unchanged state" premise removed |
 | `403` on every mutation | PASS | 14/14 |
 | `413` on every body-accepting operation | PASS | 8/8 |
 | Response code lists in numeric order | PASS | 21/21 |
 | The three false claims are gone | PASS | no "no secret value may appear here", no "Writes never accept a masked placeholder", no "Every mutation is optimistic-concurrency checked" |
 | Correction corpus (previous round, updated to the new expected state) | PASS | 75 cases, 0 failures, exit 0 |
-| Patch corpus (this round) | PASS | 83 cases, 0 failures, exit 0 |
+| Patch corpus (this round) | PASS | 104 cases, 0 failures, exit 0 |
 | Component schemas are valid JSON Schema (Draft 2020-12) | PASS | 36/36 `Draft202012Validator.check_schema` |
 | Full OpenAPI conformance validation | **NOT_RUN** | no OpenAPI validator installed; none was installed |
 
@@ -386,8 +381,26 @@ narrow:
   (unguarded vs collection revision), that it states the domain model has no
   collection-level revision entity, and that it does NOT resolve the choice
   by assuming the unguarded reading.
-- **Counters** — that the document's counts are right: 2 deletes + 1 stop +
-  2 refreshes = 5 resolved, 4 creates = 4 still marked, 9 in total.
+- **Counters** — that the document's counts are right: 2 deletes + 1 stop = 3
+  resolved, 4 creates + 2 refreshes = 6 still marked, 9 in total.
+- **Refresh** — that both refreshes carry the implementation-status marker
+  again, that the note names the normative conflict (blanket `data-model`
+  L3 / `control-plane` L3 against the operation table's `busy 409` in
+  `control-plane` L16), that it states the job rule is SERVER-side commit
+  discipline and not a client-supplied guard, and that it names both
+  readings (R1, R2) without choosing one.
+- **Rule-source anchor** — that the pre-existing inconsistency is recorded:
+  `RuleSetSource` has `draftVersion`/`activeVersion` (fetched-set content
+  versions) and no settings revision, that the PATCH on the same entity
+  already has this missing anchor, and that `expectedRevision` is NOT
+  quietly bound to `draftVersion`.
+- **Stop responses** — that the stop declares both 400 and 413, so every
+  body-accepting operation declares 413 again.
+- **Normative layer** — that the sentinel literal
+  `__RAYLANE_SECRET_UNCHANGED_V1__` appears in `control-plane.md` with the
+  exact-match-only rule, the 422 rejection, and the no-store/no-echo
+  property, so the reserved value belongs to the normative layer and not
+  only to the OpenAPI artifact.
 - That G-11, the A04 gaps and the storage/backup gaps are untouched by this
   patch.
 - That the accepted A04 session values are recorded, that the prohibition on

@@ -410,12 +410,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
 
   /rules:
     get:
@@ -847,6 +851,31 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshSubscription
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The client-side optimistic-revision guard for this refresh is NOT
+        defined by any normative source, and the two sources that could
+        define it disagree.
+          * data-model.md L3 and control-plane.md L3 are BLANKET: every
+            mutation requires expectedRevision. Read literally, that covers
+            this refresh.
+          * control-plane.md L16 names the refresh's outcome as "202 job;
+            busy 409; never apply" and does NOT name expectedRevision.
+        The single-running-job rule and the capturedRevision commit check
+        that the data model states for an UpdateJob are SERVER-SIDE commit
+        discipline — they prevent a job from committing over a concurrent
+        change. They are not a client-supplied guard: the refresh request
+        carries no client view of the source state that could be stale.
+        Clearing the marker would therefore silently pick the weaker
+        reading and weaken the blanket norm without changing the norm.
+        Both readings are open until the norm is scoped:
+          * R1 — scope the blanket to state-changing entity mutations
+            (PATCH/DELETE), leaving the refresh guarded by the job rule;
+          * R2 — carry a required client expectedRevision, which for a
+            subscription can anchor on its revision field, but for a rule
+            source has NO such anchor (see the note on refreshRuleSource).
+        Neither is chosen here.
+        See gap G-18.
       tags: [sources]
       summary: Refresh a subscription explicitly.
       description: |
@@ -855,16 +884,13 @@ paths:
         configuration. If a job is already running for this source, the
         request is rejected with 409 rather than overwriting it.
 
-        The concurrency guard here is the one the data model already
-        specifies for an update job: one running job per source, so a
-        second refresh is refused with 409, and the job commits only if the
-        revision it captured still matches. A revision conflict rejects the
-        candidate instead of overwriting manual changes.
-
-        This is not the same guard as the `expectedRevision` on the settings
-        PATCH: the settings themselves are guarded by their own PATCH, and
-        the refresh is guarded by the single-running-job rule and the
-        captured-revision commit check.
+        The server-side commit discipline is normative: one running job per
+        source, and the job commits only if the revision it captured still
+        matches, so a revision conflict rejects the candidate rather than
+        overwriting manual changes. That discipline is not the same as a
+        client-supplied expectedRevision, and this operation does not
+        currently carry one — see the implementation note above and gap
+        G-18.
       security:
         - sessionCookie: []
       responses:
@@ -892,23 +918,53 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshRuleSource
+      x-implementation-status: blocked
+      x-implementation-note: |
+        The client-side optimistic-revision guard for this refresh is NOT
+        defined by any normative source, and the two sources that could
+        define it disagree:
+          * data-model.md L3 and control-plane.md L3 are BLANKET: every
+            mutation requires expectedRevision. Read literally, that covers
+            this refresh.
+          * control-plane.md L16 names the refresh's outcome as "202 job;
+            busy 409; never apply" and does NOT name expectedRevision.
+        The single-running-job rule and the capturedRevision commit check
+        that the data model states for an UpdateJob are SERVER-SIDE commit
+        discipline — they prevent a job from committing over a concurrent
+        change. They are not a client-supplied guard.
+        Both readings are open until the norm is scoped:
+          * R1 — scope the blanket to state-changing entity mutations
+            (PATCH/DELETE), leaving the refresh guarded by the job rule;
+          * R2 — carry a required client expectedRevision, which for a rule
+            source has NO anchor (see the note below).
+        Neither is chosen here.
+        ADDITIONAL EXISTING INCONSISTENCY: if the reading R2 is chosen —
+        a required client expectedRevision — then this operation has no
+        anchor for it. The RuleSetSource entity in data-model.md carries
+        draftVersion and activeVersion, which are versions of the FETCHED
+        SET CONTENT, not a revision of the source's settings; it has no
+        settings revision. The PATCH on this same entity already requires
+        expectedRevision with exactly this missing anchor. That is a
+        pre-existing inconsistency, not something introduced here, and it is
+        NOT resolved by quietly binding expectedRevision to draftVersion:
+        draftVersion is the wrong field, and binding to it would be a
+        silent redefinition. The data model has to supply the anchor, or the
+        norm has to be scoped, and neither is this artifact's call.
+        See gap G-18.
       tags: [sources]
       summary: Refresh a rule source explicitly.
       description: |
         Starts an update job that updates the draft version of the source
         only. An erroneous or empty result does not replace the previous set,
-        and nothing is applied to the running network configuration.
+        and nothing is applied to the running network configuration. If a
+        job is already running for this source, the request is rejected with
+        409 rather than overwriting it.
 
-        The concurrency guard here is the one the data model already
-        specifies for an update job: one running job per source, so a
-        second refresh is refused with 409, and the job commits only if the
-        revision it captured still matches. A revision conflict rejects the
-        candidate instead of overwriting manual changes.
-
-        This is not the same guard as the `expectedRevision` on the settings
-        PATCH: the settings themselves are guarded by their own PATCH, and
-        the refresh is guarded by the single-running-job rule and the
-        captured-revision commit check.
+        The server-side commit discipline is normative: one running job per
+        source, and the job commits only if the revision it captured still
+        matches. That discipline is not the same as a client-supplied
+        expectedRevision, and this operation does not currently carry one —
+        see the implementation note above and gap G-18.
       security:
         - sessionCookie: []
       responses:

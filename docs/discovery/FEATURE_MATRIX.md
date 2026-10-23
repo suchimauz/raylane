@@ -30,3 +30,5 @@
 
 | VLESS: TLS и REALITY | Сохранить (D-010) | Не задан | CONFIRMED | Только допустимые сочетания целевого Xray |
 | VLESS без TLS/REALITY в первой версии | Не разрешать (D-010) | — | OUT_OF_SCOPE | Согласованное ограничение относительно PassWall |
+
+| VLESS flow: выключен, Vision, Vision-udp443 | Все три выбраны (D-011) | Не задан | CONFIRMED | Допустимые сочетания проверяются; TLS/REALITY обязательны |

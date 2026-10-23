@@ -144,3 +144,6 @@ util_xray.lua:1258–1346: chain=1 добавляет предварительн
 - legacy quic_guise/key/security сохраняются парсером без соответствующей новой UI-опции. Трактовать как совместимость для проверки, не как подтвержденную поддержку.
 
 Полный сырой инвентарь NODE_FIELD_INVENTORY.md сохраняет точные типы, подписи, values, defaults, depends, validators и write/remove handlers всех объявлений обычной формы (включая поля других протоколов как контекст). Совместно с таблицами выше это каталог источника, а не утверждение, что все runtime-эффекты проверены. Пробелы имеют явные записи CONNECTION_GAPS.md.
+
+### Проверка значения Vision-udp443
+Источник: https://github.com/XTLS/Xray-core/blob/1b1647cd9ddf0abc34b981d4611fc03bcac1ca74/proxy/vless/outbound/outbound.go#L246-L275 . Для xtls-rprx-vision-udp443 устанавливается allowUDP443=true и flow нормализуется к Vision; обычный Vision отклоняет RequestCommandUDP с портом 443. Это не подтверждает поддержку UDP всей сетевой цепочкой. D-011 сохраняет все три значения flow; D-010 требует TLS/REALITY даже при выключенном flow.

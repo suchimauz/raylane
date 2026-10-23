@@ -36,3 +36,5 @@
 | VLESS: XHTTP Extra и FinalMask | Сохранить оба (D-014) | Не задан | CONFIRMED | Расширенные JSON-редакторы с проверкой и пояснениями |
 
 | VLESS: ALPN, uTLS/fingerprint, SHA-256 pin, имя сертификата, PEM проверки, cipher suites, ECH, REALITY ML-DSA-65 | Весь перечисленный набор выбран (D-017) | Не задан | CONFIRMED | Условные поля защиты без автоматического включения |
+
+| VLESS: Mux, mux_concurrency, xudp_concurrency | Сохранить (D-018) | Не задан | CONFIRMED | Проверка сочетаний transport/flow, без автоматического включения |

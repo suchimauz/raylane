@@ -90,12 +90,26 @@ here. Vendoring policy is a T002 decision.
 | React | `react 19.3.1`, `react-dom 19.3.1`, MIT | npm registry `GET /react/latest`, `/react-dom/latest` (HTTP 200, 2026-10-23) |
 | Vite | `8.3.5`, MIT | npm registry `GET /vite/latest` (HTTP 200, 2026-10-23) |
 | TypeScript | `7.0.2`, Apache-2.0 | npm registry `GET /typescript/latest` (HTTP 200, 2026-10-23) |
+| React type definitions | `@types/react 19.3.0`, `@types/react-dom 19.3.0`, MIT | **Added by T002 (dev-type pins, not part of the T001 baseline).** Resolved from npm registry metadata on 2026-10-23 during the T002 closure determination; no T001 entry backs these versions. Integrity (`sha512`) and licence are pinned per entry in `web/package-lock.json`; compatibility with `react 19.3.1` is UNVERIFIED (no independent check of the type surface was performed) |
 
 CAUTION: npm `latest` dist-tags move over time. The numbers above are exact versions
 resolved on 2026-10-23 and are the starting exact pins; T002 generates
 package-lock.json and diffs against these — it must NOT re-resolve "latest".
 React 19.3.x peer-dependency compatibility with chosen UI libraries: UNVERIFIED
 (no install performed).
+
+Closure content beyond the pins above (recorded by T002 for auditability, not
+new pins): the resolved web closure contains one package with an install
+script — `fsevents 2.3.3` (MIT), optional, `os: ["darwin"]`, pulled in by
+`vite 8.3.5` — and 47 `os`/`cpu`-gated prebuilt native packages: 15
+`@rolldown/binding-*` (MIT, rolldown 1.2.15, the bundler inside vite),
+20 `@typescript/typescript-*` (Apache-2.0, typescript 7.0.2 native compiler
+binaries) and 11 `lightningcss-*` platform variants (MPL-2.0). All are
+optional, integrity-pinned with registry `resolved` URLs, and none of them
+other than `fsevents` declares an install script. The native packages are
+build-time only and do not enter the browser bundle. Because of `fsevents`,
+`npm ci --ignore-scripts` is mandatory for this project: it is what keeps
+third-party build code from executing.
 
 ## 4. SQLite driver (Go) — direct dependency pinned (H3)
 

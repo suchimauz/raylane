@@ -38,4 +38,18 @@ Reported subgate results: core provenance confirmed by 03; pins FAIL; capability
 
 Orchestrator previously ran `git diff c21bb12..521b018 --check` successfully and confirmed the three-file commit scope and clean tree. Those checks establish document hygiene only. The source claims above are attributed to 03's report, not independently rerun here. Tester 04: PENDING. Binary integrity, builds and runtime/network behavior: NOT_RUN in this review round.
 
+## Update: independent tester 04 completed
+
+04 returned CHANGES_REQUIRED for the same immutable target. Reported bounded run: 30 public GET requests, approximately 705 KB, no executable archives downloaded or executed. Local ignored evidence: `.hyper/tmp/bul/t001-04/REPORT.md`, `checks.tsv`, and `raw/`. These paths are working evidence, not durable public artifacts; the correction must preserve reproducible redacted references.
+
+- F-04-1/2 independently confirm the incorrect dnsmasq/iproute2 package pins.
+- F-04-3: GitHub reports the source commit's PGP verification as `verified=true`, `reason=valid`. Record this as provider-reported verification; local cryptographic verification remains NOT_RUN. No signature-like assets observed in a release listing does not establish absence of every upstream signing channel.
+- F-04-4/5: correct the quic-go module identity, truncated versions, missing yaml version and missing exact SQLite pin.
+- F-04-6: an author scratch response contains HTTP 404; it is not source-version evidence. Use the actual pinned `core/core.go` with a successful response.
+- Published digest agreement between `.dgst` and GitHub asset metadata is corroboration within the upstream/provider channel, not independent trust roots. Binary archive integrity remains NOT_RUN.
+- 04 reports synthetic verifier mismatch/missing/match checks; these do not substitute for verification of the actual binary archive.
+
+Correction task T001-fix-r1 has been dispatched to 05 against base `d7b75a8`, limited to the original three research files. The earlier freeze is lifted for that writer. 04's result remains attached to `521b018`; no acceptance transfers automatically to a changed revision. Findings from both reviewers must receive explicit dispositions, followed by affected independent checks on the new immutable commit. Node 22 and the existing architecture remain unchanged.
+
+
 No task checkbox or gate is closed by this document.

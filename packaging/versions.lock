@@ -1,12 +1,12 @@
-# Raylane — versions.lock (T001, G1) — revision 3 (T001-fix-r2 docs)
+# Raylane — versions.lock (T001, G1) — revision 4 (final documentation corrections)
 
-Status: RESEARCH LOCK v3 (doc-level corrections over rev2 pins; pins unchanged),
+Status: RESEARCH LOCK v4 (doc-level corrections over rev2 pins; pins unchanged),
 verified 2026-10-23. Author: agent 05 (researcher).
-Revision history: rev1 = 521b018 (research lock v1), rev2 = 4e98e02 (round-1 fixes),
-rev3 = corrections to review target 9dd2b1e — this file's rev3 content is identical
-to the rev3 record in docs/verification/T001-research.md; the commit containing this
-line is the final docs-fix package (T-1) — its hash is reported in the completion
-report, not predicted here.
+Revision history (package revisions, not claims of identical file content):
+- rev1: 521b018 — initial research package.
+- rev2: 4e98e02 — round-1 corrections.
+- rev3: 9dd2b1e — round-2 documentation corrections; lock header lagged behind the package revision.
+- rev4: 3746ad2 — final documentation corrections. Subsequent orchestrator header normalization aligns this lock with the research report's revision 4; technical pins and evidence are unchanged.
 Scope: source/release pins for the first reproducible baseline. "latest" is never
 used as a value; where a moving index was consulted, the exact resolved version and
 retrieval date are recorded. Unverified items are marked UNVERIFIED/BLOCKED, never

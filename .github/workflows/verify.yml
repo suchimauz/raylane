@@ -10,6 +10,18 @@
 # docs/engineering/testing.md for the full statement of what is and is not
 # known.
 #
+# THE ACTIVE JOBS ARE GATED OFF. `go`, `frontend` and `contract` each carry
+# `if: false` with a reason, so the workflow cannot execute until a human
+# removes the guard after the two blocking prerequisites are resolved:
+#   * the action digests are NOT_VERIFIED (they are copies, not upstream
+#     proof — T4-C6); and
+#   * the Python YAML parser the contract job needs is not provisioned or
+#     version-pinned anywhere in this repository (T4-C7).
+# The gate is a real no-run guard, not a comment: with `if: false` the
+# scheduler skips the job entirely.
+#
+# Nothing here should be read as "this CI works". It has never run.
+#
 # Hard rules encoded here:
 #   - The workflow runs on `push` and `pull_request` only. It never runs on
 #     `pull_request_target`, so a fork PR can never run with repository
@@ -17,12 +29,18 @@
 #   - `permissions: contents: read` at workflow level, and no job widens it.
 #   - No secret is referenced anywhere. No deploy, publish or release step.
 #   - Every action is pinned to a full commit SHA, never to a tag or
-#     `latest`. Only two pins are used, and both were verified from local
-#     upstream sources: `actions/checkout` v7.0.1 and `actions/upload-artifact`
-#     v7.0.1. The pins that could NOT be verified locally (`actions/cache`,
-#     `actions/setup-go`, `actions/setup-node`) are deliberately NOT used —
-#     an unverified digest is worse than no cache. See docs/engineering/testing.md
-#     gap T4-C1 and T4-C2.
+#     `latest`. The two pins used here were copied from other projects'
+#     workflow files on the same machine. That is NOT upstream
+#     authentication — many projects copying the same string proves only
+#     that they copied the same string. The digests are therefore marked
+#     NOT_VERIFIED, and no claim is made that they are the true upstream
+#     commits. Resolving them needs the upstream tag->SHA mapping over the
+#     network, which this task forbids. See docs/engineering/testing.md
+#     gaps T4-C1, T4-C2 and T4-C6.
+#   - Because the action digests are not authenticated and the workflow has
+#     never been executed, the ACTIVE jobs are gated off with an explicit
+#     no-run guard. A workflow that has never run is not presented as a
+#     runnable CI. See docs/engineering/testing.md gap T4-C6.
 #   - Dependency installation uses the committed lockfiles with
 #     `--frozen-lockfile` / `--ignore-scripts`, so a CI run installs
 #     exactly the reviewed closure and runs no third-party install code.
@@ -73,11 +91,17 @@ jobs:
   go:
     name: go build / vet / unit / race
     runs-on: ubuntu-24.04
+    # NO-RUN GATE. This workflow has never been executed and the action
+    # digests it uses are NOT_VERIFIED (copied from other projects' files,
+    # not authenticated against upstream). Remove this line only after T4-C6
+    # is resolved and the first run has been reviewed. See
+    # docs/engineering/testing.md.
+    if: false
     permissions:
       contents: read
     steps:
       - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
         with:
           persist-credentials: false
 
@@ -105,6 +129,60 @@ jobs:
       # Read-only verification of the committed dependency closure. These
       # run before any test so that a broken closure fails fast and is not
       # reported as a test failure.
+      - name: Check that the toolchain pins still match the lock file
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          # The workflow hard-codes the toolchain versions and checksums.
+          # This step is the executable link between those copies and
+          # packaging/versions.lock: if the lock is revised and the workflow
+          # is not, the job fails here instead of the two silently
+          # diverging.
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          lock = Path("packaging/versions.lock").read_text()
+
+          def one(pattern, what):
+              hits = re.findall(pattern, lock)
+              if len(hits) != 1:
+                  sys.exit(f"expected exactly one {what} in packaging/versions.lock, found {len(hits)}")
+              return hits[0]
+
+          go_version = one(r"\| pinned version \| `(go[0-9][^`]*)`", "Go pinned version")
+          node_version = one(r"\| pinned version \| `(v[0-9][^`]*)` \| `GET https://nodejs", "Node pinned version")
+          go_sha = one(
+              r"\| published SHA2-256 \(linux-amd64 tar\) \| `([0-9a-f]{64})` for `" + re.escape(go_version) + r"\.linux-amd64\.tar\.gz`",
+              "Go linux-amd64 checksum")
+          node_sha = one(
+              r"\| published SHA2-256 \(linux-x64 tar\.xz\) \| `([0-9a-f]{64})` for `node-" + re.escape(node_version) + r"-linux-x64\.tar\.xz`",
+              "Node linux-x64 checksum")
+
+          expected = {
+              "GO_VERSION": go_version.removeprefix("go"),
+              "NODE_VERSION": node_version.removeprefix("v"),
+              "GO_LINUX_AMD64_SHA256": go_sha,
+              "NODE_LINUX_AMD64_SHA256": node_sha,
+          }
+
+          workflow = Path(".github/workflows/verify.yml").read_text()
+          drift = []
+          for key, want in expected.items():
+              m = re.search(r'^  ' + key + r': "([^"]*)"', workflow, re.M)
+              if not m:
+                  sys.exit(f"the workflow does not declare {key}")
+              if m.group(1) != want:
+                  drift.append((key, m.group(1), want))
+          if drift:
+              for key, got, want in drift:
+                  print(f"DRIFT {key}: workflow={got} lock={want}")
+              sys.exit("the workflow's toolchain pins no longer match packaging/versions.lock")
+          for key, want in expected.items():
+              print(f"match {key} = {want}")
+          PY
+
       - name: Verify the module closure
         working-directory: ${{ github.workspace }}
         run: |
@@ -132,22 +210,57 @@ jobs:
           set -euo pipefail
           packages="$(go list ./... | wc -l)"
           echo "packages under test: ${packages}"
-          if go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -q .; then
-            echo "test files present — running them"
+          # The producer's output is captured in an assignment, NOT piped into
+          # `grep -q`. Under `pipefail`, `producer | grep -q .` returns 141
+          # (SIGPIPE) once the producer writes more than the reader's buffer
+          # takes, which would make this gate report "no tests" at exactly
+          # the moment enough tests exist to trigger it. Capturing first
+          # also means a failing `go list` aborts the step instead of being
+          # read as "no tests".
+          test_packages="$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...)"
+          if [ -n "${test_packages}" ]; then
+            echo "test files present in:"
+            echo "${test_packages}"
             go test -count=1 ./...
           else
             echo "NOT_RUN: no *_test.go files exist in this commit (${packages} packages, 0 with tests)."
             echo "This step exits 0 and asserts NOTHING. Test coverage is NOT_RUN."
           fi
 
-      # The race detector runs as an unprivileged user on the hosted runner,
-      # with no namespace, no firewall change and no root capability.
+      # The race detector runs as an unprivileged user on the hosted runner.
+      # It creates no network namespace, changes no firewall rule, and needs
+      # no root capability.
+      #
+      # The race detector on linux/amd64 generally needs cgo and a C
+      # toolchain. The pure-Go SQLite driver means the dependency CLOSURE
+      # does not need cgo, but that is not the same as the race detector not
+      # needing a C compiler. Whether the runner image has one is a
+      # property of the image that has never been verified (T4-C8), so this
+      # step checks for it and reports the result rather than assuming it.
+      - name: Check the race detector's prerequisites
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          echo "CGO_ENABLED=${CGO_ENABLED:-<unset>}"
+          if command -v gcc >/dev/null 2>&1; then
+            gcc --version | head -1
+          else
+            echo "NOTE: no gcc on PATH. The race detector on linux/amd64"
+            echo "usually requires cgo and a C toolchain. This is reported,"
+            echo "not asserted: whether the runner image provides one is"
+            echo "NOT_VERIFIED (T4-C8)."
+          fi
+
       - name: Race tests
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          if go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -q .; then
-            echo "test files present — running with -race"
+          # Same capture-then-test pattern as the unit step: no pipeline, so
+          # neither SIGPIPE nor a failing producer can be read as "no tests".
+          test_packages="$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...)"
+          if [ -n "${test_packages}" ]; then
+            echo "test files present in:"
+            echo "${test_packages}"
             go test -count=1 -race ./...
           else
             echo "NOT_RUN: no *_test.go files exist in this commit; -race has nothing to run."
@@ -164,6 +277,9 @@ jobs:
   frontend:
     name: frontend ci / typecheck / build / unit / e2e
     runs-on: ubuntu-24.04
+    # NO-RUN GATE — same reason as the `go` job. See
+    # docs/engineering/testing.md gap T4-C6.
+    if: false
     permissions:
       contents: read
     defaults:
@@ -171,7 +287,7 @@ jobs:
         working-directory: ${{ github.workspace }}/web
     steps:
       - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
         with:
           persist-credentials: false
 
@@ -252,7 +368,7 @@ jobs:
 
       - name: Upload the build output
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
         with:
           name: web-dist-${{ github.sha }}
           path: ${{ github.workspace }}/web/dist
@@ -271,11 +387,16 @@ jobs:
   contract:
     name: contract structure checks
     runs-on: ubuntu-24.04
+    # NO-RUN GATE. This job needs a Python YAML parser that is neither
+    # provisioned nor version-pinned anywhere in this repository (T4-C7),
+    # and it uses action digests that are NOT_VERIFIED (T4-C6). Removing this
+    # line requires resolving both. See docs/engineering/testing.md.
+    if: false
     permissions:
       contents: read
     steps:
       - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
         with:
           persist-credentials: false
 
@@ -287,6 +408,37 @@ jobs:
             python3 -c "import json,sys; json.load(open(sys.argv[1]))" "${f}"
             echo "parsed: ${f}"
           done
+
+      - name: Check the Python YAML parser is available
+        run: |
+          set -euo pipefail
+          # The YAML parser is an EXTERNAL dependency that this repository
+          # does not provision or pin: there is no requirements.txt,
+          # pyproject.toml or constraints file anywhere. Whether it is
+          # present, and at which version, is a property of the runner image
+          # that has never been verified (T4-C7).
+          #
+          # This step does NOT install it and does NOT assume it. It
+          # reports what is there and fails with an explicit message if the
+          # parser is absent, so the failure says "the prerequisite is
+          # missing" rather than an opaque ImportError from a heredoc.
+          python3 - <<'PY'
+          import sys
+
+          try:
+              import yaml
+          except ImportError:
+              sys.exit(
+                  "BLOCKED: no Python YAML parser is available.\n"
+                  "This repository pins no Python dependency (no requirements.txt,\n"
+                  "pyproject.toml or constraints file), and this job must not\n"
+                  "pip-install anything. Provision and pin the parser first —\n"
+                  "see docs/engineering/testing.md gap T4-C7."
+              )
+          print(f"yaml parser available: PyYAML {yaml.__version__}")
+          print("NOTE: this is the runner image's parser, NOT a version this "
+                "repository pins. The pinned version is an open gap (T4-C7).")
+          PY
 
       - name: Check the OpenAPI document parses and its references resolve
         run: |

@@ -17,25 +17,63 @@ network access, was never dispatched, never run by a hosted runner, and was
 never validated by GitHub's workflow parser. Every statement below about how
 CI *behaves* is a design intent, not an observed result.
 
-What was actually verified locally, offline:
+**The active jobs are gated off.** `go`, `frontend` and `contract` each carry
+`if: false` with a stated reason, so the workflow cannot execute until a
+human removes the guard. This is a deliberate no-run guard, not a comment:
+with `if: false` the scheduler skips the job entirely. The reason is that
+two prerequisites are unresolved — the action digests are NOT_VERIFIED
+(T4-C6) and the Python YAML parser is neither provisioned nor pinned
+(T4-C7). **This workflow is not a runnable CI, and is not presented as one.**
+
+### Correction round after the 04 audit
+
+An independent offline audit by agent 04 (`.hyper/tmp/bul/t004-ci-audit/REPORT.md`,
+target `b7819cb`) confirmed the workflow's structure and safety properties
+and found one real defect and three findings. All four are addressed in this
+revision:
+
+| Finding | Disposition |
+|---|---|
+| **D1** — `go list … \| grep -q .` under `pipefail` returns 141 (SIGPIPE) once the producer's output exceeds the reader's buffer, which would make the gate report "no tests" exactly when enough tests exist | **Fixed.** The producer's output is captured in an assignment and the non-emptiness is tested separately, so a failing producer aborts the step instead of being read as "no tests". Proven with a synthetic producer — no Go build was run. |
+| **D2** — the workflow hard-codes four values that it never compares to `packaging/versions.lock`; "the same values as the lock" was a convention, not a check | **Fixed.** An executable step compares the workflow's own `env` block against the lock file and fails on drift. |
+| **D3** — the contract job needs a Python YAML parser that nothing in the repository provisions or pins, while the document claimed it was "present on the hosted runner image" | **Fixed as an explicit BLOCKED precondition.** The job now checks for the parser, reports the version it finds, and fails with an explicit "the prerequisite is missing" message if it is absent. It installs nothing and pins nothing. |
+| **D4** — "21 local copies corroborate the pins" was recorded as PASS; agreement among copies proves only that many projects copied the same string, not that the string is the true upstream commit | **Downgraded to NOT_VERIFIED.** Every pin line is marked `digest NOT_VERIFIED upstream`, and the local-copies caveat is stated. Resolving it needs the upstream tag→SHA mapping over the network, which this task forbids. |
+
+A fifth item from the audit is carried as a new gap: **T4-C8**, the race
+detector's C toolchain prerequisite. The pure-Go SQLite driver means the
+dependency *closure* does not need cgo, but that is not the same as the
+race detector not needing a C compiler. The workflow now reports what it
+finds rather than assuming it.
+
+### What was actually verified locally, offline
 
 | Property | How | Result |
 |---|---|---|
-| The workflow is valid YAML and has the expected shape | PyYAML 6.0.1 parse + 70 structural assertions | PASS |
+| The workflow is valid YAML and has the expected shape | PyYAML 6.0.1 parse + 70 structural assertions (original corpus) + 73 correction assertions | PASS |
 | Every action is pinned to a full 40-hex commit SHA | Regex + assertion over the parsed file | PASS |
-| Both pins are corroborated by an independent local source | Grep over the local Go module cache and other checked-out repositories | PASS (checkout: 21 files, upload-artifact: 8 files) |
+| The pins are **not** claimed to be upstream-verified | Assertion over the file's own wording | PASS (marked NOT_VERIFIED) |
+| The `grep -q` SIGPIPE trap is gone, and the replacement behaves | Synthetic producer: empty / non-empty / large / failing | PASS (4 cases) |
+| The old pattern really does produce the false FALSE | `seq 1 200000 \| grep -q .` under `pipefail` | PASS — reproduces rc=141 |
+| The lock-drift check passes when the pins match | The step's own script, run against the real lock | PASS |
+| The lock-drift check fails when a version or a checksum diverges | The same script against a tampered copy | PASS (2 cases) |
+| All shell blocks are syntactically valid | `bash -n` over 21 extracted blocks | PASS, 0 errors |
+| All embedded Python heredocs compile | `py_compile` over 3 extracted scripts | PASS |
 | The toolchain checksums match `packaging/versions.lock` | Substring check of the parsed `env` against the lock file | PASS |
 | The "no tests present" branches really do report NOT_RUN and exit 0 | The branch bodies were executed locally against the real repo | PASS |
 | The embedded contract-check Python runs verbatim | Extracted from the YAML and executed against the real `contracts/openapi.yaml` | PASS, exit 0 |
+| The active jobs are gated off | Parsed `if` values, all four jobs | PASS (all `False`) |
 
 What was **not** verified, and is honestly recorded as NOT_RUN:
 
 | Check | Why NOT_RUN |
 |---|---|
-| The workflow as GitHub executes it | No network, no dispatch, no runner |
+| The workflow as GitHub executes it | No network, no dispatch, no runner — and the active jobs are gated off |
 | GitHub's own workflow-schema validation | Not available offline; the YAML is well-formed but schema-validity is unproven |
 | Any hosted-runner behaviour (cache behaviour, artifact upload, runner image contents) | Never ran |
-| Full OpenAPI conformance validation | No OpenAPI validator is vendored, installed, or available |
+| The upstream authenticity of the action digests | Needs the network; **NOT_VERIFIED** (T4-C6) |
+| The presence and version of the Python YAML parser on the runner image | Not provisioned or pinned in this repository; **BLOCKED** (T4-C7) |
+| The race detector's C toolchain prerequisite | Never ran on a runner; **NOT_VERIFIED** (T4-C8) |
+| Full OpenAPI conformance validation | No OpenAPI validator is vendored or available |
 | Any actual unit, race, frontend or E2E test result | The scaffold contains **no test files at all** |
 | The arm64 toolchain path | `packaging/versions.lock` records no arm64 checksum |
 
@@ -75,6 +113,30 @@ prevent. When a verified `actions/cache` digest becomes available, caching
 can be added without changing anything else — the cache directories are
 already set up in the workflow comments.
 
+### The provenance of the two pins that ARE used — NOT_VERIFIED
+
+The workflow uses `actions/checkout` and `actions/upload-artifact`, pinned
+to the two SHAs above. Those SHAs were found in workflow files belonging to
+other projects on this machine (21 files for checkout, 8 for
+upload-artifact), each carrying a version comment like `# v7.0.1`.
+
+**That is not upstream authentication.** Many projects copying the same
+string proves only that many projects copied the same string. A tampered or
+mistyped digest would replicate identically. The 04 audit recorded this
+correctly, and this document previously over-claimed it as PASS; the claim
+is now **downgraded to NOT_VERIFIED**, and every pin line in the workflow
+says so.
+
+Resolving it requires the upstream tag→SHA mapping over the network, which
+this task forbids. Gap **T4-C6**.
+
+What this means in practice: the two pins are *more* trustworthy than a
+mutable tag, because a wrong SHA fails closed — the action is not found —
+rather than silently running whatever upstream published that day. But
+until the mapping is confirmed, they are unauthenticated.
+
+### The gaps this leaves
+
 Gap **T4-C1**: `actions/cache` is unused because no verifiable SHA exists
 locally. Consequence: no caching, slower runs, more network use per run.
 Owner: 01 or the Chief Architect, once a digest source is agreed.
@@ -88,6 +150,25 @@ Gap **T4-C3**: only `linux-amd64` toolchain checksums exist in
 `packaging/versions.lock`. The workflow therefore targets `ubuntu-24.04`
 (the x64 hosted runner) and does not claim arm64 support. If an arm64
 runner is ever wanted, the lock file must gain the arm64 checksums first.
+
+Gap **T4-C6**: the action digests are NOT_VERIFIED. Consequence: the active
+jobs are gated off, because running with an unauthenticated digest is not
+something to do silently. Resolving it needs a network fetch of the
+upstream tag→SHA mapping, which is outside this task's scope.
+
+Gap **T4-C7**: the Python YAML parser the contract job needs is neither
+provisioned nor version-pinned. There is no `requirements.txt`,
+`pyproject.toml`, `Pipfile` or constraints file anywhere in the
+repository. The job now checks for the parser and fails with an explicit
+BLOCKED message if it is absent; it installs nothing and pins nothing.
+Resolving it is a decision about which Python dependency the project
+declares and how it is pinned.
+
+Gap **T4-C8**: the race detector's C toolchain prerequisite. On
+linux/amd64 the race detector generally needs cgo and a C compiler. The
+pure-Go SQLite driver means the dependency closure does not need cgo, but
+that is not the same thing. The workflow reports what it finds and does not
+assert it.
 
 ## The workflow
 
@@ -108,26 +189,57 @@ runner is ever wanted, the lock file must gain the arm64 checksums first.
 
 ### Job 1 — `go`
 
-Working directory: repository root.
+Working directory: repository root. **This job is gated off with
+`if: false`** — see the status section.
 
 | Step | Command | Purpose |
 |---|---|---|
-| Checkout | `actions/checkout@3d3c42e…` (v7.0.1), `persist-credentials: false` | The token is not left in the git config, so no later step can use it. |
+| Checkout | `actions/checkout@3d3c42e…` (digest NOT_VERIFIED upstream), `persist-credentials: false` | The token is not left in the git config, so no later step can use it. |
 | Install Go | `curl` go.dev tarball → `sha256sum --check --strict` → extract | Toolchain pinned to `go1.27.3`, checksum `65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40` from `versions.lock` §2. |
 | Version check | `test "$(go env GOVERSION)" = "go1.27.3"` | Fails the job if the wrong toolchain was installed. |
+| Pin drift check | the embedded script compares the workflow's `env` block with `versions.lock` | Fails if the lock was revised and the workflow was not. See D2 below. |
 | Module closure | `go mod verify`, `go mod tidy -diff` | Read-only. `tidy -diff` reports drift without writing `go.mod`/`go.sum`. |
 | Build | `go build ./cmd/...`, `go vet ./...` | Both binaries, then vet. |
 | Unit tests | `go test -count=1 ./...` | See below. |
+| Race prerequisites | reports `CGO_ENABLED` and whether a C compiler is on PATH | Reported, not asserted — T4-C8. |
 | Race tests | `go test -count=1 -race ./...` | See below. |
 
 `-count=1` disables the test result cache, so a run never reports a cached
 result as a fresh pass.
 
-The unit and race steps **detect** whether any test file exists:
+The unit and race steps **detect** whether any test file exists. The
+detection captures the producer's output first and tests it separately:
 
 ```sh
-go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -q .
+test_packages="$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...)"
+if [ -n "${test_packages}" ]; then
+  go test -count=1 ./...
+else
+  echo "NOT_RUN: ..."
+fi
 ```
+
+**Why not `go list … | grep -q .`** — this is the 04 audit's D1 defect, and
+it was a real bug. Under `set -o pipefail`, when the producer writes more
+than the reader's buffer takes, `grep -q` exits early, the producer dies of
+**SIGPIPE**, and the pipeline returns **141**. The condition then evaluates
+false — so the step would print "NOT_RUN: no \*_test.go files exist" and
+exit 0 **exactly when enough tests had been added to trigger it**. That is
+a silent false negative in the one place the task forbids a fake NOT_RUN.
+It is latent today (no tests exist, so the output is tiny) and breaks
+precisely when tests arrive.
+
+Capturing first fixes both halves: no pipeline means no SIGPIPE, and a
+failing `go list` aborts the step under `set -e` instead of being read as
+"no tests".
+
+The fix was verified with a **synthetic producer** — no Go build was run:
+
+| Case | Old pattern | New pattern |
+|---|---|---|
+| Large output (200 000 lines) | **FALSE, rc=141** — the bug | TRUE, rc=0 |
+| Empty output | FALSE | FALSE → the NOT_RUN branch, rc=0 |
+| Failing producer | — | **rc≠0**, the step aborts |
 
 If the list is empty, the step prints `NOT_RUN: no *_test.go files exist in
 this commit (2 packages, 0 with tests).`, prints `This step exits 0 and
@@ -145,6 +257,32 @@ no-tests branch prints the NOT_RUN lines and exits 0.
 **The race step runs as an unprivileged user on the hosted runner.** It
 creates no network namespace, changes no firewall rule, and needs no root
 capability. The race detector itself is the only thing being exercised.
+
+**The race detector's own prerequisites are reported, not assumed.** On
+linux/amd64 it generally needs cgo and a C toolchain. The dependency
+*closure* being pure Go does not settle that — cgo for the race detector
+is a separate matter from cgo in the dependencies. The workflow prints
+`CGO_ENABLED` and whether a C compiler is present, and does not assert
+either. This is **T4-C8**, NOT_VERIFIED.
+
+### The lock-drift check (D2)
+
+The workflow hard-codes four values: the two toolchain versions and the two
+SHA-256 checksums. Before this revision, nothing compared them to
+`packaging/versions.lock` — "the same values as the lock" was a convention
+that a lock revision could silently break.
+
+The `go` job now runs a step that parses the lock file, extracts the four
+values, and compares them with the workflow's own `env` block. A mismatch
+prints `DRIFT <key>: workflow=… lock=…` and fails the job. The step was
+verified by running its own extracted script against the real lock (match →
+exit 0) and against tampered copies (a changed version → exit 1, a changed
+checksum → exit 1).
+
+The parsing is anchored on the lock file's own row shapes, not on free
+text: the `pinned version` row and the `published SHA2-256 … for <file>`
+row, each of which must match exactly once. If the lock is restructured,
+the step fails loudly rather than silently skipping the comparison.
 
 ### Job 2 — `frontend`
 
@@ -191,14 +329,33 @@ against the real `web/package.json`.
 
 ### Job 3 — `contract`
 
-Working directory: repository root. No toolchain installation needed: the
-checks use `python3` and `PyYAML`, both present on the hosted runner image.
+Working directory: repository root. **This job is gated off with
+`if: false`** — see the status section.
+
+The checks use `python3` and a YAML parser. **The YAML parser is an
+external dependency this repository does not provision or pin**: there is
+no `requirements.txt`, `pyproject.toml`, `Pipfile` or constraints file
+anywhere. This document previously stated that PyYAML was "present on the
+hosted runner image", which was an *assumption about the runner image*, not
+a verified fact — and PyYAML 6.0.1 is the version on the **authoring
+host**, not a pinned CI version.
 
 | Step | Purpose |
 |---|---|
+| YAML parser precondition | Reports the parser version it finds; fails with an explicit `BLOCKED: no Python YAML parser is available` message if it is absent. Installs nothing, pins nothing. |
 | JSON contracts parse | `json.load` over `contracts/*.json` — currently `helper.schema.json`. |
-| OpenAPI parses and its references resolve | PyYAML parse; asserts `openapi` starts with `3.1`; walks every `$ref` and asserts the target exists; asserts `operationId`s are present and unique. Prints the counts. |
+| OpenAPI parses and its references resolve | YAML parse; asserts `openapi` starts with `3.1`; walks every `$ref` and asserts the target exists; asserts `operationId`s are present and unique. Prints the counts. |
 | Whitespace and manifest consistency | `git diff --check`; `git diff --exit-code -- go.mod go.sum web/package.json web/package-lock.json`. |
+
+The precondition step matters because the alternative is an opaque
+`ImportError` from deep inside a heredoc, which reads like a broken
+contract check rather than a missing prerequisite. It also makes the
+dependency visible instead of implicit.
+
+Gap **T4-C7**: the YAML parser is neither provisioned nor version-pinned.
+Resolving it is a decision about which Python dependency the project
+declares and how it is pinned — not something this task may decide by
+pip-installing something.
 
 **This is a structural check, not an OpenAPI conformance check.** The
 difference is real and is not papered over:
@@ -266,6 +423,7 @@ contract the workflow implements.
 
 | Working directory | Command | Job |
 |---|---|---|
+| repository root | the embedded drift script — workflow `env` vs `versions.lock` | go |
 | repository root | `go mod verify` | go |
 | repository root | `go mod tidy -diff` | go |
 | repository root | `go build ./cmd/...` | go |
@@ -278,6 +436,7 @@ contract the workflow implements.
 | `web/` | `npm run build` | frontend |
 | `web/` | `npm run test -- --run` | frontend (when the script exists) |
 | `web/` | `npm run test:e2e` | frontend (when the script exists) |
+| repository root | `python3` — YAML parser precondition (reports or fails BLOCKED) | contract |
 | repository root | `python3 -c "import json,sys; json.load(...)"` over `contracts/*.json` | contract |
 | repository root | `python3` — OpenAPI parse, `$ref` resolution, `operationId` uniqueness | contract |
 | repository root | `git diff --check` | contract |
@@ -381,8 +540,13 @@ would change if caching is added:
   no step hides an exit code.
 - That `permissions` is `contents: read` throughout, that no secret is
   referenced, and that `pull_request_target` is absent.
-- That the two action pins are the ones corroborated locally, and that no
-  third action was added without a verifiable digest.
+- That every action pin is marked `digest NOT_VERIFIED upstream`, that no
+  third action was added, and that the file claims no upstream proof
+  (T4-C6).
+- That the lock-drift check fails when a pin diverges, and that it fails
+  loudly if the lock file is restructured rather than skipping the check.
+- That the YAML parser precondition installs nothing and pins nothing
+  (T4-C7).
 - That the checksums in `env` still match `packaging/versions.lock` after
   any lock-file update — the workflow hard-codes them, so a lock revision
   must be mirrored here or the job fails loudly at the checksum step.
@@ -397,11 +561,20 @@ would change if caching is added:
 | T4-C3 | No arm64 checksums in `versions.lock` | Bounded gap; workflow targets x64 only |
 | T4-C4 | OpenAPI conformance validation | NOT_RUN; prerequisite is a validator decision |
 | T4-C5 | Network-integration suite | NOT_RUN; blocked on runner-technology decision and implementation |
+| T4-C6 | The two action digests are NOT_VERIFIED upstream | Consequence: the active jobs are gated off with `if: false`; resolving it needs a network fetch of the upstream tag→SHA mapping |
+| T4-C7 | The Python YAML parser is neither provisioned nor pinned | **BLOCKED**; the job checks for it and fails with an explicit message; resolving it is a project dependency decision |
+| T4-C8 | The race detector's C toolchain prerequisite | NOT_VERIFIED; the workflow reports what it finds rather than asserting it |
 
 ## Scope note
 
 This task changed exactly two paths: `.github/workflows/verify.yml` and
 `docs/engineering/testing.md`. It did not change the feature contracts,
 the task list, the acceptance criteria, `packaging/versions.lock`, the
-dependency manifests, or any product source. T004 is not APPROVED: it waits
-for the 03 review and the 04 checks.
+dependency manifests, or any product source.
+
+The correction round after the 04 audit changed the same two paths and
+nothing else.
+
+**T004 is not APPROVED and not Done.** It waits for the 03 review and the
+04 checks, and the workflow itself is not presented as runnable: its active
+jobs are gated off until T4-C6 and T4-C7 are resolved.

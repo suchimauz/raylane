@@ -139,6 +139,52 @@ owns read-only upstream metadata/artifact retrieval and the proposed pinned
 toolchain separately; the dependency downloads and the network read are their
 own explicit authorizations, not bundled here.
 
+## HTTP request-body byte limits (B2)
+
+Every request-body operation declares a finite, explicit encoded-body byte
+limit via the machine-readable `x-body-limit-bytes` operation annotation in
+`contracts/openapi.yaml`, consistent with the `413 Payload Too Large`
+response. The limit is the size of the HTTP request body as received
+(encoded), enforced by streaming before allocation: the server reads at most
+the limit and rejects with 413 once the limit is exceeded, regardless of
+whether `Content-Length` is present, missing, or the body is chunked. A
+`maxLength` on a single schema field does NOT cap the HTTP stream; the
+operation-level byte limit is the enforcement point. No HTTP/network
+execution is implied or tested by these annotations.
+
+The restore body carries a base64-encoded archive. Its `archive` field is
+bounded by `maxLength: 52428800` in the `RestoreRequest` schema — 50 MiB of
+base64-encoded text, about 37.5 MiB decoded. The operation's
+`x-body-limit-bytes` is the bound on the complete encoded HTTP body, chosen
+consistent with (never below) that schema bound plus envelope headroom.
+Both the encoded body and the encoded-archive field carry finite limits, and
+the decoded archive they imply is finite by base64 arithmetic; neither bound
+contradicts the other.
+
+| Operation | x-body-limit-bytes (encoded) |
+|---|---|
+| POST /nodes (createNode) | 262144 (256 KiB) |
+| PATCH /nodes/{nodeId} (updateNode) | 262144 |
+| POST /runtime/stop (stopRuntime) | 8192 |
+| POST /rules (createRule) | 131072 (128 KiB) |
+| PATCH /rules/{ruleId} (updateRule) | 131072 |
+| POST /subscriptions (createSubscription) | 131072 |
+| PATCH /subscriptions/{subscriptionId} (updateSubscription) | 131072 |
+| POST /rule-sources (createRuleSource) | 131072 |
+| PATCH /rule-sources/{ruleSourceId} (updateRuleSource) | 131072 |
+| POST /subscriptions/{subscriptionId}/refresh (refreshSubscription) | 8192 |
+| POST /rule-sources/{ruleSourceId}/refresh (refreshRuleSource) | 8192 |
+| POST /session (login) | 4096 |
+| POST /bootstrap (bootstrap) | 8192 |
+| POST /revisions/{revisionId}/apply (applyRevision) | 16384 |
+| POST /runtime/release-protection (releaseProtection) | 8192 |
+| POST /backups (createBackup) | 4096 (passphrase only; the export is a response) |
+| POST /restores (restoreBackup) | 71303168 (68 MiB encoded body ≥ the 50 MiB base64 `archive` maxLength + envelope headroom) |
+
+These are finite technical input bounds chosen within the accepted
+implementation baseline; they introduce no new admin knob or product feature
+and do not resurrect the revoked research download/disk budget cap.
+
 ## Contracts normative-complete vs remaining gaps
 
 The **control-plane and helper contracts are normative-complete** for the

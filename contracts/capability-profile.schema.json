@@ -118,18 +118,45 @@
           "if": { "properties": { "classification": { "const": "secret" } } },
           "then": {
             "required": ["secret"],
-            "properties": { "secret": { "const": true } }
+            "properties": { "secret": { "const": true } },
+            "not": { "required": ["default"] },
+            "description": "A secret field never carries a default value: secrets are stored as SecretRef and have no default."
           }
         },
         {
+          "if": { "properties": { "classification": { "const": "known" } } },
+          "then": { "not": { "required": ["secret"] } }
+        },
+        {
           "if": { "properties": { "type": { "const": "enum" } } },
-          "then": { "required": ["allowedValues"] }
+          "then": { "required": ["allowedValues"] },
+          "else": { "not": { "required": ["allowedValues"] } }
         },
         {
           "if": { "properties": { "type": { "const": "array" } } },
-          "then": { "required": ["itemType"] }
+          "then": { "required": ["itemType"] },
+          "else": { "not": { "required": ["minItems", "maxItems", "itemType"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "integer" } } },
+          "then": {},
+          "else": { "not": { "required": ["minimum", "maximum"] } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "string" } } },
+          "then": {},
+          "else": { "not": { "required": ["minLength", "maxLength", "pattern"] } }
         }
-      ]
+      ],
+      "dependentSchemas": {
+        "minItems": { "properties": { "type": { "const": "array" } } },
+        "maxItems": { "properties": { "type": { "const": "array" } } },
+        "minimum": { "properties": { "type": { "const": "integer" } } },
+        "maximum": { "properties": { "type": { "const": "integer" } } },
+        "minLength": { "properties": { "type": { "const": "string" } } },
+        "maxLength": { "properties": { "type": { "const": "string" } } },
+        "pattern": { "properties": { "type": { "const": "string" } } }
+      }
     }
   }
 }

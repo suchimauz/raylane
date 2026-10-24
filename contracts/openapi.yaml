@@ -130,6 +130,7 @@ paths:
                       $ref: "#/components/schemas/NodeDraft"
     post:
       operationId: createNode
+      x-body-limit-bytes: 262144
       x-implementation-status: blocked
       x-implementation-note: |
         A create is the one mutation whose guard is still unresolved. The
@@ -184,6 +185,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -213,6 +216,7 @@ paths:
           $ref: "#/components/responses/NotFound"
     patch:
       operationId: updateNode
+      x-body-limit-bytes: 262144
       tags: [nodes]
       summary: Update a node draft.
       description: |
@@ -373,6 +377,7 @@ paths:
   /runtime/stop:
     post:
       operationId: stopRuntime
+      x-body-limit-bytes: 8192
       tags: [runtime]
       summary: Stop the runtime, keeping the protection in place.
       description: |
@@ -445,6 +450,7 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createRule
+      x-body-limit-bytes: 131072
       x-implementation-status: blocked
       x-implementation-note: |
         A create is the one mutation whose guard is still unresolved. The
@@ -509,6 +515,7 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     patch:
       operationId: updateRule
+      x-body-limit-bytes: 131072
       tags: [rules]
       summary: Update a destination rule in the draft.
       security:
@@ -606,6 +613,7 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createSubscription
+      x-body-limit-bytes: 131072
       x-implementation-status: blocked
       x-implementation-note: |
         A create is the one mutation whose guard is still unresolved. The
@@ -659,6 +667,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -668,6 +678,7 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     patch:
       operationId: updateSubscription
+      x-body-limit-bytes: 131072
       tags: [sources]
       summary: Update subscription settings.
       description: |
@@ -740,6 +751,7 @@ paths:
           $ref: "#/components/responses/Unauthorized"
     post:
       operationId: createRuleSource
+      x-body-limit-bytes: 131072
       x-implementation-status: blocked
       x-implementation-note: |
         A create is the one mutation whose guard is still unresolved. The
@@ -793,6 +805,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/SemanticValidationFailed"
 
@@ -802,6 +816,7 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     patch:
       operationId: updateRuleSource
+      x-body-limit-bytes: 131072
       tags: [sources]
       summary: Update rule-source settings.
       description: |
@@ -845,6 +860,7 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshSubscription
+      x-body-limit-bytes: 8192
       tags: [sources]
       summary: Refresh a subscription explicitly.
       description: |
@@ -899,6 +915,7 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: refreshRuleSource
+      x-body-limit-bytes: 8192
       tags: [sources]
       summary: Refresh a rule source explicitly.
       description: |
@@ -951,6 +968,7 @@ paths:
   /session:
     post:
       operationId: login
+      x-body-limit-bytes: 4096
       tags: [auth]
       summary: Log in and establish an admin session.
       description: |
@@ -1000,6 +1018,7 @@ paths:
   /bootstrap:
     post:
       operationId: bootstrap
+      x-body-limit-bytes: 8192
       tags: [auth]
       summary: One-time bootstrap of the first admin.
       description: |
@@ -1036,6 +1055,7 @@ paths:
       - $ref: "#/components/parameters/RequestId"
     post:
       operationId: applyRevision
+      x-body-limit-bytes: 16384
       tags: [revisions]
       summary: Apply a validated revision to the running network configuration.
       description: |
@@ -1084,6 +1104,7 @@ paths:
   /runtime/release-protection:
     post:
       operationId: releaseProtection
+      x-body-limit-bytes: 8192
       tags: [runtime]
       summary: Release the protection against direct bypass, with a bound confirmation.
       description: |
@@ -1123,6 +1144,7 @@ paths:
   /backups:
     post:
       operationId: createBackup
+      x-body-limit-bytes: 4096
       tags: [backup]
       summary: Create a self-contained encrypted backup export.
       description: |
@@ -1162,6 +1184,7 @@ paths:
   /restores:
     post:
       operationId: restoreBackup
+      x-body-limit-bytes: 71303168
       tags: [backup]
       summary: Restore an encrypted backup into a new draft revision.
       description: |

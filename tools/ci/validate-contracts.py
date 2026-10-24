@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from urllib.parse import urlsplit, unquote
 import yaml
@@ -152,22 +153,238 @@ class Bundle:
             raise GuardError('unknown kind')
         return doc
 
+    @staticmethod
+    def limits_table(path):
+        """Parse the documentation limits table: [(operationId, bytes)] from rows
+        of the form '| ... (operationId) | <digits> ... |'. Extracts the
+        parenthesised operationId and the leading integer of the value cell."""
+        text = Path(path).read_text(encoding='utf-8')
+        rows = []
+        for line in text.splitlines():
+            m = re.match(r'^\|\s*((?:GET|PUT|POST|PATCH|DELETE)[^|]*)\|([^|]*)\|?[^|]*', line)
+            if not m:
+                continue
+            label = m.group(1).strip()
+            value = re.search(r'\b(\d+)\b', m.group(2))
+            if not value:
+                continue
+            op = re.search(r'\((\w+)\)', label)
+            rows.append((op.group(1) if op else label, int(value.group(1))))
+        return rows
+
+    @staticmethod
+    def body_limit_semantics(doc, limits_table=None):
+        """OpenAPI body-limit and conflict-response consistency (B1/B2).
+
+        Repository-contract checks over the parsed document: every operation
+        with a requestBody declares a positive finite integer
+        `x-body-limit-bytes`; each such operation also declares the 413
+        response; each create whose contract promises a conflict path
+        (createNode, createSubscription, createRuleSource — createRule
+        already carried it) declares a structurally referenced 409; and the
+        documented limits table lists exactly the request-body operations
+        with the values the contract declares. Tests inspect contracts, not
+        a running HTTP server; nothing here executes HTTP.
+        """
+        if not isinstance(doc, dict) or not isinstance(doc.get('paths'), dict):
+            return  # not an OpenAPI document
+        methods = ('get', 'put', 'post', 'patch', 'delete', 'options', 'head', 'trace')
+        conflict_creates = {'createNode', 'createSubscription', 'createRuleSource', 'createRule'}
+        declared = {}
+        for path, item in doc['paths'].items():
+            if not isinstance(item, dict):
+                continue
+            for method in methods:
+                op = item.get(method)
+                if not isinstance(op, dict) or 'requestBody' not in op:
+                    continue
+                oid = op.get('operationId', '%s %s' % (method, path))
+                responses = op.get('responses')
+                if not isinstance(responses, dict):
+                    responses = {}
+                if '413' not in responses:
+                    raise GuardError('openapi: operation %s has a requestBody but no 413 response' % oid)
+                limit = op.get('x-body-limit-bytes')
+                if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                    raise GuardError('openapi: operation %s lacks a positive finite integer x-body-limit-bytes' % oid)
+                if oid in conflict_creates and '409' not in responses:
+                    raise GuardError('openapi: create operation %s lacks the required 409 response' % oid)
+                declared[oid] = limit
+        # Base64-decoded payload bound inside an encoded request body: the
+        # restore body is base64 text, so its decoded archive length is
+        # bounded by the archive schema bound through base64 arithmetic.
+        schemas = ((doc.get('components') or {}).get('schemas') or {})
+        restore = schemas.get('RestoreRequest')
+        if isinstance(restore, dict):
+            archive = ((restore.get('properties') or {}).get('archive') or {})
+            encoded_field = archive.get('maxLength')
+            body_limit = declared.get('restoreBackup')
+            if isinstance(encoded_field, int) and isinstance(body_limit, int):
+                if 4 * body_limit // 3 < encoded_field:
+                    raise GuardError('openapi: restoreBackup x-body-limit-bytes %d cannot carry the archive maxLength %d encoded base64' % (body_limit, encoded_field))
+                decoded_bound = 3 * encoded_field // 4
+                if decoded_bound * 4 // 3 > body_limit:
+                    raise GuardError('openapi: restoreBackup decoded archive bound exceeds its encoded body limit')
+        if limits_table is not None:
+            method_to_op = {}
+            declared_keys = {}
+            for path, item in doc['paths'].items():
+                if not isinstance(item, dict):
+                    continue
+                for method in methods:
+                    op = item.get(method)
+                    if isinstance(op, dict) and 'requestBody' in op and isinstance(op.get('operationId'), str):
+                        key = (method.upper(), path)
+                        method_to_op[key] = op['operationId']
+            table = {}
+            for key, value in limits_table:
+                if key in declared:
+                    table[key] = value
+                else:
+                    m = re.match(r'^(GET|PUT|POST|PATCH|DELETE)\s+(\S+)\s*$', key)
+                    resolved = method_to_op.get((m.group(1), m.group(2))) if m else None
+                    if resolved is None:
+                        raise GuardError('openapi: limits table row %r names no request-body operation' % key)
+                    if resolved in table and table[resolved] != value:
+                        raise GuardError('openapi: limits table contradicts itself for %s' % resolved)
+                    table[resolved] = value
+            missing = sorted(set(declared) - set(table))
+            extra = sorted(set(table) - set(declared))
+            if missing:
+                raise GuardError('openapi: limits table misses body operations: %s' % ', '.join(missing))
+            if extra:
+                raise GuardError('openapi: limits table names non-body operations: %s' % ', '.join(extra))
+            for oid, value in sorted(table.items()):
+                if value != declared[oid]:
+                    raise GuardError('openapi: limits table value %r for %s contradicts x-body-limit-bytes %r' % (value, oid, declared[oid]))
+
+    @staticmethod
+    def profile_semantics(doc):
+        """Focused capability-profile consistency (B3).
+
+        Cross-field rules a JSON Schema cannot express: dependency target
+        membership within the same protocol, ordered numeric/length/item
+        bounds, default validity against the declared constraints, enum
+        default membership, allowedValues element type and uniqueness, and
+        secret/known consistency. Uses the established jsonschema Draft202012
+        validator to check that each default actually satisfies the per-field
+        constraints; it does not build a general parser or compiler.
+        """
+        if not isinstance(doc, dict) or not isinstance(doc.get('protocols'), dict):
+            return  # not a capability-profile document
+        type_map = {
+            'string': {'string'}, 'integer': {'integer'}, 'boolean': {'boolean'},
+            'array': {'array'}, 'object': {'object'}, 'enum': set(),
+        }
+        for proto_name, proto in doc['protocols'].items():
+            if not isinstance(proto, dict) or not isinstance(proto.get('fields'), dict):
+                raise GuardError('profile: protocol %s lacks a fields object' % proto_name)
+            fields = proto['fields']
+            for fname, spec in fields.items():
+                if not isinstance(spec, dict):
+                    raise GuardError('profile: field %s.%s is not an object' % (proto_name, fname))
+                ftype = spec.get('type')
+                classification = spec.get('classification')
+                # secret/known consistency
+                if classification == 'secret' and 'default' in spec:
+                    raise GuardError('profile: secret field %s.%s must not carry a default' % (proto_name, fname))
+                # ordered bounds
+                if 'minimum' in spec and 'maximum' in spec and spec['minimum'] > spec['maximum']:
+                    raise GuardError('profile: field %s.%s minimum exceeds maximum' % (proto_name, fname))
+                if 'minLength' in spec and 'maxLength' in spec and spec['minLength'] > spec['maxLength']:
+                    raise GuardError('profile: field %s.%s minLength exceeds maxLength' % (proto_name, fname))
+                if 'minItems' in spec and 'maxItems' in spec and spec['minItems'] > spec['maxItems']:
+                    raise GuardError('profile: field %s.%s minItems exceeds maxItems' % (proto_name, fname))
+                # dependency target membership (same protocol)
+                deps = spec.get('dependencies')
+                if deps is not None:
+                    if not isinstance(deps, dict):
+                        raise GuardError('profile: field %s.%s dependencies not an object' % (proto_name, fname))
+                    for key in ('requires', 'incompatibleWith'):
+                        targets = deps.get(key)
+                        if targets is None:
+                            continue
+                        if not isinstance(targets, list):
+                            raise GuardError('profile: field %s.%s dependencies.%s not an array' % (proto_name, fname, key))
+                        for t in targets:
+                            if t not in fields:
+                                raise GuardError('profile: field %s.%s %s undeclared dependency %r' % (proto_name, fname, key, t))
+                # allowedValues type/uniqueness and enum default membership
+                allowed = spec.get('allowedValues')
+                if allowed is not None:
+                    if ftype != 'enum':
+                        raise GuardError('profile: field %s.%s allowedValues on non-enum type' % (proto_name, fname))
+                    if not isinstance(allowed, list) or not allowed:
+                        raise GuardError('profile: field %s.%s allowedValues must be a non-empty array' % (proto_name, fname))
+                    seen = set()
+                    for v in allowed:
+                        if isinstance(v, (list, dict)):
+                            raise GuardError('profile: field %s.%s allowedValues has non-scalar element' % (proto_name, fname))
+                        marker = (type(v).__name__, v if isinstance(v, (str, int, bool)) else None)
+                        if marker in seen:
+                            raise GuardError('profile: field %s.%s allowedValues has duplicate %r' % (proto_name, fname, v))
+                        seen.add(marker)
+                # default validity: build the per-field constraint schema and
+                # validate the default with the established Draft202012 validator.
+                if 'default' in spec and classification == 'known':
+                    sub = {}
+                    if ftype == 'enum':
+                        sub['enum'] = allowed if isinstance(allowed, list) else []
+                    elif ftype == 'array':
+                        sub['type'] = 'array'
+                        it = spec.get('itemType')
+                        if it in ('string', 'integer'):
+                            sub['items'] = {'type': it}
+                        if 'minItems' in spec:
+                            sub['minItems'] = spec['minItems']
+                        if 'maxItems' in spec:
+                            sub['maxItems'] = spec['maxItems']
+                    elif ftype == 'integer':
+                        sub['type'] = 'integer'
+                        if 'minimum' in spec:
+                            sub['minimum'] = spec['minimum']
+                        if 'maximum' in spec:
+                            sub['maximum'] = spec['maximum']
+                    elif ftype == 'string':
+                        sub['type'] = 'string'
+                        if 'minLength' in spec:
+                            sub['minLength'] = spec['minLength']
+                        if 'maxLength' in spec:
+                            sub['maxLength'] = spec['maxLength']
+                        if 'pattern' in spec:
+                            sub['pattern'] = spec['pattern']
+                    elif ftype == 'boolean':
+                        sub['type'] = 'boolean'
+                    elif ftype == 'object':
+                        sub['type'] = 'object'
+                    if sub:
+                        errs = list(Draft202012Validator(sub).iter_errors(spec['default']))
+                        if errs:
+                            raise GuardError('profile: field %s.%s default violates declared constraints' % (proto_name, fname))
+                    # enum default membership is covered by the enum sub-schema above.
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--bundle', required=True)
     p.add_argument('--openapi', action='append', default=[])
     p.add_argument('--schema', action='append', default=[])
+    p.add_argument('--limits-table', help='Markdown file with the | Operation | x-body-limit-bytes | documentation table to cross-check')
     p.add_argument('--instance', nargs=2, action='append', default=[], metavar=('SCHEMA', 'INSTANCE'))
     args = p.parse_args()
     b = Bundle(args.bundle)
     try:
         for name in args.openapi:
-            b.validate(name, 'openapi')
+            doc = b.validate(name, 'openapi')
+            if args.limits_table:
+                # The documentation table lives outside the contract bundle;
+                # it is read as plain Markdown text, never as a contract ref.
+                Bundle.body_limit_semantics(doc, Bundle.limits_table(args.limits_table))
         for name in args.schema:
             b.validate(name, 'schema')
         for name, value in args.instance:
             schema = b.validate(name, 'schema')
             instance = b.load(b.local_path(value))
+            Bundle.profile_semantics(instance)
             registry = Registry(retrieve=lambda uri: Resource.from_contents(b.cached(uri), default_specification=DRAFT202012))
             registry = registry.with_resources((uri, Resource.from_contents(doc, default_specification=DRAFT202012)) for uri, doc in b.docs.items())
             Draft202012Validator(schema, registry=registry).validate(instance)

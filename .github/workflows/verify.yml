@@ -354,7 +354,7 @@ jobs:
         run: |
           set -euo pipefail
           .venv-contracts/bin/python tools/ci/test_validate_contracts.py
-          .venv-contracts/bin/python tools/ci/validate-contracts.py --bundle contracts --openapi openapi.yaml --schema helper.schema.json --schema capability-profile.schema.json --instance capability-profile.schema.json capability-profile.json
+          .venv-contracts/bin/python tools/ci/validate-contracts.py --bundle contracts --openapi openapi.yaml --limits-table docs/engineering/foundation-decisions.md --schema helper.schema.json --schema capability-profile.schema.json --instance capability-profile.schema.json capability-profile.json
       - name: Check the whitespace and the lockfile consistency
         run: |
           set -euo pipefail

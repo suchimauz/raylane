@@ -22,6 +22,10 @@ amd64 wheels, not ARM/other ABI. All19 wheels hashed and metadata closure checke
 ## Contract commands
 `python tools/ci/test_validate_contracts.py`
 `python tools/ci/validate-contracts.py --bundle contracts --openapi openapi.yaml --schema helper.schema.json`
+Optional `--limits-table <file>` cross-checks the documented
+`x-body-limit-bytes` table against every request-body operation (B2).
+`--instance` additionally runs the focused capability-profile consistency
+checker (B3) before schema validation of the instance.
 Use isolated venv and tools/ci/requirements-contracts.lock with --require-hashes
 --only-binary=:all:. Local package test used --no-index with verified wheelhouse;
 proposed CI obtains pinned hash-checked wheels from index. pip check is mandatory.

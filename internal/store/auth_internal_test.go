@@ -654,61 +654,32 @@ type k2Probe struct {
 	inside    []int // marker per guard-SELECT compiled INSIDE this call
 	committed []int // gens whose durable Commit() returned before the callback returned
 	commitErr error // writer error surfaced in-call (must stay nil)
+	// swapDur: SYNCHRONOUS nested swap wall time for this armed call.
+	// Written by the callback on the OWNER stack (worker-free design),
+	// read by the owner after the call — factual observation only.
+	swapDur time.Duration
 }
 
-// k2Harness wires the scoped authorizer, the independent writer and bounded
-// release. It never touches testing.T.
+// k2Harness wires the scoped authorizer and the worker-free nested swap
+// bookkeeping. It never touches testing.T.
+// k2Harness is WORKER-FREE: no test-owned goroutine exists anywhere. The
+// full-pair swap runs SYNCHRONOUSLY on the owner goroutine, nested INSIDE
+// the actual AuthRead callback, against the separately opened writer pool
+// (a genuinely DIFFERENT physical connection; the invoking reader conn is
+// never touched from the callback). Being synchronous, the terminal
+// Commit/Rollback returns before the callback returns and before owner
+// cleanup — there is no worker left to join, close or release.
 type k2Harness struct {
-	wdb        *sql.DB                 // writer's OWN pool over the same file
-	writerExit chan struct{}           // writer goroutine termination
-	close_     chan struct{}           // closed once: releases every bounded wait
-	stray      atomic.Int32            // un-armed guard-read events (recorded, benign)
-	pending    atomic.Pointer[k2Probe] // currently armed call, or nil
-	commitReq  chan int
-	writerDone chan error
+	wdb     *sql.DB                 // writer's OWN pool over the same file
+	stray   atomic.Int32            // un-armed guard-read events (recorded, benign)
+	pending atomic.Pointer[k2Probe] // currently armed call, or nil
 
-	// G5 teardown bookkeeping.
-	writerJoined bool // owner cleanup only: writer goroutine termination established
-	readerJoined bool // owner cleanup only: every reader handle/inflight work released, pool close cannot block
-	// callbackLive: atomic — the callback runs on the reader connection,
-	// potentially concurrently with the owner cleanup goroutine.
-	callbackLive atomic.Bool
-	stopOnce     sync.Once
-}
-
-// stop releases ALL harness waits cooperatively: every blocked callback
-// wait and the writer loop exit via close_ (ctx cancellation alone is NOT
-// presumed to interrupt a blocked Go callback). Idempotent.
-func (h *k2Harness) stop() {
-	h.stopOnce.Do(func() { close(h.close_) })
-}
-
-// runWriter: writer loop over its own pool. Bounded by ctx/close_; serves
-// exactly the in-call commit demands it receives; never touches testing.T.
-func (h *k2Harness) runWriter(ctx context.Context, pairA, pairB []byte) {
-	defer close(h.writerExit)
-	for {
-		var gen int
-		select {
-		case gen = <-h.commitReq:
-		case <-h.close_:
-			return
-		case <-ctx.Done():
-			return
-		}
-		pair := pairB
-		if gen == 0 {
-			pair = pairA
-		}
-		err := k2SwapOnOwnPool(ctx, h.wdb, pair)
-		select {
-		case h.writerDone <- err:
-		case <-h.close_:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
+	// G5 teardown bookkeeping (owner-computed at cleanup time).
+	readerJoined bool // observed quiescence: no owner read in flight, callback not inside the driver
+	// callbackLive / readerInflight: DEFENSIVE state assertions only —
+	// they do not claim a currently reachable owner-cleanup hazard.
+	callbackLive   atomic.Bool
+	readerInflight atomic.Bool
 }
 
 // k2SwapOnOwnPool commits ONE COMPLETE record (frozen metadata + caller pair)
@@ -741,7 +712,14 @@ func k2SwapOnOwnPool(ctx context.Context, db *sql.DB, pair []byte) error {
 // observed. Mechanism, chain and honest limits: see the harness block above.
 func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	// Explicit protocol bound far below the 900 s outer shell timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Sized from MEASURED behavior (see the ATTEMPT LOG in the callback
+	// below): normal rounds commit in ~7 ms; the pathological WAL
+	// writer-lease round waits for the reader's read txn to end, which
+	// cannot happen while the owner blocks inside the synchronous
+	// callback — it unwinds only at ctx. 300 s bounds that unwind well
+	// inside the 900 s OUTER deadline so it surfaces as a FAIL with full
+	// logs, never as an outer kill (INCOMPLETE).
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	watch, stopWatch := deadlineWatcher(t)
 	defer stopWatch()
@@ -756,25 +734,19 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	pairA := append(append([]byte{}, recA.Salt...), recA.DerivedKey...)
 	pairB := append(append([]byte{}, recB.Salt...), recB.DerivedKey...)
 
-	h := &k2Harness{
-		writerExit: make(chan struct{}),
-		close_:     make(chan struct{}),
-		commitReq:  make(chan int),
-		writerDone: make(chan error, 1),
-	}
+	h := &k2Harness{}
 	wdb, err := openBarePoolForTests(path)
 	if err != nil {
 		t.Fatalf("writer pool: %v", err)
 	}
-	h.wdb = wdb
-	// Ownership at acquisition: writer pool closes ONLY after the writer
-	// join is established (h.writerJoined set by the join cleanup below),
-	// and unconditionally — even if every later setup path Fatal-fails.
+	// Ownership at acquisition (checked close, idempotent, runs even when
+	// later setup paths Fatal). WORKER-FREE design: the writer pool has no
+	// goroutine attached — the swap is synchronous on the owner stack and
+	// its terminal Commit/Rollback returned before the production call
+	// returned — so the close is normal checked owner cleanup, with NO
+	// obsolete join gate and no claim beyond that.
 	wdbClosed := false
 	t.Cleanup(func() {
-		if !h.writerJoined {
-			t.Errorf("G5 gap: closing writer pool although the writer goroutine join was NOT established")
-		}
 		if !wdbClosed {
 			wdbClosed = true
 			if err := wdb.Close(); err != nil {
@@ -851,22 +823,32 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reader pool: %v", err)
 	}
-	// Ownership at acquisition: c0 (if still held) then readerPool, AFTER
-	// the release+join cleanup registered below (LIFO: join first, close
-	// here). Runs on any later Fatal path too.
+	// Pool ownership registered BEFORE any Conn attempt; the c0 branch is
+	// NIL-SAFE: if Conn(ctx) itself fails, c0 was never acquired and the
+	// cleanup must not dereference it (and must still reach pool close).
+	// Runs on any later Fatal path; LIFO puts the release+join cleanup
+	// registered below BEFORE these closes.
 	var (
 		c0       *sql.Conn
-		c0Closed bool
+		c0Closed bool // true once c0 is known to need no further close
 	)
 	t.Cleanup(func() {
-		if !c0Closed {
+		// PARTIAL SAFETY GATE (DEFENSIVE): closing the reader pool (and
+		// any held c0) requires observed quiescence — no owner read in
+		// flight, callback not inside the driver — recorded as
+		// h.readerJoined by the teardown cleanup registered below. Unsafe
+		// state => close SKIPPED with an explicit resource-specific Errorf,
+		// never presented as closed/joined/PASS; the skip is safer partial
+		// behavior, not proof of reclamation.
+		if !h.readerJoined {
+			t.Errorf("reader pool NOT closed: termination/quiescence NOT established (owner read in flight or callback inside driver)")
+			return
+		}
+		if c0 != nil && !c0Closed {
 			c0Closed = true
 			if err := c0.Close(); err != nil {
 				t.Errorf("reader conn c0 close: %v", err)
 			}
-		}
-		if !h.readerJoined {
-			t.Errorf("G5 gap: closing reader pool although its close/join was NOT established")
 		}
 		if err := readerPool.Close(); err != nil {
 			t.Errorf("reader pool close: %v", err)
@@ -878,6 +860,9 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 		t.Fatalf("conn: %v", err)
 	}
 	regErr := make(chan error, 1)
+	// Bind the writer pool into the harness BEFORE the callback is
+	// registered, so the callback closure can invoke the nested swap.
+	h.wdb = wdb
 	if err := c0.Raw(func(dc any) error {
 		reg, ok := dc.(sqlite.AuthorizerRegisterer)
 		if !ok {
@@ -900,41 +885,81 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 			}
 			// SQLite fires one AuthRead per column reference while
 			// compiling the guarded statement; only the FIRST in-call
-			// event performs the commit handshake, later ones just record
-			// that compilation continued inside the call.
+			// event performs the swap, later ones just record that
+			// compilation continued inside the call.
 			handshake := len(p.inside) == 0
 			p.inside = append(p.inside, p.wantGen)
 			if !handshake {
 				return sqlite.AuthorizerOK
 			}
-			// Demand the in-call commit; ALL waits bounded by close_/ctx/exit.
-			select {
-			case h.commitReq <- p.wantGen:
-			case <-h.close_:
-				return sqlite.AuthorizerOK
-			case <-ctx.Done():
-				return sqlite.AuthorizerOK
-			case <-h.writerExit:
+			// WORKER-FREE nested witness: invoke the EXISTING real
+			// full-pair transaction SYNCHRONOUSLY on the separately
+			// opened writer pool (different physical connection; the
+			// invoking reader conn is never executed from here). This
+			// runs on the owner stack INSIDE the live production call —
+			// nested, not parallel, and NOT claimed stronger or "more
+			// inside" than the accepted prior in-call witness. Once-only
+			// per armed call by the handshake gate above.
+			pair := pairB
+			if p.wantGen == 0 {
+				pair = pairA
+			}
+			// The production read holds a READONLY transaction open on
+			// the reader conn for the whole call, and the reader pool is
+			// narrowed to ONE physical conn — so the nested write could
+			// legitimately wait on the SQLite write lock if any
+			// scheduling variant let it start before the reader's read
+			// snapshot ended. Bounding this wait with the writer pool's
+			// OWN conn and its busy_timeout (test-only knob on a
+			// test-owned pool; production DSN untouched) means a
+			// pathological SQLITE_BUSY surfaces as a recorded commitErr
+			// that the owner asserts as a REAL FAIL — it can never hang
+			// into the 900 s outer deadline silently. This is a bound,
+			// not a claim of universal lock-freedom.
+			//
+			// MEASURED ATTEMPT LOG (raw JSONs in the task logs dir):
+			// run1 (busy_timeout 30 s, ctx 120 s): round 3 waited the
+			// FULL remaining ctx (swap wall time = 119.999 s) and died of
+			// "context deadline exceeded". run4 with busy_timeout 15 s:
+			// IDENTICAL 119.999 s wait — the timeout value provably does
+			// not bound this wait. Mechanism: in WAL the write lock is
+			// taken at BEGIN, but the WRITE HEADER requires the exclusive
+			// writer lease, which SQLite withholds while ANY reader holds
+			// an open read snapshot — the reader conn's readonly txn here,
+			// whose owner is blocked inside this synchronous callback.
+			// The lease cannot be granted before ctx unwinds the owner's
+			// own read; that releases the lease, the swap commits ~ms
+			// later, and Commit's ctx precheck (stdlib linearization)
+			// then honestly reports cancellation as commitErr => owner
+			// FAIL. busy_timeout is therefore NOT a fast-fail bound here,
+			// so it stays at the production DSN's own 5 s value (removed
+			// knob) and honesty comes from sizing ctx: 300 s protocol ctx
+			// unwinds the pathological round inside ~300 s, far from the
+			// 900 s outer kill. FINAL run5 (this exact source, exit 0):
+			// ALL 8 rounds committed in 6–8 ms — the lease starvation did
+			// NOT recur there; runs 1/2/4 reproduced it ONLY while this
+			// callback issued a 15–30 s busy_timeout PRAGMA override on the
+			// writer conn (observed correlation; the mechanism of that
+			// difference is NOT claimed). No timing assumption is baked
+			// in: the 300 s ctx bound makes any recurrence surface as a
+			// logged FAIL with full evidence, never as an outer kill.
+			// No PRAGMA re-knob: measured above to be irrelevant to this
+			// wait, and every writer-pool conn keeps the production DSN's
+			// own pragmas (busy_timeout 5 s / WAL) — test-only pool, but
+			// same opener, same settings.
+			t0 := time.Now()
+			err := k2SwapOnOwnPool(ctx, h.wdb, pair)
+			p.swapDur = time.Since(t0)
+			if err != nil {
+				// Deferred to the owner goroutine: the callback never
+				// touches testing.T; surfaced AFTER the call returns.
+				p.commitErr = err
 				return sqlite.AuthorizerOK
 			}
-			var werr error
-			select {
-			case werr = <-h.writerDone:
-			case <-h.close_:
-				return sqlite.AuthorizerOK
-			case <-ctx.Done():
-				return sqlite.AuthorizerOK
-			case <-h.writerExit:
-				return sqlite.AuthorizerOK
-			}
-			if werr != nil {
-				p.commitErr = werr
-				return sqlite.AuthorizerOK
-			}
+			// Appended ONLY after the real transaction's actual nil
+			// Commit() returned — the causal marker chain preserved. No
+			// claim about the reader's later snapshot point is made here.
 			p.committed = append(p.committed, p.wantGen)
-			// The commit became durable BEFORE this return — that causal
-			// fact is what the committed-marker asserts; no claim about the
-			// reader's later snapshot point is made here.
 			return sqlite.AuthorizerOK
 		})
 		regErr <- err
@@ -953,44 +978,31 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	}
 	c0Closed = true
 
-	go h.runWriter(ctx, pairA, pairB)
-
-	// G5 ordered teardown (single cleanup, LIFO-positioned to run BEFORE
-	// the resource-ownership cleanups above): release/cancel ALL callback
-	// and writer waits FIRST, then attempt+record EVERY join regardless of
-	// earlier outcome, then pool closes happen in the outer cleanups ONLY
-	// after termination was established (writerJoined/readerJoined flags).
-	// A timeout is reported as termination-NOT-established, never success;
-	// no Fatalf/FailNow can skip a later step here. No helper goroutine is
-	// spawned just to make a blocking close LOOK bounded: all handles are
-	// proven released before readerPool.Close runs, so it cannot block.
+	// G5 teardown (single cleanup, LIFO-positioned to run BEFORE the
+	// resource-ownership cleanups above). WORKER-FREE design: the swap is
+	// a synchronous nested transaction inside the production call, so
+	// there is no worker to release, join or kill — its terminal
+	// Commit/Rollback returned before the call returned. The cleanup only
+	// RECORDS defensive quiescence state; the reader pool/c0 close then
+	// runs conditionally on that recorded state, and an unestablished
+	// state skips the close with an explicit Errorf (never presented as
+	// closed/PASS; never claimed as reclamation proof). No Fatalf/FailNow
+	// here; no helper goroutine is spawned for any close.
 	t.Cleanup(func() {
-		// 1) Release/cancel FIRST: cooperative writer exit + ctx cancel
-		//    (deferred cancel already ran at function exit) + bounded
-		//    escape for any armed callback wait.
-		h.stop()
-		// 2) Writer goroutine join, recorded.
-		writerExited := false
-		select {
-		case <-h.writerExit:
-			writerExited = true
-		case <-time.After(45 * time.Second):
-		}
-		h.writerJoined = writerExited
-		if !writerExited {
-			t.Errorf("G5 gap: K2 writer goroutine still live after 45 s of release+cancel — termination NOT established; not claiming joined cleanup")
-		}
-		// 3) Reader conn/closer accounting, then establish that the reader
-		//    pool close itself cannot block (no spawned closer thread):
-		//    the outer cleanup closes it only when every handle/inflight
-		//    work was released. The armed callback is cooperatively
-		//    released by h.stop() via close_ (a blocked Go callback is NOT
-		//    presumed interrupted by ctx), and h.pending is un-armed at
-		//    each round end. If a callback were STILL inside the driver at
-		//    this point we would refuse to mark the reader close-ready and
-		//    the pool-close cleanup would report it honestly.
+		// WORKER-FREE: there is no test-owned goroutine to release or
+		// join. Every swap executed synchronously inside a production
+		// call, and each call returned before this cleanup could run
+		// (cleanups run after the test function returns).
+		// 2) Defensive quiescence record for the reader-pool close. The
+		//    callback is synchronous on the owner stack (it cannot be
+		//    inside the driver after the owner call returned), and
+		//    h.pending is un-armed at each round end — but the check is
+		//    kept and honored: if either flag were set, the close is
+		//    refused rather than assumed safe.
 		if h.callbackLive.Load() {
 			t.Errorf("G5 gap: authorizer callback still inside the driver after release+cancel — reader close NOT established")
+		} else if h.readerInflight.Load() {
+			t.Errorf("G5 gap: a production read is still in flight on the reader pool — reader close NOT established")
 		} else {
 			h.readerJoined = true
 		}
@@ -1006,8 +1018,10 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 		nextGen := 1 - committedGen // the gen the writer will commit IN-CALL
 		p := &k2Probe{wantGen: nextGen}
 		h.pending.Store(p)
+		h.readerInflight.Store(true)
 		// ---- the WITNESSED production call (live interval) ----
 		witnessed, rerr := rs.AdminVerifier(ctx)
+		h.readerInflight.Store(false)
 		h.pending.Store(nil)
 		// in-call causal assertions, in chain order:
 		if len(p.inside) == 0 {
@@ -1018,8 +1032,9 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 				t.Fatalf("round %d: in-call marker gen %d != armed gen %d", round, g, nextGen)
 			}
 		}
+		t.Logf("round %d: nested in-call swap wall time = %v", round, p.swapDur.Truncate(time.Millisecond))
 		if p.commitErr != nil {
-			t.Fatalf("round %d: in-call writer commit failed inside the call: %v", round, p.commitErr)
+			t.Fatalf("round %d: nested in-call swap FAILED (real defect, not a bound escape): %v", round, p.commitErr)
 		}
 		if len(p.committed) != 1 || p.committed[0] != nextGen {
 			t.Fatalf("round %d: gen %d was NOT durably committed before the callback returned INSIDE the call: committed=%v (G1 FAIL)", round, nextGen, p.committed)
@@ -1048,7 +1063,9 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 		// establishing per-round progress and visibility.
 		// ---- post-call proof the IN-CALL commit landed: a fresh real
 		// production read MUST observe exactly the just-committed gen. ----
+		h.readerInflight.Store(true)
 		v, ferr := rs.AdminVerifier(ctx)
+		h.readerInflight.Store(false)
 		if ferr != nil {
 			t.Fatalf("round %d: follow-up read: %v", round, ferr)
 		}

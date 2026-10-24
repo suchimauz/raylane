@@ -608,14 +608,24 @@ func deadlineWatcher(t *testing.T) (<-chan struct{}, func()) {
 //     own rule for authorizer callbacks) BEGINs, writes ONE COMPLETE A/B
 //     record and COMMITs. The callback WAITS for that durable Commit() to
 //     return, records the marker, and only then lets the reader continue
-//     compiling and stepping. The reader's BEGIN is deferred, so the
-//     external commit lands BEFORE the reader's statement takes its
-//     snapshot — which is what makes the commit genuinely inside the call
-//     and causally prior to what the call reads.
-//   - A follow-up REAL production read after the call MUST observe the NEW
-//     generation: that is the post-call proof the commit really landed
-//     DURING the live call, and it is checked against in-call markers that
-//     only the callback (running inside the call) can set.
+//     compiling and stepping. The commit therefore became durable strictly
+//     INSIDE the live call: the marker chain (in-call guard-SELECT marker
+//     -> writer BEGIN -> real Commit() RETURN -> callback return -> reader
+//     return) is the causal proof. Which complete generation the witnessed
+//     call itself returns is NOT the contract and its exact SQLite snapshot
+//     acquisition point is NOT_PROVEN here — neither generation is a clock;
+//     the marker chain is the evidence.
+//   - A follow-up REAL production read after the call is a SEPARATE
+//     visibility/fresh-progress witness: it MUST observe exactly the
+//     just-committed generation, checked against in-call markers that only
+//     the callback (running inside the call) can set.
+//
+// M-A disclosure: the in-call witness covers ONE authorized physical
+// reader connection (test-local pool narrowed to max 1). Production runs a
+// up-to-four-connection pool; per-call/per-connection correctness is what
+// the product guarantees, and this test is not a measurement of all
+// production pool scheduling. The M-B guard below pins the production
+// multi-connection fact that this witness fixture bypasses.
 //
 // Causal chain per round, each link recorded separately:
 //   callStart -> guard SELECT compiled INSIDE the call (authorizer marker)
@@ -744,7 +754,44 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	}
 	h.wdb = wdb
 
-	// Reader pool: the SAME production opener, one physical connection.
+	// M-B narrow regression guard: an UNMODIFIED production-opener pool
+	// must really allow >1 simultaneous connections — the fact the
+	// one-connection witness fixture below deliberately bypasses (M-A).
+	// Bounded acquisition, unconditional partial cleanup, no pool resize.
+	guard, err := openBarePoolForTests(path)
+	if err != nil {
+		t.Fatalf("M-B guard pool: %v", err)
+	}
+	if m := guard.Stats().MaxOpenConnections; m <= 1 {
+		guard.Close()
+		t.Fatalf("M-B: production opener pool MaxOpenConnections=%d, want >1", m)
+	}
+	c1, err := guard.Conn(ctx)
+	if err != nil {
+		guard.Close()
+		t.Fatalf("M-B hold 1: %v", err)
+	}
+	c2, err2 := guard.Conn(ctx)
+	if err2 != nil {
+		c1.Close()
+		guard.Close()
+		t.Fatalf("M-B hold 2: %v", err2)
+	}
+	if err := c2.Close(); err != nil {
+		c1.Close()
+		guard.Close()
+		t.Fatalf("M-B close 2: %v", err)
+	}
+	if err := c1.Close(); err != nil {
+		guard.Close()
+		t.Fatalf("M-B close 1: %v", err)
+	}
+	if err := guard.Close(); err != nil {
+		t.Fatalf("M-B guard close: %v", err)
+	}
+
+	// Reader pool: the SAME production opener, narrowed (test-only, M-A) to
+	// one physical connection.
 	readerPool, err := openBarePoolForTests(path)
 	if err != nil {
 		t.Fatalf("reader pool: %v", err)
@@ -810,9 +857,9 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 				return sqlite.AuthorizerOK
 			}
 			p.committed = append(p.committed, p.wantGen)
-			// The commit became durable BEFORE this return; compilation and
-			// the later step run against the committed state (the reader's
-			// BEGIN is deferred, no lock/snapshot was taken before it).
+			// The commit became durable BEFORE this return — that causal
+			// fact is what the committed-marker asserts; no claim about the
+			// reader's later snapshot point is made here.
 			return sqlite.AuthorizerOK
 		})
 		regErr <- err
@@ -889,11 +936,10 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 		if rerr != nil {
 			t.Fatalf("round %d: witnessed call: %v", round, rerr)
 		}
-		// The witnessed call returned a COMPLETE record (never mixed) —
-		// G3 all-A-or-all-B for the real reader racing an in-call commit.
-		// Which generation it shows is a SNAPSHOT question, measured, not
-		// assumed (see limits: deferred BEGIN). Both values are valid here;
-		// both are counted so alternation is observed across rounds.
+		// The witnessed call returned EXACTLY one COMPLETE record (never
+		// mixed) — G3. Acceptance does NOT require a particular generation
+		// from this specific call (snapshot point NOT_PROVEN, see header);
+		// both values are counted factually for the M-D distribution log.
 		wg := append(append([]byte{}, witnessed.Salt...), witnessed.DerivedKey...)
 		switch string(wg) {
 		case string(pairA):
@@ -904,18 +950,11 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 			t.Fatalf("round %d: witnessed call returned a MIXED record %x", round, wg)
 		}
 
-		// Fresh-progress: proved at the round level, twice —
-		//   (i) the in-call markers prove a durable commit of gen nextGen
-		//       happened during THIS live call (asserted above), and
-		//   (ii) the post-call read MUST return gen nextGen (asserted
-		// below), which differs from what any earlier read returned.
-		// NOTE (measured snapshot fact, honestly recorded): the WITNESSED
-		// call's own snapshot is taken at its first step under the
-		// deferred BEGIN, so it legitimately observes the generation
-		// committed BEFORE this call. That is the pinned driver/SQLite
-		// semantics, not a product mixing defect; it is exactly the
-		// preparation-vs-materialization distinction G8 requires us to
-		// state instead of hiding.
+		// Fresh-progress per round: (i) the in-call marker chain proves a
+		// durable Commit() of gen nextGen completed during THIS live call
+		// (asserted above), and (ii) the SEPARATE post-call real read MUST
+		// return gen nextGen — a generation no earlier read could return —
+		// establishing per-round progress and visibility.
 		// ---- post-call proof the IN-CALL commit landed: a fresh real
 		// production read MUST observe exactly the just-committed gen. ----
 		v, ferr := rs.AdminVerifier(ctx)
@@ -938,6 +977,9 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	if seenA == 0 || seenB == 0 {
 		t.Fatalf("expected BOTH generations observed via real reads racing in-call commits, got A=%d B=%d", seenA, seenB)
 	}
+	// M-D factual record (no gate): witnessed-call generation distribution
+	// across the 8 rounds, in the owner goroutine.
+	t.Logf("M-D witnessed-call distribution over %d rounds: A=%d B=%d", rounds, seenA, seenB)
 	// Stray accounting: armed calls were witnessed EXCLUSIVELY (their events
 	// all carried the armed gen — checked per round above). Stray events come
 	// from the test's own UN-ARMED production reads (bootstrap, follow-ups)

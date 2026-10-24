@@ -1,3 +1,61 @@
+# Testing — T004 integration candidate
+
+Status: ready-to-integrate candidate only; actual GitHub CI, product tests, Go builds,
+race execution and frontend execution NOT_RUN by this package. No gate auto-accepted.
+
+Normal go/frontend/contract jobs are enabled in the candidate. This is an edit proposal,
+not dispatch/approval to push. Network-integration stays `if: false`, unprovisioned,
+opt-in disposable VM only: never host root/LAN changes, no SSH/firewall/routes/DNS tests.
+
+## Versions and trust
+Checkout v7.0.1 SHA 3d3c42e5aac5ba805825da76410c181273ba90b1;
+upload-artifact v7.0.1 SHA 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a;
+setup-python v6.0.0 SHA e797f83bcb11b83ae66e0230d6156d7c80228e7c.
+Official exact tag/commit/release metadata checked 2026-10-23 in dependency research.
+This is provider metadata, not an independently verified action build signature.
+Actions use Node24 internally (runner>=2.327.1); application Node remains22.23.4.
+GitHub.com profile only: upload-artifact v4+ not GHES compatible.
+CI CPython3.12.12 differs from locally tested host CPython3.12.3. Python patch-exact
+CI execution and runner environment still NOT_RUN. Hashlock is CPython3.12/Linux
+amd64 wheels, not ARM/other ABI. All19 wheels hashed and metadata closure checked.
+
+## Contract commands
+`python tools/ci/test_validate_contracts.py`
+`python tools/ci/validate-contracts.py --bundle contracts --openapi openapi.yaml --schema helper.schema.json`
+Use isolated venv and tools/ci/requirements-contracts.lock with --require-hashes
+--only-binary=:all:. Local package test used --no-index with verified wheelhouse;
+proposed CI obtains pinned hash-checked wheels from index. pip check is mandatory.
+If additional committed Draft202012 profiles exist after T005, writer adds each
+explicitly with --schema relative-name.json; this candidate does not guess filenames.
+Optional --instance SCHEMA INSTANCE validates local fixture values.
+
+Full OpenAPIV31SpecValidator plus Draft202012 schema checks, not regex/key-presence
+checks. SafeLoader rejects duplicate mappings and unsafe YAML tags. Preflight scans
+ALL local reference documents before validator execution; external/absolute refs,
+traversal, symlinks, nested $id and $dynamicRef rejected. Only bundle-local files and
+JSON-pointer fragments allowed. External loaders are replaced by cache-only handlers.
+Root Draft202012 $id treated as identity, not remote resolution scope; named anchors
+and encoded ref paths unsupported (explicit restrictive offline CI profile).
+Errors are redacted: no imported secret/config values in logs. This validator is not
+an implementation of product parsing/auth/fetch/routing or security acceptance.
+
+## Go/race and frontend
+Missing gcc/cgo fails prerequisite, never removes -race. Record runner image and gcc
+version; ubuntu-24.04 is rolling, not a fabricated environment pin. CI compile/link
+probe does not execute its output. Go runtime/race coverage needs actual tests.
+Existing scaffold scripts retain honest NOT_RUN when unit/e2e/test files absent;
+CI job success with NOT_RUN markers must NOT be reported as test coverage PASS.
+Frontend uses existing pinned Node/lockfile commands unchanged.
+
+## Independent acceptance
+Writer integrates only after T005 commit boundary; review03 checks merged immutable
+batch. Researcher local tests are validator regression tests, not T004 acceptance.
+Remaining: exact CI interpreter run, current contracts/full-schema validation after
+merge, action runtime/runner verification, actual race/build/frontend/product tests.
+
+
+## Historical scaffold record (superseded where candidate above differs)
+
 # T004 — Testing and CI
 
 Task: **T004** — "После T002 настроить unit/race/frontend/contract CI в

@@ -1,57 +1,5 @@
-# Raylane — CI verification workflow
-#
-# Scope (T004): unit / race / frontend / contract checks for the CURRENT
-# scaffold and for the tests that later tasks will add.
-#
-# This file has NOT been executed. It was authored offline, in a task with
-# network access disabled, and it was never dispatched, never run by a
-# runner, and never validated by a hosted CI. Every statement about CI
-# behaviour below is a design intent, not an observed result. See
-# docs/engineering/testing.md for the full statement of what is and is not
-# known.
-#
-# THE ACTIVE JOBS ARE GATED OFF. `go`, `frontend` and `contract` each carry
-# `if: false` with a reason, so the workflow cannot execute until a human
-# removes the guard after the two blocking prerequisites are resolved:
-#   * the action digests are NOT_VERIFIED (they are copies, not upstream
-#     proof — T4-C6); and
-#   * the Python YAML parser the contract job needs is not provisioned or
-#     version-pinned anywhere in this repository (T4-C7).
-# The gate is a real no-run guard, not a comment: with `if: false` the
-# scheduler skips the job entirely.
-#
-# Nothing here should be read as "this CI works". It has never run.
-#
-# Hard rules encoded here:
-#   - The workflow runs on `push` and `pull_request` only. It never runs on
-#     `pull_request_target`, so a fork PR can never run with repository
-#     secrets or write permissions.
-#   - `permissions: contents: read` at workflow level, and no job widens it.
-#   - No secret is referenced anywhere. No deploy, publish or release step.
-#   - Every action is pinned to a full commit SHA, never to a tag or
-#     `latest`. The two pins used here were copied from other projects'
-#     workflow files on the same machine. That is NOT upstream
-#     authentication — many projects copying the same string proves only
-#     that they copied the same string. The digests are therefore marked
-#     NOT_VERIFIED, and no claim is made that they are the true upstream
-#     commits. Resolving them needs the upstream tag->SHA mapping over the
-#     network, which this task forbids. See docs/engineering/testing.md
-#     gaps T4-C1, T4-C2 and T4-C6.
-#   - Because the action digests are not authenticated and the workflow has
-#     never been executed, the ACTIVE jobs are gated off with an explicit
-#     no-run guard. A workflow that has never run is not presented as a
-#     runnable CI. See docs/engineering/testing.md gap T4-C6.
-#   - Dependency installation uses the committed lockfiles with
-#     `--frozen-lockfile` / `--ignore-scripts`, so a CI run installs
-#     exactly the reviewed closure and runs no third-party install code.
-#   - The network-integration runner is NOT provisioned, NOT run and NOT
-#     auto-enabled. It is documented as an opt-in, disposable-VM gate only.
-#
-# Toolchain versions and their SHA-256 checksums come from
-# packaging/versions.lock (T001, G1). This workflow does not invent a
-# version: it reads the pinned values below, which are the same values the
-# lock file records.
-
+# Integration candidate: normal unprivileged jobs enabled; actual CI NOT_RUN.
+# Upstream action pins verified via metadata; network-integration remains disabled.
 name: verify
 
 on:
@@ -91,17 +39,11 @@ jobs:
   go:
     name: go build / vet / unit / race
     runs-on: ubuntu-24.04
-    # NO-RUN GATE. This workflow has never been executed and the action
-    # digests it uses are NOT_VERIFIED (copied from other projects' files,
-    # not authenticated against upstream). Remove this line only after T4-C6
-    # is resolved and the first run has been reviewed. See
-    # docs/engineering/testing.md.
-    if: false
     permissions:
       contents: read
     steps:
       - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; official tag->commit metadata verified 2026-10-23
         with:
           persist-credentials: false
 
@@ -241,17 +183,22 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          echo "CGO_ENABLED=${CGO_ENABLED:-<unset>}"
-          if command -v gcc >/dev/null 2>&1; then
-            gcc --version | head -1
-          else
-            echo "NOTE: no gcc on PATH. The race detector on linux/amd64"
-            echo "usually requires cgo and a C toolchain. This is reported,"
-            echo "not asserted: whether the runner image provides one is"
-            echo "NOT_VERIFIED (T4-C8)."
-          fi
+          export CGO_ENABLED=1 CC=gcc
+          command -v "$CC"
+          "$CC" --version
+          "$CC" -dumpmachine
+          echo "Runner image: ${ImageOS:-unknown}/${ImageVersion:-unknown}"
+          dpkg-query -W gcc libc6-dev || exit 1
+          printf 'int main(void){return 0;}\n' > "$RUNNER_TEMP/race-cc.c"
+          "$CC" "$RUNNER_TEMP/race-cc.c" -o "$RUNNER_TEMP/race-cc"
+          rm -f "$RUNNER_TEMP/race-cc.c" "$RUNNER_TEMP/race-cc"
+          test "$(go env CGO_ENABLED)" = 1
+          go env GOOS GOARCH CGO_ENABLED CC
 
       - name: Race tests
+        env:
+          CGO_ENABLED: "1"
+          CC: gcc
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -277,9 +224,6 @@ jobs:
   frontend:
     name: frontend ci / typecheck / build / unit / e2e
     runs-on: ubuntu-24.04
-    # NO-RUN GATE — same reason as the `go` job. See
-    # docs/engineering/testing.md gap T4-C6.
-    if: false
     permissions:
       contents: read
     defaults:
@@ -287,7 +231,7 @@ jobs:
         working-directory: ${{ github.workspace }}/web
     steps:
       - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; official tag->commit metadata verified 2026-10-23
         with:
           persist-credentials: false
 
@@ -368,7 +312,7 @@ jobs:
 
       - name: Upload the build output
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; official tag->commit metadata verified 2026-10-23
         with:
           name: web-dist-${{ github.sha }}
           path: ${{ github.workspace }}/web/dist
@@ -387,105 +331,30 @@ jobs:
   contract:
     name: contract structure checks
     runs-on: ubuntu-24.04
-    # NO-RUN GATE. This job needs a Python YAML parser that is neither
-    # provisioned nor version-pinned anywhere in this repository (T4-C7),
-    # and it uses action digests that are NOT_VERIFIED (T4-C6). Removing this
-    # line requires resolving both. See docs/engineering/testing.md.
-    if: false
     permissions:
       contents: read
     steps:
       - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (per the local copy) — digest NOT_VERIFIED upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; official tag->commit metadata verified 2026-10-23
         with:
           persist-credentials: false
 
-      - name: Check the JSON contracts parse
+      - name: Setup exact Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12.12'
+      - name: Install hashlocked validator (wheels only)
         run: |
           set -euo pipefail
-          for f in contracts/*.json; do
-            [ -e "${f}" ] || continue
-            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "${f}"
-            echo "parsed: ${f}"
-          done
-
-      - name: Check the Python YAML parser is available
+          python --version
+          python -m venv .venv-contracts
+          .venv-contracts/bin/python -m pip install --require-hashes --only-binary=:all: -r tools/ci/requirements-contracts.lock
+          .venv-contracts/bin/python -m pip check
+      - name: Validator regression tests and full contract validation
         run: |
           set -euo pipefail
-          # The YAML parser is an EXTERNAL dependency that this repository
-          # does not provision or pin: there is no requirements.txt,
-          # pyproject.toml or constraints file anywhere. Whether it is
-          # present, and at which version, is a property of the runner image
-          # that has never been verified (T4-C7).
-          #
-          # This step does NOT install it and does NOT assume it. It
-          # reports what is there and fails with an explicit message if the
-          # parser is absent, so the failure says "the prerequisite is
-          # missing" rather than an opaque ImportError from a heredoc.
-          python3 - <<'PY'
-          import sys
-
-          try:
-              import yaml
-          except ImportError:
-              sys.exit(
-                  "BLOCKED: no Python YAML parser is available.\n"
-                  "This repository pins no Python dependency (no requirements.txt,\n"
-                  "pyproject.toml or constraints file), and this job must not\n"
-                  "pip-install anything. Provision and pin the parser first —\n"
-                  "see docs/engineering/testing.md gap T4-C7."
-              )
-          print(f"yaml parser available: PyYAML {yaml.__version__}")
-          print("NOTE: this is the runner image's parser, NOT a version this "
-                "repository pins. The pinned version is an open gap (T4-C7).")
-          PY
-
-      - name: Check the OpenAPI document parses and its references resolve
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import re
-          import sys
-
-          import yaml
-
-          path = "contracts/openapi.yaml"
-          with open(path) as fh:
-              text = fh.read()
-          doc = yaml.safe_load(text)
-          if not str(doc.get("openapi", "")).startswith("3.1"):
-              sys.exit(f"unexpected openapi version: {doc.get('openapi')!r}")
-
-          refs = sorted(set(re.findall(r'\$ref\s*:\s*"([^"]+)"', text)))
-          missing = []
-          for ref in refs:
-              if not ref.startswith("#/"):
-                  missing.append(ref)
-                  continue
-              node = doc
-              for part in ref[2:].split("/"):
-                  if not isinstance(node, dict) or part not in node:
-                      missing.append(ref)
-                      break
-                  node = node[part]
-          if missing:
-              sys.exit(f"unresolved $ref targets: {missing}")
-
-          operations = []
-          for path, item in doc["paths"].items():
-              for method, op in item.items():
-                  if method in ("get", "post", "patch", "put", "delete"):
-                      operations.append(op)
-          ids = [op.get("operationId") for op in operations]
-          if len(ids) != len(set(ids)):
-              sys.exit("duplicate operationId values")
-          if not all(ids):
-              sys.exit("an operation is missing operationId")
-
-          print(f"structure OK: {len(doc['paths'])} paths, {len(operations)} operations, {len(refs)} refs")
-          print("NOT_RUN: full OpenAPI conformance validation — no validator is vendored or installed.")
-          PY
-
+          .venv-contracts/bin/python tools/ci/test_validate_contracts.py
+          .venv-contracts/bin/python tools/ci/validate-contracts.py --bundle contracts --openapi openapi.yaml --schema helper.schema.json --schema capability-profile.schema.json --instance capability-profile.schema.json capability-profile.json
       - name: Check the whitespace and the lockfile consistency
         run: |
           set -euo pipefail

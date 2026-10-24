@@ -445,6 +445,103 @@ func TestSourceSettingsVsContentVersionsAndCapturedRevision(t *testing.T) {
 	}
 }
 
+// --- revision secret-reference metadata readback (names only, T007 owns values) --
+
+func TestRevisionSecretRefsReadback(t *testing.T) {
+	ctx := context.Background()
+	s, path := openStore(t)
+
+	refs := []domain.SecretRef{"secret://test/z", "secret://test/a"}
+	first, err := s.SaveDraft(ctx, []byte(`{"v":1}`), domain.ValidationValid, []string{"w1"}, refs, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Immediate LoadRevision recovers the exact set, stably ordered.
+	loaded, err := s.LoadRevision(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.SecretRefs) != 2 || loaded.SecretRefs[0] != "secret://test/a" || loaded.SecretRefs[1] != "secret://test/z" {
+		t.Fatalf("LoadRevision SecretRefs = %v, want [a z]", loaded.SecretRefs)
+	}
+	// Identity, document, status and findings are unchanged by the read.
+	if loaded.ID != first.ID || loaded.Seq != first.Seq || loaded.ParentID != first.ParentID {
+		t.Fatalf("identity changed on readback: %+v", loaded)
+	}
+	if string(loaded.Doc.Raw) != `{"v":1}` || loaded.Doc.Validation != domain.ValidationValid || len(loaded.Doc.Findings) != 1 {
+		t.Fatalf("document envelope altered on readback: %+v", loaded)
+	}
+	// LoadDraft delegates to the same shared read.
+	draft, err := s.LoadDraft(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(draft.SecretRefs) != 2 || draft.SecretRefs[0] != "secret://test/a" {
+		t.Fatalf("LoadDraft SecretRefs = %v", draft.SecretRefs)
+	}
+	// Synthetic active fixture (not proof of T016 apply) reads the same refs.
+	if err := s.SetActiveFixture(ctx, first.ID, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	act, err := s.LoadActive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(act.SecretRefs) != 2 || act.SecretRefs[1] != "secret://test/z" {
+		t.Fatalf("LoadActive SecretRefs = %v", act.SecretRefs)
+	}
+
+	// A later revision carries a DIFFERENT set without disturbing the older
+	// immutable one; an empty set stays empty.
+	second, err := s.SaveDraft(ctx, []byte(`{"v":2}`), domain.ValidationNotRun, nil, []domain.SecretRef{"secret://test/b"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.SaveDraft(ctx, []byte(`{"v":3}`), domain.ValidationNotRun, nil, nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.SecretRefs) != 0 {
+		t.Fatalf("empty set must stay empty: %v", third.SecretRefs)
+	}
+	old, err := s.LoadRevision(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(old.SecretRefs) != 2 || old.SecretRefs[0] != "secret://test/a" || old.SecretRefs[1] != "secret://test/z" {
+		t.Fatalf("older revision refs mutated by later saves: %v", old.SecretRefs)
+	}
+	mid, err := s.LoadRevision(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mid.SecretRefs) != 1 || mid.SecretRefs[0] != "secret://test/b" {
+		t.Fatalf("second revision refs = %v", mid.SecretRefs)
+	}
+	empty, err := s.LoadRevision(ctx, third.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.SecretRefs) != 0 {
+		t.Fatalf("empty set read back as %v", empty.SecretRefs)
+	}
+
+	// Close and reopen: refs persist in the store, not in process memory.
+	s.Close()
+	s2, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	reopened, err := s2.LoadRevision(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened.SecretRefs) != 2 || reopened.SecretRefs[0] != "secret://test/a" || reopened.SecretRefs[1] != "secret://test/z" {
+		t.Fatalf("after reopen refs = %v", reopened.SecretRefs)
+	}
+}
+
 // --- connection invariants on every pooled connection -----------------------
 
 func TestConnectionInvariantsOnEveryPooledConnection(t *testing.T) {

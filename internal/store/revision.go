@@ -168,6 +168,25 @@ func (s *Store) LoadRevision(ctx context.Context, id string) (domain.Revision, e
 			return domain.Revision{}, err
 		}
 	}
+	// Reference metadata (names only, values never stored — T007) belongs to
+	// the revision itself: recover the exact rows saved with this revision.
+	// Ordered by ref so the set reads back with a stable sequence.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT secret_ref FROM revision_secrets WHERE revision_id = ? ORDER BY secret_ref`, id)
+	if err != nil {
+		return domain.Revision{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return domain.Revision{}, err
+		}
+		rev.SecretRefs = append(rev.SecretRefs, domain.SecretRef(ref))
+	}
+	if err := rows.Err(); err != nil {
+		return domain.Revision{}, err
+	}
 	return rev, nil
 }
 

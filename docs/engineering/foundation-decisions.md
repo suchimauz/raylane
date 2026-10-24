@@ -139,17 +139,38 @@ owns read-only upstream metadata/artifact retrieval and the proposed pinned
 toolchain separately; the dependency downloads and the network read are their
 own explicit authorizations, not bundled here.
 
-## Remaining genuine gaps (not closed by this batch)
+## Contracts normative-complete vs remaining gaps
+
+The **control-plane and helper contracts are normative-complete** for the
+foundation scope: every operation the feature contracts name is represented
+machine-readably (29 operations over 21 paths in `contracts/openapi.yaml`, 11
+closed helper commands in `contracts/helper.schema.json`, and the per-protocol
+capability profile in `contracts/capability-profile.json`). This is a statement
+about the *contract surface*, NOT about implementation, runtime behaviour or
+foundation acceptance. Independent 03 review and 04 tests of the immutable
+result are still required for T005 acceptance.
+
+The following are **genuine gaps that remain** and are NOT closed by this batch:
+
 - **G-06 retention / GC:** cleanup stays OFF by decision (D4); no deletion
-  endpoint exists.
+  endpoint exists and none is implied. This is an accepted decision, not a
+  missing permission.
 - **G-12 canonical document shape:** follows the compiler, which does not exist
-  yet; `ConfigRevision.canonicalDocument` is free-form and not guaranteed
-  secret-free until then.
-- **JCS / dependency conformance:** the vetted RFC 8785 library and the pinned
-  YAML/OpenAPI validators must still be downloaded and verified (separate
-  authorization, D8); the idempotency check stays NOT_RUN until then.
-- **Runtime behaviour:** no helper, socket, nftables rule, dataplane or UI was
-  built or executed. Contracts and tests are not proof of runtime behaviour.
+  yet. `ConfigRevision.canonicalDocument` is free-form and not guaranteed
+  secret-free until the compiler fixes its shape and the secret-reference
+  property. An honest dependency on a not-yet-built component, not invented.
+- **JCS / dependency conformance evidence:** the vetted RFC 8785 library and
+  the pinned YAML/OpenAPI validators must still be downloaded and verified
+  under their own separate authorization (D8). The idempotency conformance
+  check stays NOT_RUN until then.
+- **A04 limiter constants / activity allowlist:** remain PROPOSED where D5 did
+  not fix them (the accepted session values are idle 900 s, absolute 43200 s,
+  re-login after restart, and read/polling is not activity). The required wire
+  auth fields and bounded constants are fixed in the contract within the 01
+  baseline; no user approval is outstanding.
+- **Runtime behaviour:** no helper, socket, nftables rule, dataplane, server or
+  UI was built or executed. Contracts and tests are not proof of runtime
+  behaviour.
 
 Independent 03 review and 04 tests of the immutable result are still required
 for T005 acceptance.

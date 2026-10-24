@@ -659,14 +659,28 @@ type k2Probe struct {
 // k2Harness wires the scoped authorizer, the independent writer and bounded
 // release. It never touches testing.T.
 type k2Harness struct {
-	wdb           *sql.DB                 // writer's OWN pool over the same file
-	writerExit    chan struct{}           // writer goroutine termination
-	close_        chan struct{}           // closed once: releases every bounded wait
-	stray         atomic.Int32            // un-armed guard-read events (recorded, benign)
-	armedGenStray atomic.Int32            // armed-gen events outside armed calls (must stay 0)
-	pending       atomic.Pointer[k2Probe] // currently armed call, or nil
-	commitReq     chan int
-	writerDone    chan error
+	wdb        *sql.DB                 // writer's OWN pool over the same file
+	writerExit chan struct{}           // writer goroutine termination
+	close_     chan struct{}           // closed once: releases every bounded wait
+	stray      atomic.Int32            // un-armed guard-read events (recorded, benign)
+	pending    atomic.Pointer[k2Probe] // currently armed call, or nil
+	commitReq  chan int
+	writerDone chan error
+
+	// G5 teardown bookkeeping.
+	writerJoined bool // owner cleanup only: writer goroutine termination established
+	readerJoined bool // owner cleanup only: every reader handle/inflight work released, pool close cannot block
+	// callbackLive: atomic — the callback runs on the reader connection,
+	// potentially concurrently with the owner cleanup goroutine.
+	callbackLive atomic.Bool
+	stopOnce     sync.Once
+}
+
+// stop releases ALL harness waits cooperatively: every blocked callback
+// wait and the writer loop exit via close_ (ctx cancellation alone is NOT
+// presumed to interrupt a blocked Go callback). Idempotent.
+func (h *k2Harness) stop() {
+	h.stopOnce.Do(func() { close(h.close_) })
 }
 
 // runWriter: writer loop over its own pool. Bounded by ctx/close_; serves
@@ -753,6 +767,21 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 		t.Fatalf("writer pool: %v", err)
 	}
 	h.wdb = wdb
+	// Ownership at acquisition: writer pool closes ONLY after the writer
+	// join is established (h.writerJoined set by the join cleanup below),
+	// and unconditionally — even if every later setup path Fatal-fails.
+	wdbClosed := false
+	t.Cleanup(func() {
+		if !h.writerJoined {
+			t.Errorf("G5 gap: closing writer pool although the writer goroutine join was NOT established")
+		}
+		if !wdbClosed {
+			wdbClosed = true
+			if err := wdb.Close(); err != nil {
+				t.Errorf("writer pool close: %v", err)
+			}
+		}
+	})
 
 	// M-B narrow regression guard: an UNMODIFIED production-opener pool
 	// must really allow >1 simultaneous connections — the fact the
@@ -762,33 +791,59 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("M-B guard pool: %v", err)
 	}
+	guardClosed := false
+	closeGuard := func() {
+		if !guardClosed {
+			guardClosed = true
+			if err := guard.Close(); err != nil {
+				t.Errorf("M-B guard pool close: %v", err)
+			}
+		}
+	}
+	// Ownership registered at acquisition: THIS cleanup runs no matter which
+	// later path Fatal-fails; it closes held conns first (LIFO), then pool.
+	t.Cleanup(func() { closeGuard() })
 	if m := guard.Stats().MaxOpenConnections; m <= 1 {
-		guard.Close()
 		t.Fatalf("M-B: production opener pool MaxOpenConnections=%d, want >1", m)
 	}
 	c1, err := guard.Conn(ctx)
 	if err != nil {
-		guard.Close()
 		t.Fatalf("M-B hold 1: %v", err)
 	}
+	c1Closed := false
+	t.Cleanup(func() {
+		if !c1Closed {
+			c1Closed = true
+			if err := c1.Close(); err != nil {
+				t.Errorf("M-B held conn 1 close: %v", err)
+			}
+		}
+	})
 	c2, err2 := guard.Conn(ctx)
 	if err2 != nil {
-		c1.Close()
-		guard.Close()
 		t.Fatalf("M-B hold 2: %v", err2)
 	}
+	c2Closed := false
+	t.Cleanup(func() {
+		if !c2Closed {
+			c2Closed = true
+			if err := c2.Close(); err != nil {
+				t.Errorf("M-B held conn 2 close: %v", err)
+			}
+		}
+	})
 	if err := c2.Close(); err != nil {
-		c1.Close()
-		guard.Close()
-		t.Fatalf("M-B close 2: %v", err)
+		t.Errorf("M-B close 2: %v", err)
 	}
+	c2Closed = true
 	if err := c1.Close(); err != nil {
-		guard.Close()
-		t.Fatalf("M-B close 1: %v", err)
+		t.Errorf("M-B close 1: %v", err)
 	}
+	c1Closed = true
 	if err := guard.Close(); err != nil {
-		t.Fatalf("M-B guard close: %v", err)
+		t.Errorf("M-B guard close: %v", err)
 	}
+	guardClosed = true
 
 	// Reader pool: the SAME production opener, narrowed (test-only, M-A) to
 	// one physical connection.
@@ -796,8 +851,29 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reader pool: %v", err)
 	}
+	// Ownership at acquisition: c0 (if still held) then readerPool, AFTER
+	// the release+join cleanup registered below (LIFO: join first, close
+	// here). Runs on any later Fatal path too.
+	var (
+		c0       *sql.Conn
+		c0Closed bool
+	)
+	t.Cleanup(func() {
+		if !c0Closed {
+			c0Closed = true
+			if err := c0.Close(); err != nil {
+				t.Errorf("reader conn c0 close: %v", err)
+			}
+		}
+		if !h.readerJoined {
+			t.Errorf("G5 gap: closing reader pool although its close/join was NOT established")
+		}
+		if err := readerPool.Close(); err != nil {
+			t.Errorf("reader pool close: %v", err)
+		}
+	})
 	readerPool.SetMaxOpenConns(1)
-	c0, err := readerPool.Conn(ctx)
+	c0, err = readerPool.Conn(ctx)
 	if err != nil {
 		t.Fatalf("conn: %v", err)
 	}
@@ -815,13 +891,12 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 			if action != sqlite.AuthRead || arg1 != "admin_verifier" {
 				return sqlite.AuthorizerOK
 			}
+			h.callbackLive.Store(true)
+			defer h.callbackLive.Store(false)
 			p := h.pending.Load()
 			if p == nil {
 				h.stray.Add(1) // un-armed production read (setup/follow-up): benign
 				return sqlite.AuthorizerOK
-			}
-			if p.wantGen < 0 {
-				h.armedGenStray.Add(1) // should be impossible
 			}
 			// SQLite fires one AuthRead per column reference while
 			// compiling the guarded statement; only the FIRST in-call
@@ -872,38 +947,54 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	}
 	// The single-slot pool had c0 occupying its only conn; returning it
 	// makes the authorized physical conn available to the reader chain.
-	c0.Close()
+	// Ownership bookkeeping: the cleanup above now sees c0Closed.
+	if err := c0.Close(); err != nil {
+		t.Fatalf("c0 release after register: %v", err)
+	}
+	c0Closed = true
 
 	go h.runWriter(ctx, pairA, pairB)
 
-	// G5: every goroutine joined with RECORDED outcome BEFORE any pool
-	// close; one timeout never skips another join; a timeout is reported as
-	// termination-NOT-established, never as success. Registered after
-	// openFreshAuthStore's Store-close cleanup => LIFO runs these first.
-	t.Cleanup(func() { close(h.close_) })
+	// G5 ordered teardown (single cleanup, LIFO-positioned to run BEFORE
+	// the resource-ownership cleanups above): release/cancel ALL callback
+	// and writer waits FIRST, then attempt+record EVERY join regardless of
+	// earlier outcome, then pool closes happen in the outer cleanups ONLY
+	// after termination was established (writerJoined/readerJoined flags).
+	// A timeout is reported as termination-NOT-established, never success;
+	// no Fatalf/FailNow can skip a later step here. No helper goroutine is
+	// spawned just to make a blocking close LOOK bounded: all handles are
+	// proven released before readerPool.Close runs, so it cannot block.
 	t.Cleanup(func() {
+		// 1) Release/cancel FIRST: cooperative writer exit + ctx cancel
+		//    (deferred cancel already ran at function exit) + bounded
+		//    escape for any armed callback wait.
+		h.stop()
+		// 2) Writer goroutine join, recorded.
 		writerExited := false
 		select {
 		case <-h.writerExit:
 			writerExited = true
 		case <-time.After(45 * time.Second):
 		}
-		readerClosed := make(chan struct{})
-		go func() { readerPool.Close(); close(readerClosed) }()
-		readerDone := false
-		select {
-		case <-readerClosed:
-			readerDone = true
-		case <-time.After(45 * time.Second):
-		}
+		h.writerJoined = writerExited
 		if !writerExited {
 			t.Errorf("G5 gap: K2 writer goroutine still live after 45 s of release+cancel — termination NOT established; not claiming joined cleanup")
 		}
-		if !readerDone {
-			t.Errorf("G5 gap: reader pool close still pending after 45 s — termination NOT established")
+		// 3) Reader conn/closer accounting, then establish that the reader
+		//    pool close itself cannot block (no spawned closer thread):
+		//    the outer cleanup closes it only when every handle/inflight
+		//    work was released. The armed callback is cooperatively
+		//    released by h.stop() via close_ (a blocked Go callback is NOT
+		//    presumed interrupted by ctx), and h.pending is un-armed at
+		//    each round end. If a callback were STILL inside the driver at
+		//    this point we would refuse to mark the reader close-ready and
+		//    the pool-close cleanup would report it honestly.
+		if h.callbackLive.Load() {
+			t.Errorf("G5 gap: authorizer callback still inside the driver after release+cancel — reader close NOT established")
+		} else {
+			h.readerJoined = true
 		}
 	})
-	t.Cleanup(func() { wdb.Close() })
 
 	rs := &Store{db: readerPool} // production method on the one-conn pool
 	seenA, seenB := 0, 0
@@ -980,13 +1071,10 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	// M-D factual record (no gate): witnessed-call generation distribution
 	// across the 8 rounds, in the owner goroutine.
 	t.Logf("M-D witnessed-call distribution over %d rounds: A=%d B=%d", rounds, seenA, seenB)
-	// Stray accounting: armed calls were witnessed EXCLUSIVELY (their events
-	// all carried the armed gen — checked per round above). Stray events come
-	// from the test's own UN-ARMED production reads (bootstrap, follow-ups)
-	// and are recorded separately; a real out-of-call generation leak would
-	// show up as an armed-gen stray, which must stay zero.
-	if n := h.armedGenStray.Load(); n != 0 {
-		t.Fatalf("harness accounting: %d armed-generation guard reads OUTSIDE armed calls", n)
-	}
+	// Stray accounting: armed calls were witnessed EXCLUSIVELY — every
+	// in-call event carried the armed gen (checked per round above). The
+	// stray counter only tallies the test's own un-armed production reads
+	// (bootstrap, follow-up reads); it makes no outside-call-leak claim —
+	// the vacuous armedGenStray counter was removed as undetectable noise.
 	_ = watch // protocol waits are bounded by ctx; watch kept for deadline parity
 }

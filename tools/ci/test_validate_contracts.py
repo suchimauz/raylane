@@ -146,15 +146,36 @@ class OfflineTests(unittest.TestCase):
         return v.Bundle(repo / 'contracts').validate('openapi.yaml', 'openapi')
     def test_openapi_body_limits_and_conflicts(self):
         # Real repository contract: every request-body operation has a finite
-        # byte bound + 413, creates carry 409, and the checker accepts it.
+        # byte bound + 413, creates carry the typed Conflict 409, and the
+        # checker accepts the authored contract.
         v.Bundle.body_limit_semantics(self._openapi())
     def test_openapi_missing_409_is_rejected(self):
         # Regression: if a required create 409 disappears, the checker fails.
         import copy
-        for path in ('/nodes', '/subscriptions', '/rule-sources'):
+        for path in ('/nodes', '/subscriptions', '/rule-sources', '/rules'):
             with self.subTest(path=path):
                 d = copy.deepcopy(self._openapi())
                 del d['paths'][path]['post']['responses']['409']
+                with self.assertRaises(v.GuardError):
+                    v.Bundle.body_limit_semantics(d)
+    def test_openapi_untyped_409_is_rejected(self):
+        # Nominal presence of 409 must not bypass the typed-response invariant:
+        # a description-only Response Object is a valid generic OpenAPI
+        # response but has lost the shared typed Conflict schema.
+        import copy
+        for path in ('/nodes', '/subscriptions', '/rule-sources', '/rules'):
+            with self.subTest(path=path):
+                d = copy.deepcopy(self._openapi())
+                d['paths'][path]['post']['responses']['409'] = {'description': 'untyped arbitrary conflict'}
+                with self.assertRaises(v.GuardError):
+                    v.Bundle.body_limit_semantics(d)
+    def test_openapi_wrong_ref_409_is_rejected(self):
+        # A 409 referencing a different component (typed or not) is rejected.
+        import copy
+        for path in ('/nodes', '/subscriptions', '/rule-sources', '/rules'):
+            with self.subTest(path=path):
+                d = copy.deepcopy(self._openapi())
+                d['paths'][path]['post']['responses']['409'] = {'$ref': '#/components/responses/PayloadTooLarge'}
                 with self.assertRaises(v.GuardError):
                     v.Bundle.body_limit_semantics(d)
     def test_openapi_body_without_limit_or_413_is_rejected(self):

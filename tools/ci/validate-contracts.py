@@ -181,7 +181,10 @@ class Bundle:
         `x-body-limit-bytes`; each such operation also declares the 413
         response; each create whose contract promises a conflict path
         (createNode, createSubscription, createRuleSource — createRule
-        already carried it) declares a structurally referenced 409; and the
+        already carried it) declares the shared typed Conflict response as
+        exactly {'$ref': '#/components/responses/Conflict'} — a description-only
+        or differently referenced 409 has lost that typed vocabulary and is
+        rejected; and the
         documented limits table lists exactly the request-body operations
         with the values the contract declares. Tests inspect contracts, not
         a running HTTP server; nothing here executes HTTP.
@@ -190,6 +193,7 @@ class Bundle:
             return  # not an OpenAPI document
         methods = ('get', 'put', 'post', 'patch', 'delete', 'options', 'head', 'trace')
         conflict_creates = {'createNode', 'createSubscription', 'createRuleSource', 'createRule'}
+        typed_conflict = {'$ref': '#/components/responses/Conflict'}
         declared = {}
         for path, item in doc['paths'].items():
             if not isinstance(item, dict):
@@ -207,8 +211,11 @@ class Bundle:
                 limit = op.get('x-body-limit-bytes')
                 if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
                     raise GuardError('openapi: operation %s lacks a positive finite integer x-body-limit-bytes' % oid)
-                if oid in conflict_creates and '409' not in responses:
-                    raise GuardError('openapi: create operation %s lacks the required 409 response' % oid)
+                if oid in conflict_creates:
+                    if '409' not in responses:
+                        raise GuardError('openapi: create operation %s lacks the required 409 response' % oid)
+                    if responses['409'] != typed_conflict:
+                        raise GuardError('openapi: create operation %s 409 is not the typed #/components/responses/Conflict reference' % oid)
                 declared[oid] = limit
         # Base64-decoded payload bound inside an encoded request body: the
         # restore body is base64 text, so its decoded archive length is
@@ -375,6 +382,8 @@ def main():
     try:
         for name in args.openapi:
             doc = b.validate(name, 'openapi')
+            # Always-on: typed body-limit/409 invariants for the authored contract.
+            Bundle.body_limit_semantics(doc)
             if args.limits_table:
                 # The documentation table lives outside the contract bundle;
                 # it is read as plain Markdown text, never as a contract ref.

@@ -1,11 +1,14 @@
 # T008 — KDF stored-verifier record: proposed internal decision
 
-**Status: PROPOSED INTERNAL DECISION — PENDING INDEPENDENT 03B/04 REVIEW; SOURCE AND
-DEPENDENCY IMPLEMENTATION NOT AUTHORIZED.** This is a NEW technical decision candidate
-addressing only the KDF encoded-record row of
-`docs/engineering/T008-security-contract.md` §3. It is not a reopened correction, not an
-invented historical approval, and grants nothing: no `go.mod`/`go.sum`, no source paths, no
-Go resolution/typecheck/runtime, no download. T008 remains `NOT_IMPLEMENTED`; T009 pending;
+**Status:** the logical field layout and validation order of this record were FROZEN
+SCOPED by the Orchestrator after both independent focused reviews
+(`.hyper/tmp/bui/T008-kdf-logical-format-frozen-decision.json`, consolidation
+`.hyper/tmp/bui/T008-kdf-record-independent-consolidation.json`) — a logical subdecision
+only; it does NOT close all encoding/source acceptance gates nor globally approve C1–C6.
+The K1/K2 boundary-clarification delta in §2/§5 is PENDING FOCUSED INDEPENDENT REVIEW;
+retrieval/type/snapshot implementation proof is NOT_RUN; SOURCE AND DEPENDENCY
+IMPLEMENTATION NOT AUTHORIZED (no `go.mod`/`go.sum`, no source paths, no Go
+resolution/typecheck/runtime, no download). T008 remains `NOT_IMPLEMENTED`; T009 pending;
 foundation ACTIVE.
 
 Base cited: `625e3495089e94b07384158285fb1fa30b5d8124` (tree
@@ -58,14 +61,27 @@ At the typed storage boundary, in this order:
    comparison. This is not an alternative KDF, and the small fixed metadata checks are not
    license for a custom PHC/general parser.
 
-Bounded retrieval requirement: the read path must NOT materialize an arbitrarily large
-BLOB just to reject it afterwards; bounded metadata/length inspection and bounded value
-retrieval must be guaranteed by the typed store operations. This document states the
-requirement only — no raw DB getter, no new general decoder, no query implementation is
-permitted or described. Future SQL constraints should enforce the same private record
-invariants at creation, while corrupt/hostile stored inputs must still fail safely at
-read. Reviewers: flag honestly any unresolved proof of bounded retrieval before future
-code.
+Bounded retrieval requirement, made precise (K1): the future typed store read must check
+SQLite storage class (`typeof` integer/blob — no affinity, text or numeric coercion), the
+exact fixed integer values, and the exact salt/hash byte lengths **at the storage boundary,
+BEFORE projecting, retrieving, or materializing BLOB bytes in Go**. A guarded typed read
+returning at most one logical verifier and the fixed 16+32 bytes is a permitted future
+strategy; no query or code implementation is described or proven now. A plain `Scan` into
+`[]byte` followed by Go `len` is NOT acceptable bounded-read evidence — materialization
+would already have happened — and a row `LIMIT` alone is not a BLOB byte bound. Write-side
+constraints on newly written rows do NOT replace independent guarded read validation of
+malformed/corrupt stored data. No SQL/query/memory behavior was executed or measured; the
+requirement is stated, not satisfied. Reviewers: flag honestly any unresolved proof of this
+bounded retrieval before future code.
+
+One consistent snapshot, same immutable record (K2): metadata/type/length checks and byte
+retrieval must observe ONE consistent row snapshot; the validator and the verifier consume
+the SAME immutable retrieved record. No unchecked second fetch between validation and KDF
+use, no check/fetch race. Prefer one guarded typed read; if a future implementation obtains
+metadata and bytes separately, both must sit inside one stable transaction/snapshot with
+consistency demonstrated and be passed on as one immutable record. This introduces no SQL
+implementation, concurrency framework, or new service/process/architecture. Trusted fixed
+crypto constants remain the interface — database values are never cast into KDF costs.
 
 ## 3. Failure semantics — private, generic, fail-closed
 
@@ -102,15 +118,18 @@ Aligned with (and referenced from, not edited into) security-contract case 4:
 | 2 | Wrong password | fails via generic constant-time derived-hash comparison |
 | 3 | Unknown versions / NULL / wrong types | refuse pre-KDF |
 | 4 | Numeric mismatch on every field | zero, negative, huge/out-of-range rejected before narrowing or KDF; no wrap/truncation |
-| 5 | Salt/hash lengths 0/15/17 and 0/31/33, wrong types, oversized metadata | refuse without unbounded retrieval/copy or KDF |
-| 6 | Malformed/corrupt records | never panic, never invoke the KDF (private test seam/counter must not expose a production bypass, raw DB access, or alternate security anchor) |
+| 5 | Salt/hash lengths 0/15/17 and 0/31/33, wrong types, oversized metadata | refuse without unbounded retrieval/copy or KDF; oversized/wrong-storage-class input must be rejected BEFORE Go BLOB materialization or KDF — ordinary Scan-then-len and row LIMIT alone are not positive proof |
+| 6 | Malformed/corrupt records | never panic, never invoke the KDF (private test seam/counter must not expose a production bypass, raw DB access, or alternate security anchor). Same-snapshot/same-record acceptance: a future concurrent row-change/check-fetch test at the actual typed boundary must show a record different from the validated one never reaches verification; no injected race window or production bypass is implied |
 | 7 | Valid fixed-set positive control | DOES reach verification — rejects the reject-everything stub |
 | 8 | Fresh verifier creation | distinct random salts; no plaintext persisted; no claim that randomness/performance ran now |
 | 9 | Storage/random failure | no partial successful admin/bootstrap state; no unrelated HTTP/issuer/listener/deployment acceptance claim |
 
 Source-inspection plausibility is explicitly separated from future executable tests:
 unit tests can validate exact compare-API use, but cannot prove whole-system constant-time
-timing under deployment.
+timing under deployment. Cases 5–6 boundary/snapshot assertions are mandatory FUTURE
+implementation tests/inspection requirements — all NOT_RUN; future IDKey arguments use the
+maintained API's own types (`uint32` time/memory/keyLen, `uint8` threads) with unchecked
+storage casts forbidden.
 
 ## 6. Gates and other decisions explicitly untouched
 

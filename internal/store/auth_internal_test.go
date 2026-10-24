@@ -691,17 +691,21 @@ func k2SwapOnOwnPool(ctx context.Context, db *sql.DB, pair []byte) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM admin_verifier WHERE id = 1`); err != nil {
-		tx.Rollback()
-		return err
+		// Surface the ORIGINAL Exec error AND the actual terminal
+		// Rollback outcome (errors.Join keeps both retrievable; a nil
+		// rollback error adds nothing). No swallowed terminal failure,
+		// no context-implied rollback.
+		return errors.Join(err, tx.Rollback())
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO admin_verifier (id, format_version, argon2_version, time_cost, memory_kib, parallelism, salt, derived_key)
 		 VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
 		authFormatVersion, authArgon2Version, authTimeCost, authMemoryKiB, authParallelism,
 		pair[:16], pair[16:]); err != nil {
-		tx.Rollback()
-		return err
+		return errors.Join(err, tx.Rollback())
 	}
+	// Success path unchanged: the ACTUAL tx.Commit result is the return;
+	// p.committed is appended by the caller ONLY after a real nil return.
 	return tx.Commit()
 }
 
@@ -711,14 +715,11 @@ func k2SwapOnOwnPool(ctx context.Context, db *sql.DB, pair []byte) error {
 // full generations across rounds, with zero mixed reads and both generations
 // observed. Mechanism, chain and honest limits: see the harness block above.
 func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
-	// Explicit protocol bound far below the 900 s outer shell timeout.
-	// Sized from MEASURED behavior (see the ATTEMPT LOG in the callback
-	// below): normal rounds commit in ~7 ms; the pathological WAL
-	// writer-lease round waits for the reader's read txn to end, which
-	// cannot happen while the owner blocks inside the synchronous
-	// callback — it unwinds only at ctx. 300 s bounds that unwind well
-	// inside the 900 s OUTER deadline so it surfaces as a FAIL with full
-	// logs, never as an outer kill (INCOMPLETE).
+	// Configured protocol bound, far below the 900 s outer shell
+	// timeout. These are CONFIGURED bounds only: the nested same-file
+	// operation can block or fail, and neither bound proves that every
+	// call or cleanup returns in time. An actual outer-deadline stop
+	// would be reported INCOMPLETE, never as a pass.
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	watch, stopWatch := deadlineWatcher(t)
@@ -904,49 +905,22 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 			if p.wantGen == 0 {
 				pair = pairA
 			}
-			// The production read holds a READONLY transaction open on
-			// the reader conn for the whole call, and the reader pool is
-			// narrowed to ONE physical conn — so the nested write could
-			// legitimately wait on the SQLite write lock if any
-			// scheduling variant let it start before the reader's read
-			// snapshot ended. Bounding this wait with the writer pool's
-			// OWN conn and its busy_timeout (test-only knob on a
-			// test-owned pool; production DSN untouched) means a
-			// pathological SQLITE_BUSY surfaces as a recorded commitErr
-			// that the owner asserts as a REAL FAIL — it can never hang
-			// into the 900 s outer deadline silently. This is a bound,
-			// not a claim of universal lock-freedom.
-			//
-			// MEASURED ATTEMPT LOG (raw JSONs in the task logs dir):
-			// run1 (busy_timeout 30 s, ctx 120 s): round 3 waited the
-			// FULL remaining ctx (swap wall time = 119.999 s) and died of
-			// "context deadline exceeded". run4 with busy_timeout 15 s:
-			// IDENTICAL 119.999 s wait — the timeout value provably does
-			// not bound this wait. Mechanism: in WAL the write lock is
-			// taken at BEGIN, but the WRITE HEADER requires the exclusive
-			// writer lease, which SQLite withholds while ANY reader holds
-			// an open read snapshot — the reader conn's readonly txn here,
-			// whose owner is blocked inside this synchronous callback.
-			// The lease cannot be granted before ctx unwinds the owner's
-			// own read; that releases the lease, the swap commits ~ms
-			// later, and Commit's ctx precheck (stdlib linearization)
-			// then honestly reports cancellation as commitErr => owner
-			// FAIL. busy_timeout is therefore NOT a fast-fail bound here,
-			// so it stays at the production DSN's own 5 s value (removed
-			// knob) and honesty comes from sizing ctx: 300 s protocol ctx
-			// unwinds the pathological round inside ~300 s, far from the
-			// 900 s outer kill. FINAL run5 (this exact source, exit 0):
-			// ALL 8 rounds committed in 6–8 ms — the lease starvation did
-			// NOT recur there; runs 1/2/4 reproduced it ONLY while this
-			// callback issued a 15–30 s busy_timeout PRAGMA override on the
-			// writer conn (observed correlation; the mechanism of that
-			// difference is NOT claimed). No timing assumption is baked
-			// in: the 300 s ctx bound makes any recurrence surface as a
-			// logged FAIL with full evidence, never as an outer kill.
-			// No PRAGMA re-knob: measured above to be irrelevant to this
-			// wait, and every writer-pool conn keeps the production DSN's
-			// own pragmas (busy_timeout 5 s / WAL) — test-only pool, but
-			// same opener, same settings.
+			// FACTS only (attempt logs live in the task evidence dir, not
+			// in source): a nested same-file write during the live read
+			// CAN block or fail; no snapshot/lock chronology or causal
+			// mechanism is established here. Historical attempts 1/2/4
+			// reached the then-120 s context at round 3 while the
+			// intermediate source contained an UNCONSUMED unauthorized
+			// QueryRowContext(PRAGMA...).Err() expression on the writer
+			// conn (that expression never Scan-consumed its row; stdlib
+			// Row.Err only returns a deferred error — it proved no knob
+			// effect; preserved as the recorded scope incident, NOT
+			// retro-approved). After its removal and the context change,
+			// the recorded attempts succeeded with ~6 ms swaps.
+			// CAUSATION / lock chronology / universal timing:
+			// NOT_ESTABLISHED. A late successful background Commit would
+			// be genuine success, not an error; a call blocked until the
+			// outer deadline is INCOMPLETE, never a pass.
 			t0 := time.Now()
 			err := k2SwapOnOwnPool(ctx, h.wdb, pair)
 			p.swapDur = time.Since(t0)

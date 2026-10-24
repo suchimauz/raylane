@@ -67,6 +67,22 @@ func OpenSecretStore(s *Store, keyPath string) (*SecretStore, error) {
 	return &SecretStore{store: s, keys: ks}, nil
 }
 
+// OpenSecretStoreUnderTrustedRootForTests is the same initialization boundary
+// with the package's documented test-only anchor seam (see
+// NewKeyStoreUnderTrustedRootForTests): unit tests establish a production-
+// policy-compliant trusted root descriptor without privilege. It is not a
+// product API and adds no policy exemption.
+func OpenSecretStoreUnderTrustedRootForTests(s *Store, anchorDir, keyPath string) (*SecretStore, error) {
+	if s == nil {
+		return nil, errors.New("store: secret store requires an opened store")
+	}
+	ks, err := NewKeyStoreUnderTrustedRootForTests(anchorDir, keyPath)
+	if err != nil {
+		return nil, err
+	}
+	return &SecretStore{store: s, keys: ks}, nil
+}
+
 // Seal stores plaintext under ref for the given purpose as an authenticated
 // immutable envelope and registers the reference in the existing secret_refs
 // metadata table, all in one transaction: either both rows exist or neither

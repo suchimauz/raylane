@@ -3,10 +3,12 @@ package store
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"fmt"
 	"io"
 	"os"
+	"path"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 )
 
@@ -15,10 +17,6 @@ import (
 // closed with ErrSecretAuth. Key rotation and multi-key lifecycle are NOT
 // implemented in T007 and are not claimed.
 const KeyVersion = 1
-
-// keyFileMode is the exact expected length of the master key file: one 256-bit
-// AES key, nothing else. There is no header, no padding and no KDF.
-const keyFileMode = os.FileMode(0600)
 
 // KeyStore opens and validates the service master key from the trusted,
 // service-configured location. The path is never request-supplied. Opening
@@ -30,61 +28,167 @@ type KeyStore struct {
 	ver int
 }
 
-// NewKeyStore opens the master key at path and validates the OPENED OBJECT,
-// not a prior path stat. It fails closed with ErrKeyUnavailable for:
-// missing/unreadable file, wrong length (not exactly 32 bytes), non-regular
-// file, a symlink at the final path component (O_NOFOLLOW rejects opening it
-// at all), group/world-readable permissions, or an owner other than the
-// effective service user. The parent directory must also be trusted: owned by
-// the same effective user and not group/world writable, so an untrusted
-// process cannot swap the key out from under the service. No key is ever
-// created, regenerated or logged here.
+// NewKeyStore opens the master key at an absolute path and establishes the
+// full trust chain DESCRIPTOR-RELATIVELY, closing the ancestor-symlink class
+// that a final O_NOFOLLOW open alone cannot cover:
+//
+//   - The trust anchor is the filesystem root "/". It is opened once with
+//     os.OpenRoot and is the kernel's own root identity for this process —
+//     an already-approved, non-forged anchor, not a re-declared parent.
+//   - Every path component below the anchor is opened with
+//     openat(O_NOFOLLOW|O_DIRECTORY) relative to the previously validated
+//     directory descriptor (os.Root semantics, verified in the Go 1.27.3
+//     stdlib: root_unix.go uses unix.Openat with O_NOFOLLOW at each step).
+//     A pathname is never followed between checks; there is no
+//     Lstat/EvalSymlinks-then-Open race.
+//   - Each opened ANCESTOR directory is validated on its own descriptor via
+//     fstat: must be a directory, not group/world writable, owned by the
+//     effective service user or root (the provisioning owner). Any symlink at
+//     ANY depth, a missing or non-directory component, or an unsafe owner or
+//     mode anywhere in the chain fails closed. World-writable sticky
+//     directories such as /tmp fail the write-bit check like any other.
+//   - The final key file is opened through its validated parent descriptor
+//     with O_NOFOLLOW, then fstat-validated: regular file, exactly 0600,
+//     owned by the effective user; content must be exactly 32 bytes.
+//
+// Every rejection is the same fixed secret-free ErrKeyUnavailable. No key is
+// ever created, regenerated or logged here. Relative paths have no anchor
+// and are rejected.
 func NewKeyStore(path string) (*KeyStore, error) {
-	// Reject a symlink at the final component before opening, then validate
-	// the object actually reached through the opened descriptor below.
-	fi, err := os.Lstat(path)
+	if !filepath.IsAbs(path) || runtime.GOOS == "windows" {
+		return nil, ErrKeyUnavailable
+	}
+	clean := filepath.Clean(path)
+	base := filepath.Base(clean)
+	if base == "." || base == ".." || base == "/" || base == string(filepath.Separator) {
+		return nil, ErrKeyUnavailable
+	}
+	// The key's own directory must exist and be reachable: the very first
+	// component of the chain is the directory the operator provisioned the
+	// key in, and its name must resolve (no hidden fallback locations).
+	if _, err := os.Stat(filepath.Dir(clean)); err != nil {
+		return nil, ErrKeyUnavailable
+	}
+
+	// Establish the production trust anchor: the process's filesystem root
+	// ("/"). open("/" ) cannot traverse any component, so the descriptor the
+	// kernel hands back IS the mount-namespace root identity — an already
+	// approved, non-forged anchor, requiring no new deployment decision. The
+	// chain below is walked strictly descriptor-relatively from it.
+	anchor, err := newAnchorRoot("/")
 	if err != nil {
 		return nil, ErrKeyUnavailable
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
+	defer anchor.Close()
+	if err := validateAnchor(anchor); err != nil {
 		return nil, ErrKeyUnavailable
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	return openKeyUnderRoot(anchor, clean)
+}
+
+// newAnchorRoot opens a directory as a descriptor-based os.Root anchor.
+func newAnchorRoot(dir string) (*os.Root, error) {
+	return os.OpenRoot(dir)
+}
+
+// validateAnchor enforces the same directory predicate on the anchor that
+// every other chain component faces: real directory, no group/world write,
+// owned by the effective service user or root (provisioning owner). On this
+// platform the "/" anchor is root-owned mode 0555 — it passes because it is
+// not writable by group or world, exactly like any service-owned directory.
+func validateAnchor(anchor *os.Root) error {
+	info, err := anchor.Stat(".") // fstat on the opened anchor fd
+	if err != nil || !trustedDirInfo(info) {
+		return ErrKeyUnavailable
+	}
+	return nil
+}
+
+// openKeyUnderRoot walks absPath (cleaned, absolute) descriptor-relatively
+// beneath an already-validated anchor root and returns the validated key
+// store. Production reaches it through NewKeyStore with the "/" anchor; the
+// package-private anchor variant lets a test establish its explicitly trusted
+// root descriptor (via NewKeyStoreUnderTrustedRootForTests) while enforcing
+// the IDENTICAL production policy on every component beneath it — no
+// sticky-/tmp or any other exemption exists.
+// pathComponents lists the non-empty components of a slash-separated
+// relative directory chain ("a/b/" -> ["a","b"]); the empty chain yields no
+// steps because the anchor descriptor is already the key directory.
+func pathComponents(relDir string) []string {
+	var out []string
+	for _, c := range strings.Split(strings.Trim(relDir, "/"), "/") {
+		if c != "" && c != "." {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func openKeyUnderRoot(anchor *os.Root, absPath string) (*KeyStore, error) {
+	return openKeyRelative(anchor, strings.TrimPrefix(absPath, "/"))
+}
+
+// openKeyRelative resolves the key directory and file beneath an already
+// validated anchor descriptor. Root.OpenRoot(name) is implemented by the
+// maintained stdlib as a chain of openat(O_NOFOLLOW|O_CLOEXEC) calls, one per
+// component, strictly relative to the previously opened descriptor
+// (os/root_unix.go openRootInRoot + doInRoot in the Go 1.27.3 sources, read
+// before relying on this): therefore a symlink at ANY ancestor is ELOOP/EMLINK
+// and an error, never a followed hop, and no pathname is re-resolved after a
+// check — there is no Lstat/EvalSymlinks-then-Open race. The parent is
+// additionally fstat-validated on ITS OWN fd before use, and the final object
+// is opened O_NOFOLLOW through that validated parent fd and fstat-checked.
+// Intermediate directory fds are closed as soon as the parent is reached.
+func openKeyRelative(anchor *os.Root, relKey string) (*KeyStore, error) {
+	relDir, base := path.Split(filepath.ToSlash(relKey))
+	if base == "" || base == "." || base == ".." {
+		return nil, ErrKeyUnavailable
+	}
+	// Validate EVERY directory descriptor in the chain, not only the final
+	// parent: open each component as its own Root and fstat it before moving
+	// one level deeper. Each Root.OpenRoot step is itself an
+	// openat(O_NOFOLLOW) resolution under the previously validated fd, so a
+	// symlink never becomes a followed hop and no checked descriptor is ever
+	// traded for a pathname re-resolution.
+	cur := anchor
+	var opened []*os.Root // every directory fd opened below the anchor, in order
+	defer func() {
+		for _, r := range opened {
+			r.Close()
+		}
+	}()
+	for _, comp := range pathComponents(relDir) {
+		next, err := cur.OpenRoot(comp)
+		if err != nil {
+			return nil, ErrKeyUnavailable
+		}
+		opened = append(opened, next)
+		ancestor, err := next.Stat(".") // fstat on THIS directory fd
+		if err != nil || !trustedDirInfo(ancestor) {
+			return nil, ErrKeyUnavailable
+		}
+		cur = next
+	}
+	parent := cur
+
+	// The final object is reached only through the validated parent
+	// descriptor; O_NOFOLLOW rejects even a trailing-component symlink, and
+	// O_NONBLOCK guarantees a FIFO can never block the open (fstat then
+	// rejects it as non-regular). A blocking-only open would hand a local
+	// attacker a pre-authorization hang on any path slot they can create.
+	f, err := parent.OpenFile(base, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, ErrKeyUnavailable
 	}
 	defer f.Close()
-
-	// Validate the opened descriptor itself (fstat): regular file, exact
-	// owner, no group/world access bits. A stat-then-open race cannot make us
-	// trust a different object, because these facts are about the fd we read.
-	st, err := f.Stat()
-	if err != nil {
-		return nil, ErrKeyUnavailable
-	}
-	if !st.Mode().IsRegular() {
+	st, err := f.Stat() // fstat on the opened fd, not a path stat
+	if err != nil || !st.Mode().IsRegular() {
 		return nil, ErrKeyUnavailable
 	}
 	if err := checkOwnedRegular(st.Mode(), st); err != nil {
 		return nil, err
 	}
-	// The trusted parent directory boundary: not group/world writable, and
-	// owned by the effective service user or root (the provisioning owner).
-	// A world-writable sticky directory such as the system /tmp fails the
-	// write-bit check even though root owns it, because any local process
-	// could swap the key file there.
-	di, err := os.Stat(parentDir(path))
-	if err != nil || !di.IsDir() {
-		return nil, ErrKeyUnavailable
-	}
-	if di.Mode().Perm()&0o022 != 0 {
-		return nil, ErrKeyUnavailable
-	}
-	if !trustedOwner(di) {
-		return nil, ErrKeyUnavailable
-	}
-
-	key, err := io.ReadAll(io.LimitReader(f, 33)) // one byte over the exact size suffices to detect "too long"
+	key, err := io.ReadAll(io.LimitReader(f, 33)) // one over exact size detects "too long"
 	if err != nil || len(key) != 32 {
 		return nil, ErrKeyUnavailable
 	}
@@ -97,6 +201,38 @@ func NewKeyStore(path string) (*KeyStore, error) {
 
 // Version reports the fixed key generation in use.
 func (k *KeyStore) Version() int { return k.ver }
+
+// NewKeyStoreUnderTrustedRootForTests opens a key below an explicitly
+// established trusted root descriptor. It exists ONLY so unit tests can set
+// up a fully production-policy-compliant chain without privilege (e.g. under
+// a process-local TMPDIR fixture) when the process filesystem root itself is
+// not owned/writable-compliant in the test environment. The policy enforced
+// on every component below the anchor is the same openKeyUnderRoot code path
+// production uses; this adds no exemption. It is not exported for the
+// product: no production call site may pass an arbitrary anchor.
+func NewKeyStoreUnderTrustedRootForTests(anchorDir, absKeyPath string) (*KeyStore, error) {
+	if !filepath.IsAbs(absKeyPath) || !filepath.IsAbs(anchorDir) || runtime.GOOS == "windows" {
+		return nil, ErrKeyUnavailable
+	}
+	clean := filepath.Clean(absKeyPath)
+	anchorClean := filepath.Clean(anchorDir)
+	rel, err := filepath.Rel(anchorClean, clean)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return nil, ErrKeyUnavailable
+	}
+	if _, err := os.Stat(filepath.Dir(clean)); err != nil {
+		return nil, ErrKeyUnavailable
+	}
+	anchor, err := newAnchorRoot(anchorClean)
+	if err != nil {
+		return nil, ErrKeyUnavailable
+	}
+	defer anchor.Close()
+	if err := validateAnchor(anchor); err != nil {
+		return nil, ErrKeyUnavailable
+	}
+	return openKeyRelative(anchor, rel)
+}
 
 // aead returns the established standard-library AEAD for this key:
 // AES-256-GCM with fresh random 96-bit nonces prepended by Seal and extracted
@@ -133,27 +269,20 @@ func checkOwnedRegular(mode os.FileMode, st os.FileInfo) error {
 	return nil
 }
 
-// trustedOwner accepts a directory owned by the effective service user or by
-// root (the provisioning owner of a service key location). Group/world write
-// is rejected separately by the caller's permission check.
-func trustedOwner(di os.FileInfo) bool {
+// trustedDirInfo validates one OPENED ancestor directory descriptor's fstat:
+// a real directory, not group/world writable (sticky /tmp included), owned by
+// the effective service user or root. This is the single policy predicate for
+// every component of the chain, tests included — there is no exemption.
+func trustedDirInfo(di os.FileInfo) bool {
+	if di == nil || !di.IsDir() {
+		return false
+	}
+	if di.Mode().Perm()&0o022 != 0 {
+		return false
+	}
 	sys, ok := di.Sys().(*syscall.Stat_t)
 	if !ok {
 		return runtime.GOOS == "windows"
 	}
 	return sys.Uid == uint32(os.Geteuid()) || sys.Uid == 0
 }
-
-func parentDir(path string) string {
-	for i := len(path); i > 0; i-- {
-		if path[i-1] == '/' {
-			if i == 1 {
-				return "/"
-			}
-			return path[:i-1]
-		}
-	}
-	return "."
-}
-
-var _ = fmt.Sprintf

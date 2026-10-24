@@ -375,23 +375,78 @@ func jsonNumber(v any) (int64, bool) {
 	return 0, false
 }
 
-// DiagnosticField names one allowlisted diagnostic entry. Diagnostics are
-// BUILT from explicitly allowed metadata — never by filtering serialized
-// arbitrary source configs and never by regex secret detection. Raw imported
-// URL credentials, unknown strings, free-form validation messages and
-// arbitrary nested objects must not be routed through this type by callers;
-// they are potentially sensitive and omission is safer than echoing.
-type DiagnosticField struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+// DiagnosticCode is the CLOSED vocabulary of diagnostic facts a caller may
+// report. The type is deliberately uncomparable to a bare string in normal
+// use and its set of valid members is fixed here; any other value — a cast
+// number, a cast arbitrary string, or a future unknown member — is rejected
+// fail-closed at construction. There is intentionally NO API surface that
+// accepts a caller-supplied string VALUE: outward text can only be a fixed
+// constant produced by this package from a validated code. Credential-bearing
+// imported URLs, config values, error text and free-form messages therefore
+// have no path into a diagnostic, without relying on caller comments,
+// regexes or blacklists.
+type DiagnosticCode string
+
+const (
+	// DiagConfigParseFailed: the stored document failed to parse.
+	DiagConfigParseFailed DiagnosticCode = "configParseFailed"
+	// DiagApplyPending: a validated revision has not been applied yet.
+	DiagApplyPending DiagnosticCode = "applyPending"
+	// DiagSecretMissing: a referenced sealed secret has no value row.
+	DiagSecretMissing DiagnosticCode = "secretMissing"
+)
+
+// diagnosticText is the package-owned wording for each code. It is the only
+// source of outward diagnostic text; callers can never contribute bytes.
+var diagnosticText = map[DiagnosticCode]string{
+	DiagConfigParseFailed: "configuration could not be parsed",
+	DiagApplyPending:      "configuration change is pending apply",
+	DiagSecretMissing:     "referenced secret is missing",
 }
 
-// BuildDiagnostic projects only the provided allowlisted fields under a
-// caller-fixed protocol; each value must already be a safe, nonsecret
-// constant the caller owns. Free-form error text and arbitrary config values
-// have no path through this function.
-func BuildDiagnostic(p *Profile, protocol string, allowed []DiagnosticField) map[string]any {
-	out := map[string]any{}
+// diagnosticFieldNames maps a code to the allowlisted declared profile field
+// whose known-string declaration authorizes carrying this fact. A code is
+// emitted only if the protocol actually declares that field as a known
+// string; nothing is invented outside the authored profile.
+// Diagnostic facts are carried by the "sni" known-string declaration purely
+// as a mechanism (carrier availability gate), NOT by trusting any field
+// value: no caller-supplied value ever flows through, and the emitted text
+// is the package constant for the code. This mapping is a profile-consuming
+// implementation choice, revisitable with a dedicated profile field in a
+// future contract change (out of this batch's paths).
+var diagnosticFieldNames = map[DiagnosticCode]string{
+	DiagConfigParseFailed: "sni",
+	DiagApplyPending:      "sni",
+	DiagSecretMissing:     "sni",
+}
+
+// isValid reports whether code belongs to the closed vocabulary. Casts of
+// unknown strings or numbers fail this test by definition.
+func (c DiagnosticCode) isValid() bool {
+	_, ok := diagnosticText[c]
+	return ok
+}
+
+// Diagnostic is one projected diagnostic entry: a fixed package constant,
+// never caller bytes.
+type Diagnostic struct {
+	Code  DiagnosticCode `json:"code"`
+	Value string         `json:"value"`
+}
+
+// BuildDiagnostic projects the supplied closed-vocabulary codes under the
+// caller-fixed protocol into a JSON-safe map. Rules, all fail-closed:
+//   - nil profile or undeclared protocol → empty result;
+//   - unknown / cast-in codes are skipped silently;
+//   - a code is emitted only where the authored profile declares its mapped
+//     field as a known string within its bounds; the VALUE is the package's
+//     own constant for that code.
+//
+// Because no parameter carries an arbitrary value, a credential-shaped or
+// any other caller string cannot enter the output even under a declared
+// known field such as server.
+func BuildDiagnostic(p *Profile, protocol string, codes []DiagnosticCode) map[string]Diagnostic {
+	out := map[string]Diagnostic{}
 	if p == nil {
 		return out
 	}
@@ -399,15 +454,20 @@ func BuildDiagnostic(p *Profile, protocol string, allowed []DiagnosticField) map
 	if !ok {
 		return out
 	}
-	for _, f := range allowed {
-		fs, declared := decl[f.Name]
-		if !declared || fs.Classification != "known" || fs.Type != "string" {
+	for _, code := range codes {
+		if !code.isValid() {
+			continue // unknown cast: fail closed, emit nothing
+		}
+		fname, mapped := diagnosticFieldNames[code]
+		fs, declared := decl[fname]
+		if !mapped || !declared || fs.Classification != "known" || fs.Type != "string" {
 			continue
 		}
-		if fs.MaxLength != nil && len(f.Value) > *fs.MaxLength {
+		text := diagnosticText[code]
+		if fs.MaxLength != nil && len(text) > *fs.MaxLength {
 			continue
 		}
-		out[f.Name] = f.Value
+		out[string(code)] = Diagnostic{Code: code, Value: text}
 	}
 	return out
 }

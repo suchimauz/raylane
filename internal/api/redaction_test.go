@@ -265,27 +265,69 @@ func TestInactiveFilteringBothDirections(t *testing.T) {
 	}
 }
 
-func TestDiagnosticsBuiltFromAllowlistOnly(t *testing.T) {
-	p := authoredProfile(t)
-	allowed := []api.DiagnosticField{
-		{Name: "server", Value: "diag.example"},        // declared known string
-		{Name: "uuid", Value: urlCredCanary},           // SECRET field -> must drop
-		{Name: "serverPort", Value: "443"},             // declared but not string -> drop
-		{Name: "freeForm", Value: urlCredCanary},       // unknown name -> drop
-		{Name: "sni", Value: strings.Repeat("x", 300)}, // over maxLength 253 -> drop
+// TestDiagnosticsClosedVocabulary covers T007-S2: the diagnostic API takes
+// only closed-vocabulary codes and emits ONLY package-owned constant text,
+// and only for protocols whose authored profile declares the mapped carrier
+// field as a known string. A credential-bearing caller string has no
+// parameter to travel through — even a forced cast of one is rejected.
+func TestDiagnosticsClosedVocabulary(t *testing.T) {
+	// Profile bytes with an explicit known-string carrier ("notes") so the
+	// mechanism itself is exercisable without touching the contracts file.
+	raw := `{"profileVersion":1,"protocols":{"p":{"fields":{"sni":{"type":"string","classification":"known","maxLength":253},"server":{"type":"string","classification":"known","maxLength":253},"uuid":{"type":"string","classification":"secret","secret":true}}}}}`
+	p, err := api.ParseCapabilityProfile([]byte(raw))
+	if err != nil {
+		t.Fatalf("profile: %v", err)
 	}
-	d := api.BuildDiagnostic(p, "vless", allowed)
-	out, _ := json.Marshal(d)
-	if bytes.Contains(out, []byte(urlCredCanary)) {
-		t.Fatalf("credential canary leaked via diagnostics: %s", out)
+	// The reviewer's exact attack class: an arbitrary credential-shaped
+	// string forced through DiagnosticCode must be an unknown code, dropped.
+	credential := api.DiagnosticCode("https://user:CANARY-PASSWORD@host.example")
+	got := api.BuildDiagnostic(p, "p", []api.DiagnosticCode{
+		api.DiagConfigParseFailed,
+		api.DiagApplyPending,
+		credential,
+		api.DiagnosticCode("42"),
+		api.DiagnosticCode(""),
+	})
+	out, _ := json.Marshal(got)
+	if bytes.Contains(out, []byte("CANARY-PASSWORD")) {
+		t.Fatalf("credential-shaped cast leaked: %s", out)
 	}
-	if d["server"] != "diag.example" {
-		t.Errorf("allowlisted diagnostic missing: %v", d)
+	// Only valid codes whose carrier is declared are emitted, with fixed text.
+	if len(got) != 2 {
+		t.Fatalf("expected exactly the 2 valid codes, got %v", got)
 	}
-	for _, drop := range []string{"uuid", "serverPort", "freeForm", "sni"} {
-		if _, ok := d[drop]; ok {
-			t.Errorf("non-allowlisted diagnostic %s present", drop)
+	if e, ok := got[string(api.DiagConfigParseFailed)]; !ok || e.Code != api.DiagConfigParseFailed || e.Value == "" {
+		t.Errorf("valid code missing or valueless: %v", got)
+	}
+	// Value bytes come from the package, never the caller.
+	for _, e := range got {
+		if strings.Contains(e.Value, "CANARY") {
+			t.Fatalf("caller bytes in emitted value: %v", e)
 		}
+	}
+	// Unknown protocol still emits nothing (fail-closed preserved).
+	if d := api.BuildDiagnostic(p, "nope", []api.DiagnosticCode{api.DiagApplyPending}); len(d) != 0 {
+		t.Errorf("unknown protocol emitted diagnostics: %v", d)
+	}
+	// The REAL authored profile: carriers exist only where the field is
+	// declared known-string (vless/http declare sni; socks5/wireguard do
+	// not), so emission is profile-gated and codes never invent fields.
+	ap := authoredProfile(t)
+	if d := api.BuildDiagnostic(ap, "socks5", []api.DiagnosticCode{api.DiagConfigParseFailed}); len(d) != 0 {
+		t.Errorf("socks5 has no carrier yet emitted %v", d)
+	}
+	if d := api.BuildDiagnostic(ap, "vless", []api.DiagnosticCode{api.DiagConfigParseFailed}); len(d) != 1 {
+		t.Errorf("vless carrier declared yet emitted %v", d)
+	}
+	for _, e := range api.BuildDiagnostic(ap, "vless", []api.DiagnosticCode{api.DiagConfigParseFailed, api.DiagSecretMissing}) {
+		if e.Value == "" {
+			t.Errorf("empty package text: %v", e)
+		}
+	}
+	// JSON shape is plain and value-bearing codes never alias caller input.
+	var back map[string]api.Diagnostic
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("diagnostics not plain json: %v", err)
 	}
 }
 
@@ -294,7 +336,7 @@ func TestNilProfileAndNilGuards(t *testing.T) {
 	if _, err := api.ProjectNodeFields(p, "vless", map[string]any{"server": "x"}, nil, nil); err == nil {
 		t.Error("nil profile must fail closed")
 	}
-	if d := api.BuildDiagnostic(p, "vless", []api.DiagnosticField{{Name: "server", Value: "x"}}); len(d) != 0 {
+	if d := api.BuildDiagnostic(p, "vless", []api.DiagnosticCode{api.DiagApplyPending}); len(d) != 0 {
 		t.Error("nil profile diagnostics must be empty")
 	}
 }

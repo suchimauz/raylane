@@ -33,13 +33,7 @@ func keyDir(t *testing.T) string {
 	if d, ok := keyDirs[t.Name()]; ok {
 		return d
 	}
-	d := t.TempDir()
-	// The secret-store boundary requires a trusted (non group/world
-	// writable) key directory; t.TempDir inherits the process umask, so
-	// fixture directories used as key locations get explicit safe perms.
-	if err := os.Chmod(d, 0o700); err != nil {
-		t.Fatalf("chmod keydir: %v", err)
-	}
+	d := trustedDir(t) // trusted chain (see key_access_test.go), no /tmp exemption
 	keyDirs[t.Name()] = d
 	return d
 }
@@ -89,11 +83,20 @@ func closeStore(t *testing.T, dbPath string) error {
 func openSecretsAt(t *testing.T, dbPath, kdir string) *store.SecretStore {
 	t.Helper()
 	s := storeFor(t, dbPath)
-	ss, err := store.OpenSecretStore(s, writeKeyFile(t, kdir, "master.key", validTestKey(), 0o600))
+	keyPath := writeKeyFile(t, kdir, "master.key", validTestKey(), 0o600)
+	ss, err := openSecretStoreAt(t, s, keyPath)
 	if err != nil {
 		t.Fatalf("OpenSecretStore: %v", err)
 	}
 	return ss
+}
+
+// openSecretStoreAt initializes the secret store under the explicitly
+// established trusted test-anchor (same policy code path as production
+// NewKeyStore; see key_access_test.go openKeyStore comment).
+func openSecretStoreAt(t *testing.T, s *store.Store, keyPath string) (*store.SecretStore, error) {
+	t.Helper()
+	return store.OpenSecretStoreUnderTrustedRootForTests(s, testRoot, keyPath)
 }
 
 func openSecrets(t *testing.T) (*store.SecretStore, string) {
@@ -307,7 +310,7 @@ func TestTamperAndForeignKeyFailClosed(t *testing.T) {
 	altKey := make([]byte, 32)
 	copy(altKey, validTestKey())
 	altKey[0] ^= 0xa5
-	ssWrong, err := store.OpenSecretStore(s3, writeKeyFile(t, kdir2, "alt.key", altKey, 0o600))
+	ssWrong, err := openSecretStoreAt(t, s3, writeKeyFile(t, kdir2, "alt.key", altKey, 0o600))
 	if err != nil {
 		t.Fatalf("OpenSecretStore(wrong key): %v", err)
 	}
@@ -401,7 +404,7 @@ func TestV1DatabaseUpgradesWithoutRewritingCore(t *testing.T) {
 		t.Fatalf("upgrade open: %v", err)
 	}
 	t.Cleanup(func() { s2.Close() })
-	ss, err := store.OpenSecretStore(s2, writeKeyFile(t, keyDir(t), "up.key", validTestKey(), 0o600))
+	ss, err := openSecretStoreAt(t, s2, writeKeyFile(t, keyDir(t), "up.key", validTestKey(), 0o600))
 	if err != nil {
 		t.Fatalf("OpenSecretStore after upgrade: %v", err)
 	}
@@ -429,4 +432,51 @@ func readCoreSnapshotForTests(t *testing.T, ctx context.Context, s *store.Store)
 		t.Fatalf("read core snapshot: %v", err)
 	}
 	return doc, created
+}
+
+// TestSamePlaintextTwoRefsDistinctEnvelopes is the committed nonce regression
+// (T007-C1): sealing the SAME synthetic plaintext under the same key and
+// purpose for two distinct refs must produce distinct random nonces and
+// distinct full envelopes, and both must decrypt to the original plaintext.
+// This is the stdlib cipher.NewGCMWithRandomNonce representation: every blob
+// begins with its own fresh 96-bit nonce (GCM tag size 16, so overhead 28).
+func TestSamePlaintextTwoRefsDistinctEnvelopes(t *testing.T) {
+	ctx := context.Background()
+	ss, dbPath := openSecrets(t)
+	plaintext := []byte("SAME-PLAINTEXT-NONCE-CANARY-1a2b")
+	refA, refB := store.NewSecretRef(), store.NewSecretRef()
+	if err := ss.Seal(ctx, refA, testSecretPurpose, plaintext); err != nil {
+		t.Fatalf("Seal A: %v", err)
+	}
+	if err := ss.Seal(ctx, refB, testSecretPurpose, plaintext); err != nil {
+		t.Fatalf("Seal B: %v", err)
+	}
+	blobA := readEnvelopeBlobForTests(t, ctx, storeFor(t, dbPath), refA)
+	blobB := readEnvelopeBlobForTests(t, ctx, storeFor(t, dbPath), refB)
+	const nonceLen = 12
+	if len(blobA) != len(plaintext)+28 || len(blobB) != len(plaintext)+28 {
+		t.Fatalf("unexpected envelope size: %d %d", len(blobA), len(blobB))
+	}
+	if bytes.Equal(blobA[:nonceLen], blobB[:nonceLen]) {
+		t.Fatal("identical random nonces for two seals of the same plaintext")
+	}
+	if bytes.Equal(blobA, blobB) {
+		t.Fatal("identical ciphertext envelopes for two seals of the same plaintext")
+	}
+	for i, ref := range []domain.SecretRef{refA, refB} {
+		got, err := ss.Open(ctx, ref, testSecretPurpose)
+		if err != nil || !bytes.Equal(got, plaintext) {
+			t.Fatalf("Open ref %d: %q %v", i, got, err)
+		}
+	}
+}
+
+func readEnvelopeBlobForTests(t *testing.T, ctx context.Context, s *store.Store, ref domain.SecretRef) []byte {
+	t.Helper()
+	var blob []byte
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT blob FROM sealed_secrets WHERE ref = ? AND purpose = ?`, ref, testSecretPurpose).Scan(&blob); err != nil {
+		t.Fatalf("read envelope: %v", err)
+	}
+	return blob
 }

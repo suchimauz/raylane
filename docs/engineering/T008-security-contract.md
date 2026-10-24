@@ -32,8 +32,13 @@ which is explicitly a **placeholder**), `docs/engineering/foundation-decisions.m
   is one atomic transaction with **exactly one concurrent winner** (per accepted contract
   text for `/bootstrap`).
 - **Vetted Argon2id** only (maintained library); no homemade crypto or PHC parsers.
-- **Secure / HttpOnly / SameSite session cookie + CSRF/origin checks + rate bounds** per
-  accepted FR-019/FR-021 guarantees.
+- **Secure / HttpOnly / SameSite session cookie + CSRF/origin checks + rate bounds** —
+  directly accepted from `research.md` R-06 ("серверные sessions с Secure/HttpOnly/SameSite
+  cookie, CSRF/origin checks, idle/absolute expiry, rate limits") and repeated in the
+  accepted OpenAPI `/session` (login) description ("sets a secure, HttpOnly, SameSite
+  session cookie"); FR-019/FR-021 give the general auth guarantees but are not the precise
+  attribution for these cookie flags. The generic requirement is accepted; the exact
+  `SameSite=Strict` value, `Path=/api/v1` and host-only form remain C4 candidates (see §3).
 - Session **idle 900 s**; reads, polling and long editing do **not** extend it; **absolute
   43200 s** regardless of activity; control-plane **restart requires login again**.
 - **D5**: expiry/re-login/restart never discard unsaved editor state; it stays only in
@@ -65,8 +70,12 @@ architecture. Reviewer/reviewer-report recommendations are not runtime proof.
 
 ## 3. BLOCKED rows — decisions this draft must NOT make
 
-Each row names the source limitation and the smallest decision required. None is resolved
-here; several need Chief Architect / public-contract or deployment authority.
+**Eight** decision rows below, PLUS one separate pre-existing gate: any future root
+`go.mod`/`go.sum` addition of the scoped `golang.org/x/crypto v0.58.0` requires its own
+explicit dependency-path authorization (§4.4). That gate is already blocked elsewhere and
+is listed here once for bundle clarity — it is NOT a ninth technical decision and this
+draft grants nothing. None of the rows is resolved here; several need Chief Architect /
+public-contract or deployment authority.
 
 | Row | Why BLOCKED | Smallest decision required | Authority |
 | --- | --- | --- | --- |
@@ -75,8 +84,8 @@ here; several need Chief Architect / public-contract or deployment authority.
 | Trusted local bootstrap issuance proof / wiring (C3) | "Issuer = already-approved protected local channel" is architecturally placed, but the concrete trusted issuance/wiring proof (who writes the token, through what verified path, how a request proves issuance locality) is not specified by currently accepted sources. | Specify the issuance boundary and its verification evidence. | Chief Architect / deployment boundary |
 | TLS listener / bind / cert provisioning shape | A TLS minimum-1.3 config constructor is mechanics, but exact listener/bind/certificate provisioning and configuration shape creates a new deployment decision beyond the approved architecture text. | Freeze listener/bind/config/cert-source shape before any `cmd/raylane` wiring path is authorized. | Chief Architect / deployment |
 | Session-storage capacity / admission policy (C4) | An upper bound on concurrent process-local sessions is an unresolved bounded-resource choice; any number silently adopted would be an invented product limit or implicit active-session eviction. | Pick an explicit capacity + admission behavior (reject-new vs evict-oldest vs documented unbounded-risk) in a reviewed decision. | Orchestrator after 03B/04 review (bounded-resource choice) |
-| KDF encoded-record encoding (C1) | Typed versioned metadata is accepted as sufficient in principle, but the exact unambiguous encoding is explicitly "reviewed before code" and is not fixed by accepted sources. | Review and freeze the encoding format (field layout, lengths, version tag). | Independent 03B/04 review |
-| Session cookie creation/deletion/rotation mechanics and client-visible differences (C4) | Accepted guarantees fix attributes (Secure/HttpOnly/SameSite, name `raylane_session` in current placeholder scheme) but not rotation/delete semantics; any client-visible difference is contract-affecting. | Review rotation/delete semantics against the placeholder scheme; amend contract if visible. | 03B/04 + contract authority |
+| KDF encoded-record encoding (C1) | Typed versioned metadata is accepted as sufficient in principle, but the exact unambiguous encoding is explicitly "reviewed before code" and is not fixed by accepted sources. | Review and freeze the encoding format (field layout, lengths, version tag). The encoding must be WRITTEN, FROZEN and independently REVIEWED BEFORE any future KDF source is authorized — including any test-only encoder. No code is authorized now. | Independent 03B/04 review |
+| Session cookie creation/deletion/rotation mechanics and client-visible semantics (C4) | Accepted guarantees fix the generic Secure/HttpOnly/SameSite requirement (R-06 + login prose) and the current placeholder name `raylane_session`, but NOT the exact C4 candidates — `SameSite=Strict` value, `Path=/api/v1`, host-only form — nor rotation/delete semantics; any client-visible difference is contract-affecting. | Review the exact C4 attribute candidates and rotation/delete semantics against the placeholder scheme; amend the contract if client-visible. | 03B/04 + contract authority |
 | `foundation-execution-decision.md` provenance gap | The current decisions file references `docs/engineering/foundation-execution-decision.md`, which is absent from the repository. Its content is NOT reconstructed or guessed here; the explicit D5 text and accepted OpenAPI invariants remain authoritative. | Restore/locate the referenced decision or amend the reference. | Document owner / Orchestrator bookkeeping |
 
 ## 4. Smallest prospective implementation paths (plan only — NOT permission to edit)
@@ -117,7 +126,7 @@ dependent on unresolved §3 mechanics are BLOCKED until those decisions exist.
 | 1 | Bootstrap exactly-one-winner | two concurrent bootstrap requests, same token → exactly one 204, one 409/403; consume+admin+`bootstrapConsumed` atomic; no partial row |
 | 2 | Permanent non-reopen | after successful bootstrap every later attempt (same token, new token, restart) refused; closure permanent, not session-scoped |
 | 3 | Token expiry/replay refusals | expired → 403; consumed replay refused; unknown → generic error, no oracle |
-| 4 | Password hashing | stored value Argon2id with bounded params, per-record salt, hash metadata; constant-time compare; plaintext never in DB/WAL, logs, errors, responses |
+| 4 | Password hashing | stored value Argon2id with bounded params, per-record salt, hash metadata; constant-time compare; plaintext never in DB/WAL, logs, errors, responses. Plus: malformed/corrupt/unsupported/oversized stored verifier metadata → generic refusal, **no panic**, rejected BEFORE any KDF work; a valid fixed-set record still reaches verification. Enforced by fixed metadata validation against the allowed parameter set — not a custom parser and not a catch-all recover |
 | 5 | Negative/generic errors | wrong user vs wrong password indistinguishable 401s; no user-existence oracle |
 | 6 | Bounded rate/concurrency | admission limiter bounds concurrent verifications and memory; excess refused generically; no unbounded goroutine/memory growth under N attempts (public mapping per BLOCKED §3) |
 | 7 | Token rotation/logout | session delete invalidates; rotation issues new hash-only token, old rejected; tokens stored hash-only |
@@ -125,7 +134,7 @@ dependent on unresolved §3 mechanics are BLOCKED until those decisions exist.
 | 9 | Idle 900 s / absolute 43200 s (fake clock) | injected clock expires exactly at boundaries, equality counts expired; no sleeps |
 | 10 | Reads/polling do not extend | repeated reads t=0..899 s leave idle deadline unmoved; a classified activity event moves it per accepted rule only |
 | 11 | CSRF/Origin | missing/incorrect CSRF material and foreign Origin refused; same-origin + accepted mechanism passes (mechanism per BLOCKED §3) |
-| 12 | Cookie attributes | HttpOnly, Secure, SameSite, Path `/api/v1`, host-only; no secret material beyond the opaque token |
+| 12 | Cookie attributes | ACCEPTED and asserted: HttpOnly, Secure, SameSite (generic per R-06/login prose). CONDITIONAL on the reviewed C4/cookie decision: exact `SameSite=Strict` value, `Path=/api/v1`, host-only form — not accepted merely from the base URL. No secret material beyond the opaque token; no new cookie/public behavior introduced here |
 | 13 | TLS config refusal | insecure LAN/non-TLS world-reachable configuration fails to construct (config-level only) |
 | 14 | Body bounds | `/session` 4096 and `/bootstrap` 8192 enforced, 413 beyond, matching contract values |
 | 15 | Canary non-leak | canary password/token absent from every response body, error text, and persisted DB/WAL bytes |

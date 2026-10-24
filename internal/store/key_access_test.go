@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -11,81 +12,86 @@ import (
 	"github.com/suchimauz/raylane/internal/store"
 )
 
-// testRoot is the process-local trusted fixture root, established once: the
-// caller (check runner) exports TMPDIR to a mode-0700 euid-owned directory
-// under this repository's ignored scratch area; testRoot re-derives and
-// re-secures it so the whole t.TempDir() chain stays production-policy
-// compliant (no sticky-/tmp segment anywhere).
-var testRoot = mustTestRoot()
-
-func mustTestRoot() string {
-	base := os.Getenv("TMPDIR")
-	if base == "" {
-		panic("store tests require TMPDIR set to a private 0700 fixture directory (see check log)")
-	}
-	fi, err := os.Lstat(base)
-	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		panic("TMPDIR fixture root must be a real non-symlinked directory")
-	}
-	if err := os.Chmod(base, 0o700); err != nil {
-		panic("chmod fixture root: " + err.Error())
-	}
-	return base
+// Fixture ownership (T007-C2). Every fixture directory is created FRESH by
+// this test code under a base it owns; modes are set ONLY on fresh, empty,
+// euid-owned directories the test just created. NOTHING pre-existing is ever
+// chmodded — not the caller's TMPDIR (nor the platform default /tmp when
+// TMPDIR is unset), not /home, not workspace parents, not /. The
+// production "/"-anchored chain policy therefore runs UNCHANGED over these
+// fixtures on an ordinary unprivileged user: on this class of hosts the walk
+// is / (0755 root) → /home (0755 root) → /home/<user> (0700-0750 euid) →
+// fresh test dirs (0700 euid). A fixture that cannot satisfy the predicate
+// is a test failure, never an exemption or a chmod of a shared directory.
+// homeFixtureDir returns a fresh, private, policy-compliant chain BELOW the
+// effective user's home directory (itself an ordinary user-owned directory,
+// never chmodded). t.TempDir() is deliberately NOT the fixture root: when
+// TMPDIR is unset it lands under 1777 /tmp, which the production policy
+// rejects by design (world-writable sticky), and "fixing" /tmp would mutate a
+// shared directory the test does not own. Creating the fixture under the
+// user's own home needs no privilege and mutates nothing shared.
+var homeBaseOnce struct {
+	sync.Once
+	dir string
+	err error
 }
 
-// All fixtures here are synthetic test data under ordinary user permissions
-// inside t.TempDir(): no /etc or service paths, no privilege, no real
-// credentials. The bytes below are a throwaway test key, never a secret of
-// any system.
-
-// trustedDir returns a fresh directory that satisfies the production trust
-// policy for the WHOLE chain: every ancestor of t.TempDir() is forced
-// non group/world writable. Run the suite with TMPDIR pointed at a
-// mode-0700, euid-owned, non-symlinked directory of this workspace so the
-// root->...->fixture chain contains no sticky /tmp segment (recorded in the
-// check evidence). This is fixture hygiene, not a policy exemption: the
-// product-side walk enforces the same predicate on every component.
-func trustedDir(t *testing.T) string {
+func homeFixtureBase(t *testing.T) string {
 	t.Helper()
-	d := t.TempDir()
-	if err := os.Chmod(d, 0o700); err != nil {
-		t.Fatalf("chmod fixture dir: %v", err)
-	}
-	for a := filepath.Dir(d); a != "/" && a != "."; a = filepath.Dir(a) {
-		fi, err := os.Lstat(a)
+	homeBaseOnce.Do(func() {
+		home, err := os.UserHomeDir()
 		if err != nil {
-			t.Fatalf("lstat ancestor: %v", err)
+			homeBaseOnce.err = err
+			return
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			t.Fatalf("TMPDIR chain ancestor %s is a symlink; set TMPDIR to a real 0700 dir", a)
-		}
-		if fi.Mode().Perm()&0o022 != 0 {
-			// Only this process's own temp chain is adjusted; never / or
-			// other users' directories (chmod would fail there anyway).
-			if err := os.Chmod(a, 0o755); err != nil {
-				t.Fatalf("chmod ancestor %s: %v", a, err)
+		// Read-validate (never modify) the pre-existing chain the production
+		// walk will face, so a non-conforming host fails with a precise
+		// message instead of a confusing per-test rejection.
+		for dir := home; ; dir = filepath.Dir(dir) {
+			fi, err := os.Stat(dir)
+			if err != nil {
+				homeBaseOnce.err = err
+				return
+			}
+			if fi.Mode().Perm()&0o022 != 0 {
+				homeBaseOnce.err = errors.New("home chain ancestor " + dir +
+					" is group/world writable; fixture host not compliant")
+				return
+			}
+			if dir == "/" {
+				break
 			}
 		}
+		homeBaseOnce.dir = home
+	})
+	if homeBaseOnce.err != nil {
+		t.Fatalf("home fixture base: %v", homeBaseOnce.err)
+	}
+	return homeBaseOnce.dir
+}
+
+// trustedDir returns a fresh fixture directory (0700, euid-owned, empty at
+// creation) under the home-based fixture base. Its whole chain satisfies the
+// production predicate WITHOUT any shared-directory mutation, so tests open
+// keys through the real production NewKeyStore.
+func trustedDir(t *testing.T) string {
+	t.Helper()
+	base := homeFixtureBase(t)
+	d, err := os.MkdirTemp(base, "d")
+	if err != nil {
+		t.Fatalf("fixture mkdir: %v", err)
+	}
+	if err := os.Chmod(d, 0o700); err != nil { // fresh, empty, ours
+		t.Fatalf("chmod fresh fixture: %v", err)
 	}
 	return d
 }
 
-// openKeyStore opens the key at absPath enforcing the full production policy
-// under the explicitly established trusted test-root descriptor (the process
-// workspace fixture root, 0700 euid-owned, no symlinks). All chain
-// components below the root face the identical production predicate; this is
-// the documented test-only anchor seam in the package, never a product path.
+// openKeyStore calls the PRODUCTION constructor directly: fixtures are
+// production-compliant from "/" down, and no alternate-anchor seam exists in
+// the package (removed as T007-S1 required).
 func openKeyStore(t *testing.T, absPath string) (*store.KeyStore, error) {
 	t.Helper()
-	return store.NewKeyStoreUnderTrustedRootForTests(testRootForFixtures(t), absPath)
-}
-
-func testRootForFixtures(t *testing.T) string {
-	t.Helper()
-	if err := os.Setenv("TMPDIR", testRoot); err != nil { // recorded in evidence
-		t.Fatalf("set process-local TMPDIR: %v", err)
-	}
-	return testRoot
+	return store.NewKeyStore(absPath)
 }
 
 func writeKeyFile(t *testing.T, dir, name string, data []byte, mode os.FileMode) string {
@@ -128,14 +134,8 @@ func TestKeyStoreFailsClosedOnUnsafeOrMissingKeys(t *testing.T) {
 	dir := trustedDir(t)
 	// A trusted intermediate holding the unsafe FINAL-object fixtures: the
 	// key files themselves carry the unsafe properties under test.
-	sub := filepath.Join(dir, "h")
-	if err := os.Mkdir(sub, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	symlinkDir := filepath.Join(dir, "lnk")
-	if err := os.Mkdir(symlinkDir, 0o700); err != nil { // trusted, for the positive-target fixture
-		t.Fatalf("mkdir symlinkdir: %v", err)
-	}
+	sub := trustedSubDir(t, dir, "h")
+	symlinkDir := trustedSubDir(t, dir, "lnk") // trusted, holds positive targets
 
 	cases := []struct {
 		name  string
@@ -256,44 +256,80 @@ func TestKeyStoreRoundtripUsesOpenedObject(t *testing.T) {
 	}
 }
 
-// TestKeyStoreTrustChainAncestors covers T007-S1: the trust chain is
-// established descriptor-relatively from the process filesystem-root anchor,
-// so a symlink at ANY ancestor depth, an unsafe ancestor directory, or a
-// non-directory component fails closed. Positive control: a valid multi-level
-// nested path under the trusted chain still opens.
+func trustedSubDir(t *testing.T, parent, name string) string {
+	t.Helper()
+	d := filepath.Join(parent, name)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatalf("mkdir fixture subdir: %v", err)
+	}
+	if err := os.Chmod(d, 0o700); err != nil { // fresh, empty, ours
+		t.Fatalf("chmod fixture subdir: %v", err)
+	}
+	return d
+}
+
+// TestKeyStoreTrustChainAncestors covers T007-S1 with the DISTINGUISHING
+// pair the reviewer's vector demands: on the SAME secure chain, a valid
+// nested path must open (positive control) while the identical path reached
+// through a CONTAINED RELATIVE symlink (linked -> real, both inside the
+// trusted fixture tree, both 0700 euid-owned — the followed target is itself
+// perfectly "safe") must be REJECTED. A rejection caused only by an unsafe
+// target proves nothing about symlinks; here the only difference between the
+// opening path and the refusing path is that one literal component is a
+// symbolic link. Additional negatives: absolute link, higher relative link,
+// writable ancestor, non-directory component, missing component, relative
+// spelling.
 func TestKeyStoreTrustChainAncestors(t *testing.T) {
 	dir := trustedDir(t)
-	// Real, safe location for the key.
-	realDir := filepath.Join(dir, "real")
-	if err := os.Mkdir(realDir, 0o700); err != nil {
-		t.Fatalf("mkdir real: %v", err)
-	}
+	realDir := trustedSubDir(t, dir, "real")
 	key := writeKeyFile(t, realDir, "master.key", validTestKey(), 0o600)
 
-	// Positive control: valid trusted nested path opens under the test anchor.
+	// Positive control on the SAME chain (nested trusted path): opens.
 	if ks, err := openKeyStore(t, key); err != nil || ks == nil {
 		t.Fatalf("trusted nested path rejected: %v", err)
 	}
 
-	link := filepath.Join(dir, "linked")
-	if err := os.Symlink(realDir, link); err != nil {
-		t.Fatalf("symlink: %v", err)
+	// RELATIVE contained symlink: linked -> "real" (relative target!). The
+	// followed directory is the very same 0700 euid real dir whose direct
+	// path JUST opened above. os.Root.OpenRoot accepted this spelling; the
+	// raw openat(O_NOFOLLOW) walk must not.
+	linked := filepath.Join(dir, "linked")
+	if err := os.Symlink("real", linked); err != nil {
+		t.Fatalf("symlink relative: %v", err)
 	}
-	// Higher ancestor symlink: .../linked/master.key (immediate parent via link)
-	immediate := filepath.Join(link, "master.key")
-	// Deeper: link2 -> dir, then link2/real/master.key (higher ancestor in path)
-	link2 := filepath.Join(dir, "deep")
-	if err := os.Symlink(dir, link2); err != nil {
-		t.Fatalf("symlink deep: %v", err)
+	relativeLinked := filepath.Join(linked, "master.key")
+
+	// ABSOLUTE symlink to the same real dir.
+	absLink := filepath.Join(dir, "abslink")
+	if err := os.Symlink(realDir, absLink); err != nil {
+		t.Fatalf("symlink absolute: %v", err)
 	}
-	deeper := filepath.Join(link2, "real", "master.key")
+	absoluteLinked := filepath.Join(absLink, "master.key")
+
+	// Higher relative ancestor link: deep -> "." then deep/real/master.key.
+	deep := filepath.Join(dir, "deep")
+	if err := os.Symlink(".", deep); err != nil {
+		t.Fatalf("symlink higher: %v", err)
+	}
+	deeper := filepath.Join(deep, "real", "master.key")
+
+	// Final-component symlink: link.key -> real.key inside a trusted dir.
+	finalDir := trustedSubDir(t, dir, "fd")
+	realKey := writeKeyFile(t, finalDir, "real.key", validTestKey(), 0o600)
+	finalLink := filepath.Join(finalDir, "link.key")
+	if err := os.Symlink("real.key", finalLink); err != nil {
+		t.Fatalf("symlink final: %v", err)
+	}
+	if _, err := openKeyStore(t, realKey); err != nil {
+		t.Fatalf("positive control (real key in same dir) rejected: %v", err)
+	}
 
 	notDir := writeKeyFile(t, dir, "notadir", []byte("x"), 0o600) // used as a path component
 	loose := filepath.Join(dir, "loose")
 	if err := os.Mkdir(loose, 0o700); err != nil {
 		t.Fatalf("mkdir loose: %v", err)
 	}
-	if err := os.Chmod(loose, 0o777); err != nil { // world-writable ancestor
+	if err := os.Chmod(loose, 0o777); err != nil { // fresh dir, unsafe by design
 		t.Fatalf("chmod loose: %v", err)
 	}
 	nested := filepath.Join(loose, "deep2")
@@ -305,8 +341,10 @@ func TestKeyStoreTrustChainAncestors(t *testing.T) {
 	cases := []struct {
 		name, path string
 	}{
-		{"immediate-symlink-parent", immediate},
-		{"higher-symlink-ancestor", deeper},
+		{"relative-contained-symlink-ancestor", relativeLinked},
+		{"absolute-symlink-ancestor", absoluteLinked},
+		{"higher-relative-symlink-ancestor", deeper},
+		{"final-component-symlink", finalLink},
 		{"writable-ancestor", hiddenKey},
 		{"non-directory-component", filepath.Join(notDir, "master.key")},
 		{"missing-component", filepath.Join(dir, "nope", "master.key")},
@@ -324,9 +362,10 @@ func TestKeyStoreTrustChainAncestors(t *testing.T) {
 		})
 	}
 
-	// The exact reviewer repro (symlinked parent accepted before the fix):
+	// The exact reviewer repro (contained relative symlinked parent accepted
+	// by the os.Root-based walk before this fix):
 	t.Run("reviewer-repro-linked-parent", func(t *testing.T) {
-		if _, err := openKeyStore(t, immediate); err == nil {
+		if _, err := openKeyStore(t, relativeLinked); err == nil {
 			t.Fatal("symlinked parent path was accepted")
 		}
 	})
@@ -335,8 +374,8 @@ func TestKeyStoreTrustChainAncestors(t *testing.T) {
 // TestKeyStoreFinalObjectCannotHangOrLeak: a FIFO at the final path slot
 // must fail closed immediately (O_NONBLOCK makes the open non-blocking; the
 // fstat then rejects the non-regular object). Repeated opens across a deep
-// chain must not leak directory descriptors: an intermediate fd is closed by
-// the caller's cleanup exactly once.
+// chain must not leak directory descriptors: every fd the walk opens is
+// closed exactly once on every path.
 func TestKeyStoreFinalObjectCannotHangOrLeak(t *testing.T) {
 	dir := trustedDir(t)
 	fifo := filepath.Join(dir, "fifo.key")
@@ -357,14 +396,56 @@ func TestKeyStoreFinalObjectCannotHangOrLeak(t *testing.T) {
 		t.Fatal("FIFO final component blocked the key open (pre-auth hang)")
 	}
 	// fd-exhaustion smoke: 200 sequential deep opens complete.
-	deep := filepath.Join(dir, "chain", "a", "b")
-	if err := os.MkdirAll(deep, 0o700); err != nil {
-		t.Fatalf("mkdir deep: %v", err)
+	cur := dir
+	for _, name := range []string{"chain", "a", "b"} {
+		cur = filepath.Join(cur, name)
+		if err := os.Mkdir(cur, 0o700); err != nil {
+			t.Fatalf("mkdir deep: %v", err)
+		}
+		if err := os.Chmod(cur, 0o700); err != nil { // fresh, empty, ours
+			t.Fatalf("chmod deep: %v", err)
+		}
 	}
+	deep := cur
 	k := writeKeyFile(t, deep, "k.key", validTestKey(), 0o600)
 	for i := 0; i < 200; i++ {
 		if _, err := openKeyStore(t, k); err != nil {
 			t.Fatalf("open %d: %v", i, err)
 		}
+	}
+}
+
+// TestFixturesDoNotMutateSharedDirectories is the reproducibility guard for
+// T007-C2: an ordinary unprivileged `go test ./internal/store` run (TMPDIR
+// set or unset) must open production-valid key fixtures WITHOUT changing the
+// modes of any directory it does not own. The test snapshots /tmp (or the
+// caller TMPDIR) and $HOME before creating fixtures and re-reads them after:
+// any mode change to a shared pre-existing directory is a fixture bug.
+func TestFixturesDoNotMutateSharedDirectories(t *testing.T) {
+	tmp := os.TempDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+	modeOf := func(p string) os.FileMode {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		return fi.Mode().Perm()
+	}
+	beforeTmp, beforeHome := modeOf(tmp), modeOf(home)
+
+	d := trustedDir(t)
+	k := writeKeyFile(t, d, "master.key", validTestKey(), 0o600)
+	if _, err := openKeyStore(t, k); err != nil {
+		t.Fatalf("production fixture open failed: %v", err)
+	}
+
+	if got := modeOf(tmp); got != beforeTmp {
+		t.Fatalf("test changed mode of shared temp dir %s: %o -> %o", tmp, beforeTmp, got)
+	}
+	if got := modeOf(home); got != beforeHome {
+		t.Fatalf("test changed mode of shared home %s: %o -> %o", home, beforeHome, got)
 	}
 }

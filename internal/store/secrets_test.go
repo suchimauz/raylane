@@ -91,12 +91,13 @@ func openSecretsAt(t *testing.T, dbPath, kdir string) *store.SecretStore {
 	return ss
 }
 
-// openSecretStoreAt initializes the secret store under the explicitly
-// established trusted test-anchor (same policy code path as production
-// NewKeyStore; see key_access_test.go openKeyStore comment).
+// openSecretStoreAt initializes the secret store through the PRODUCTION
+// constructor: fixtures are production-policy-compliant under the real "/"
+// chain (fresh, test-owned directories only — see key_access_test.go), and
+// no alternate-anchor seam exists in the package anymore.
 func openSecretStoreAt(t *testing.T, s *store.Store, keyPath string) (*store.SecretStore, error) {
 	t.Helper()
-	return store.OpenSecretStoreUnderTrustedRootForTests(s, testRoot, keyPath)
+	return store.OpenSecretStore(s, keyPath) // production initialization boundary
 }
 
 func openSecrets(t *testing.T) (*store.SecretStore, string) {

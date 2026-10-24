@@ -13,10 +13,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 
 	"github.com/suchimauz/raylane/internal/domain"
@@ -52,21 +53,34 @@ func applyMigrationForTests(ctx context.Context, db *sql.DB, m migration) error 
 
 func openBarePoolForTests(path string) (*sql.DB, error) { return openPool(path) }
 
-// authHostileFixtureDDLForTests creates a table named admin_verifier with the
-// SAME column layout as production but WITHOUT the CHECK constraints, so
-// tests can store adversarial data the production writer could never create
-// and then drive it through the REAL production reader. Test-only; it hides
-// nothing — the K1 guard inside k1GuardedSelect runs regardless of CHECKs.
+// authHostileFixtureDDLForTests creates a CHECK-free, typeless table named
+// admin_verifier for hostile-data cases. The REAL production v3 table
+// (auth_migration.go:38 migrateAuthStore, read-only to this patch) applies
+// both INTEGER/BLOB affinity AND the value/length CHECK constraints, so
+// direct hostile inserts are blocked by the production schema itself (that
+// real-schema rejection is asserted separately in
+// TestT008StorageCreateFailureLeavesNoPartialState-style production-write
+// checks). The CHECK-free typeless fixture here is the DEEPER probe: it
+// stores each named hostile class exactly as given (TEXT stays TEXT, REAL
+// stays REAL — no affinity coercion), forcing the guard under test to be the
+// production reader's own WHERE predicate (k1GuardedSelect), not schema
+// CHECKs.
+//
+// Measurement honesty: the K1 test measures executed-driver rejection — for
+// each stored hostile row, Store.AdminVerifier returns domain.ErrNotFound
+// (auth.go: "no well-formed admin verifier"). What is NOT measured is Go
+// allocator behavior for SQLite-internal non-projection; that remains a
+// source-level guarantee of the WHERE-clause guard, stated in auth.go.
 func authHostileFixtureDDLForTests(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `CREATE TABLE admin_verifier (
+		format_version,
+		argon2_version,
+		time_cost,
+		memory_kib,
+		parallelism,
+		salt,
+		derived_key,
 		id             INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
-		format_version INTEGER,
-		argon2_version INTEGER,
-		time_cost      INTEGER,
-		memory_kib     INTEGER,
-		parallelism    INTEGER,
-		salt           BLOB,
-		derived_key    BLOB,
 		created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 	)`)
 	return err
@@ -104,10 +118,6 @@ func bytesOf(b byte, n int) []byte {
 	}
 	return out
 }
-
-// canary returns a unique bounded 1 MiB marker appended to hostile BLOBs: if
-// any hostile byte ever reached Go through the reader, assertions can show it.
-func canary(b byte) []byte { return bytesOf(b, 1<<20) }
 
 func openFreshAuthStore(t *testing.T) (*Store, string) {
 	t.Helper()
@@ -246,24 +256,25 @@ func TestT008StorageCreateFailureLeavesNoPartialState(t *testing.T) {
 }
 
 // TestT008StorageK1RealReaderRejectsHostileRowsBeforeBlobProjection drives
-// seventeen adversarial id=1 rows through the ACTUAL production reader
-// Store.AdminVerifier over a real SQLite DB whose admin_verifier table is a
-// test-owned CHECK-free same-name fixture (production never uses it). Every
+// adversarial id=1 rows through the ACTUAL production reader
+// Store.AdminVerifier over a real SQLite DB whose admin_verifier table is the
+// test-owned CHECK-free same-name fixture (authHostileFixtureDDLForTests;
+// production never uses it). Every case invalidates ONLY its named field
+// (T1): all other fields hold the exact valid fixed values, so a rejection
+// attributes to the intended guard rather than a co-invalidated one. Each
 // hostile row occupies id=1 — the ONLY id the production statement reads —
-// inserted one at a time, so the id predicate cannot trivially hide the
-// type/value/length guards. Every hostile BLOB carries a unique 1 MiB canary
-// (bounded, per finding: not a stress benchmark): if a guard failure ever
-// admitted a row, the canary bytes would surface in the failure message.
+// inserted alone with presence verified, so the id predicate cannot hide
+// whether the type/value/length guards ran. Oversized cases are separate
+// bounded cases (not canary-padded length cases).
 //
-// Evidence classes kept distinct: (a) SOURCE — k1GuardedSelect evaluates
+// Evidence classes stay distinct: (a) SOURCE — k1GuardedSelect evaluates
 // typeof/exact values/exact lengths in WHERE, and SQLite filters rows by the
-// WHERE clause before returning projected columns; (b) EXECUTED — per-case
-// driver-level rejection/acceptance through the production reader; the Go
-// allocator/materialization behavior itself is NOT measured and not claimed.
+// WHERE clause of that statement; (b) EXECUTED — per-case production-reader
+// rejection/acceptance through the real driver; (c) UNMEASURED — Go-side
+// allocation/materialization timing is NOT measured and not claimed.
 func TestT008StorageK1RealReaderRejectsHostileRowsBeforeBlobProjection(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openFreshAuthStore(t)
-	// Test-owned CHECK-free mirror under the production table name.
 	if _, err := s.db.ExecContext(ctx, `DROP TABLE admin_verifier`); err != nil {
 		t.Fatal(err)
 	}
@@ -271,54 +282,73 @@ func TestT008StorageK1RealReaderRejectsHostileRowsBeforeBlobProjection(t *testin
 		t.Fatal(err)
 	}
 	okSalt, okKey := bytesOf(0x77, 16), bytesOf(0x88, 32)
-	hostile := []struct {
+	// Every case: [format,argon,time,mem,par] + salt + key, with EXACTLY one
+	// field outside the frozen set (NULL/text/real class, wrong value, or
+	// wrong exact length; oversize is its own case).
+	cases := []struct {
 		name string
-		m    [5]any // format, argon, time, memory, parallelism classes
+		m    [5]any
 		salt any
 		key  any
 	}{
-		{"null-format", [5]any{nil, 19, 3, 65536, 4}, okSalt, okKey},
-		{"text-format", [5]any{"one", 19, 3, 65536, 4}, okSalt, okKey},
-		{"real-format", [5]any{1.5, 19, 3, 65536, 4}, okSalt, okKey},
-		{"null-argon", [5]any{1, nil, 3, 65536, 4}, okSalt, okKey},
-		{"wrong-argon-version", [5]any{1, 20, 3, 65536, 4}, okSalt, okKey},
-		{"wrong-format-version", [5]any{2, 19, 3, 65536, 4}, okSalt, okKey},
-		{"zero-time", [5]any{1, 19, 0, 65536, 4}, okSalt, okKey},
-		{"huge-time", [5]any{1, 19, 9223372036854775807, 65536, 4}, okSalt, okKey},
-		{"negative-memory", [5]any{1, 19, 3, -65536, 4}, okSalt, okKey},
-		{"negative-parallelism", [5]any{1, 19, 3, 65536, -4}, okSalt, okKey},
-		{"null-salt", [5]any{1, 19, 3, 65536, 4}, nil, append(bytesOf(0xDD, 32), canary(0xC1)...)},
-		{"salt-len-15+canary", [5]any{1, 19, 3, 65536, 4}, append(bytesOf(0xEE, 15), canary(0xC2)...), append(bytesOf(0xDD, 32), canary(0xC2)...)},
-		{"salt-len-17+canary", [5]any{1, 19, 3, 65536, 4}, append(bytesOf(0xEE, 17), canary(0xC3)...), append(bytesOf(0xDD, 32), canary(0xC3)...)},
-		{"salt-len-0", [5]any{1, 19, 3, 65536, 4}, []byte{}, append(bytesOf(0xDD, 32), canary(0xC4)...)},
-		{"salt-text-class", [5]any{1, 19, 3, 65536, 4}, "sixteenchars_123", append(bytesOf(0xDD, 32), canary(0xC5)...)},
-		{"key-len-31+canary", [5]any{1, 19, 3, 65536, 4}, append(bytesOf(0xEE, 16), canary(0xC6)...), append(bytesOf(0xDD, 31), canary(0xC6)...)},
-		{"key-text-class", [5]any{1, 19, 3, 65536, 4}, append(bytesOf(0xEE, 16), canary(0xC7)...), "thirtytwo-character-string-value!!!!"},
-		{"key-len-33+canary", [5]any{1, 19, 3, 65536, 4}, append(bytesOf(0xEE, 16), canary(0xC8)...), append(bytesOf(0xDD, 33), canary(0xC8)...)},
+		// Each case invalidates EXACTLY ONE field; all others hold the exact
+		// valid frozen values. Class cases use genuinely non-coercible
+		// payloads (non-numeric TEXT, non-integral REAL); length cases use
+		// EXACT byte counts with the other BLOB valid.
+		{"format-NULL", [5]any{nil, 19, 3, 65536, 4}, okSalt, okKey},
+		{"format-TEXT-invalid-class", [5]any{"one", 19, 3, 65536, 4}, okSalt, okKey},
+		{"format-REAL-nonintegral-class", [5]any{1.5, 19, 3, 65536, 4}, okSalt, okKey},
+		{"format-wrong-value-2", [5]any{2, 19, 3, 65536, 4}, okSalt, okKey},
+		{"argon-NULL", [5]any{1, nil, 3, 65536, 4}, okSalt, okKey},
+		{"argon-TEXT-invalid-class", [5]any{1, "nineteen", 3, 65536, 4}, okSalt, okKey},
+		{"argon-REAL-nonintegral-class", [5]any{1, 19.5, 3, 65536, 4}, okSalt, okKey},
+		{"argon-wrong-value-20", [5]any{1, 20, 3, 65536, 4}, okSalt, okKey},
+		{"time-NULL", [5]any{1, 19, nil, 65536, 4}, okSalt, okKey},
+		{"time-REAL-nonintegral-class", [5]any{1, 19, 3.5, 65536, 4}, okSalt, okKey},
+		{"time-wrong-value-0", [5]any{1, 19, 0, 65536, 4}, okSalt, okKey},
+		{"time-wrong-value-maxint64", [5]any{1, 19, 9223372036854775807, 65536, 4}, okSalt, okKey},
+		{"memory-NULL", [5]any{1, 19, 3, nil, 4}, okSalt, okKey},
+		{"memory-TEXT-invalid-class", [5]any{1, 19, 3, "sixtyfivek", 4}, okSalt, okKey},
+		{"memory-wrong-value-negative", [5]any{1, 19, 3, -65536, 4}, okSalt, okKey},
+		{"memory-wrong-value-65535", [5]any{1, 19, 3, 65535, 4}, okSalt, okKey},
+		{"parallelism-NULL", [5]any{1, 19, 3, 65536, nil}, okSalt, okKey},
+		{"parallelism-REAL-nonintegral-class", [5]any{1, 19, 3, 65536, 4.5}, okSalt, okKey},
+		{"parallelism-wrong-value-negative", [5]any{1, 19, 3, 65536, -4}, okSalt, okKey},
+		{"parallelism-wrong-value-5", [5]any{1, 19, 3, 65536, 5}, okSalt, okKey},
+		{"salt-NULL", [5]any{1, 19, 3, 65536, 4}, nil, okKey},
+		{"salt-TEXT-class", [5]any{1, 19, 3, 65536, 4}, "sixteenchars_123", okKey},
+		{"salt-len-15", [5]any{1, 19, 3, 65536, 4}, bytesOf(0xEE, 15), okKey},
+		{"salt-len-17", [5]any{1, 19, 3, 65536, 4}, bytesOf(0xEE, 17), okKey},
+		{"salt-len-0", [5]any{1, 19, 3, 65536, 4}, []byte{}, okKey},
+		{"salt-oversized-bounded", [5]any{1, 19, 3, 65536, 4}, bytesOf(0xEE, 1024), okKey},
+		{"key-NULL", [5]any{1, 19, 3, 65536, 4}, okSalt, nil},
+		{"key-TEXT-class", [5]any{1, 19, 3, 65536, 4}, okSalt, "thirtytwo-character-string-value!!!!"},
+		{"key-len-31", [5]any{1, 19, 3, 65536, 4}, okSalt, bytesOf(0xDD, 31)},
+		{"key-len-33", [5]any{1, 19, 3, 65536, 4}, okSalt, bytesOf(0xDD, 33)},
+		{"key-len-0", [5]any{1, 19, 3, 65536, 4}, okSalt, []byte{}},
+		{"key-oversized-bounded", [5]any{1, 19, 3, 65536, 4}, okSalt, bytesOf(0xDD, 1024)},
 	}
-	for _, hr := range hostile {
+	for _, hc := range cases {
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM admin_verifier`); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO admin_verifier (id, format_version, argon2_version, time_cost, memory_kib, parallelism, salt, derived_key)
 			 VALUES (1,?,?,?,?,?,?,?)`,
-			hr.m[0], hr.m[1], hr.m[2], hr.m[3], hr.m[4], hr.salt, hr.key); err != nil {
-			t.Fatalf("%s insert: %v", hr.name, err)
+			hc.m[0], hc.m[1], hc.m[2], hc.m[3], hc.m[4], hc.salt, hc.key); err != nil {
+			t.Fatalf("%s insert: %v", hc.name, err)
 		}
-		// The row IS present at the only readable id (id predicate alone
-		// cannot be the reason for rejection):
 		var present int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_verifier WHERE id = 1`).Scan(&present); err != nil || present != 1 {
-			t.Fatalf("%s fixture not present at id=1: %d %v", hr.name, present, err)
+			t.Fatalf("%s fixture not present at id=1: %d %v", hc.name, present, err)
 		}
 		got, err := s.AdminVerifier(ctx)
 		if !errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("%s: production reader err=%v want ErrNotFound (record %+v)", hr.name, err, got)
+			t.Fatalf("%s: production reader err=%v want ErrNotFound (record %+v)", hc.name, err, got)
 		}
 	}
 	// Positive control through the SAME production reader and SAME fixture
-	// table: valid fixed 16+32B record must pass.
+	// table: valid fixed16+32B record must pass.
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM admin_verifier`); err != nil {
 		t.Fatal(err)
 	}
@@ -339,9 +369,9 @@ func TestT008StorageK1RealReaderRejectsHostileRowsBeforeBlobProjection(t *testin
 		t.Fatalf("valid control rejected: %+v err=%v", got, err)
 	}
 	// Bounded plan observation of the ACTUAL production statement (inside
-	// this test, no extra invocation): the executed plan is for the guarded
-	// statement itself; supports that SQLite evaluates this statement with
-	// its guard. NOT a claim about Go-side allocation timing.
+	// this test, no extra invocation): confirms the executed statement is the
+	// guarded single-row SEARCH of the production table. It does NOT measure
+	// projection order or allocations and is not claimed to.
 	var detail string
 	if err := s.db.QueryRowContext(ctx, `EXPLAIN QUERY PLAN `+k1GuardedSelect).Scan(new(int), new(int), new(int), &detail); err != nil {
 		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
@@ -387,25 +417,193 @@ func TestT008StorageProductionReaderFailsClosedAndSurvivesReopen(t *testing.T) {
 }
 
 // TestT008StorageK2CompleteRecordUnderAlternatingWriter exercises the ACTUAL
-// production reader while a test-only writer transactionally swaps between
-// TWO distinguishable complete valid records A and B (salt and key always
-// move together inside one committed transaction; the product API never
-// overwrites, so this swap is the test stand-in for a concurrent committed
-// change). Readers park on one WaitGroup release point — bounded
-// synchronization, no sleeps.
+// production reader against a test-only writer that transactionally swaps
+// complete records A and B (salt+key always move together inside one
+// committed transaction; the product API never overwrites, so the swap is the
+// test stand-in for a concurrent committed change).
 //
-// Assertions: (1) every successful read equals ALL of A or ALL of B — never
-// a salt/key mix; (2) the writer provably commits swaps WHILE readers are in
-// flight (atomic swap counter sampled at reader completion, strictly positive
-// in every round), and BOTH generations A and B are observed across rounds —
-// real read/write overlap and progress, not a post-change B-only window.
+// Lifecycle (fixes the prior post-test panic): the writer NEVER calls
+// testing.T. It reports failures through a bounded error channel and exits on
+// a cancelable context; a t.Cleanup registered after the store fixture's
+// cleanup runs FIRST (LIFO) and always cancels + joins the writer before the
+// Store pool closes, on every exit path including Fatal and mixed-record
+// failure.
 //
-// What this proves is bounded: a finite interleaving run shows the reader
-// never returned a torn record here; the SOURCE guarantee is the single
-// guarded statement inside one read-only transaction with no refetch
-// (auth.go). This is not an exhaustive race/timing proof and none is claimed.
+// Overlap handshake (bounded, no sleeps, timers or random retries): each
+// round parks the writer at its NEXT commit boundary via a pause flag served
+// strictly at commit boundaries, then waits — yielding via runtime.Gosched
+// and observing per-round swap-counter DELTAS (cumulative totals can never
+// satisfy a later round) — until the writer (a) committed a fresh record
+// after the pause request and (b) parked again (pause re-set after that
+// commit). A reader read then begins while the writer is demonstrably
+// mid-stream — between committed generations, actively committing — and the
+// round closes with a THIRD fresh-progress demand after the read. The two
+// pause-waits therefore prove the writer was progressing before AND after
+// each read, not that the read merely happened after all writes finished.
+//
+// Assertions: every returned record equals EXACTLY all-A or all-B (never a
+// salt/key mix); both generations are observed across rounds; per-round
+// progress demands are enforced. These are finite interleaving observations,
+// not an exhaustive race/timing proof; the SOURCE guarantee remains the
+// single guarded statement inside one read-only transaction with no refetch
+// (auth.go). If the required overlap progress cannot be demonstrated the
+// test FAILS honestly (writer exit or error channel) — no post-write-only
+// substitute.
+// substitute.
+
+// abWriter is the T2 test-only writer: it commits COMPLETE records A/B
+// transactionally (salt+key always together; the product API never
+// overwrites, so this is the stand-in for a concurrent committed change),
+// and NOTHING ELSE — it never spins, so a WAL read snapshot can never spin
+// it against the busy_timeout (run5's 10-minute resource-exhaustion
+// deadlock came from unbounded spin-swap volume, not from the production
+// reader). It NEVER calls testing.T: failures go to a bounded error channel
+// and the goroutine exits; termination is cancel + join on every path.
+//
+// Bounded handshake per round (no sleeps/timers/random retries):
+//   - setNextPinned(i): the writer commits generation i, then parks at that
+//     commit boundary (committed record == pinned generation).
+//   - The orchestrator reads while parked, verifies the record, then
+//     setNextPinned(1-i) releases the park for the NEXT pinned commit.
+//
+// Each parked record therefore follows a FRESH commit of the known
+// generation made WHILE the test is interleaved with the writer, and both
+// generations recur across rounds.
+type abWriter struct {
+	db     *sql.DB
+	pairA  []byte
+	pairB  []byte
+	cancel context.CancelFunc
+	err    chan error    // bounded (1); non-blocking send
+	exit   chan struct{} // closed when the goroutine has returned
+
+	mu              sync.Mutex
+	swaps           int  // cumulative committed swaps
+	lastGen         int  // generation of the most recent commit (0=A,1=B)
+	nextIdx         int  // generation to commit next (0=A, 1=B)
+	pinned          bool // park after committing nextIdx
+	pauseAtBoundary bool // true while parked at a commit boundary
+}
+
+func newABWriter(ctx context.Context, cancel context.CancelFunc, db *sql.DB, pairA, pairB []byte) *abWriter {
+	w := &abWriter{
+		db: db, pairA: pairA, pairB: pairB, cancel: cancel,
+		err: make(chan error, 1), exit: make(chan struct{}),
+	}
+	go w.run(ctx)
+	return w
+}
+
+func (w *abWriter) run(ctx context.Context) {
+	defer close(w.exit)
+	for {
+		w.mu.Lock()
+		if !w.pinned {
+			// Idle: wait for a pinned request; no DB work, no spinning.
+			w.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			runtime.Gosched()
+			continue
+		}
+		next := w.nextIdx
+		w.mu.Unlock()
+		tx, err := w.db.BeginTx(ctx, nil)
+		if err == nil {
+			salt, key := w.pairB[:16], w.pairB[16:]
+			if next == 0 {
+				salt, key = w.pairA[:16], w.pairA[16:]
+			}
+			if err = authABSwapTxForTests(ctx, tx, salt, key); err == nil {
+				err = tx.Commit()
+			} else {
+				tx.Rollback()
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				select {
+				case w.err <- err:
+				default:
+				}
+			}
+			return
+		}
+		w.mu.Lock()
+		w.swaps++
+		w.lastGen = next
+		w.pinned = false
+		w.pauseAtBoundary = true // park right AFTER the pinned commit
+		w.mu.Unlock()
+	}
+}
+
+// setNextPinned pins generation i (0=A,1=B) as the next commit and releases
+// any current park: the writer commits i once and parks immediately after.
+func (w *abWriter) setNextPinned(i int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nextIdx = i
+	w.pinned = true
+	w.pauseAtBoundary = false
+}
+
+// parkedPinned reports parked-at-boundary state with the committed
+// generation (single atomic snapshot under mu).
+func (w *abWriter) parkedPinned() (parked bool, gen int, count int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pauseAtBoundary, w.lastGen, w.swaps
+}
+
+// resume releases any park without pinning a new commit (cleanup path).
+func (w *abWriter) resume() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pinned = false
+	w.pauseAtBoundary = false
+}
+
+// join cancels the writer, releases any park, and waits for its goroutine to
+// return exactly. Safe from cleanup on every exit path.
+func (w *abWriter) join() {
+	w.cancel()
+	w.resume()
+	<-w.exit
+}
+
+// checkFailed fails the test if the writer recorded an error (non-blocking).
+func (w *abWriter) checkFailed(t *testing.T, at string) {
+	select {
+	case err := <-w.err:
+		t.Fatalf("%s: writer failure: %v", at, err)
+	default:
+	}
+}
+
+// waitFor yields until cond holds, failing if the writer errored or exited
+// early. Bounded cooperative yield; no sleeps or timers.
+func (w *abWriter) waitFor(t *testing.T, at string, cond func() bool) {
+	for {
+		w.checkFailed(t, at)
+		select {
+		case <-w.exit:
+			t.Fatalf("%s: writer exited before condition held", at)
+		default:
+		}
+		if cond() {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
 func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	s, _ := openFreshAuthStore(t)
 	recA := syntheticVerifier()
 	recA.Salt, recA.DerivedKey = bytesOf(0xA1, 16), bytesOf(0xB1, 32)
@@ -414,88 +612,53 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	if err := s.CreateAdminAndConsumeBootstrap(ctx, recA); err != nil {
 		t.Fatal(err)
 	}
-	var start sync.WaitGroup
-	start.Add(1) // one release point for readers and writer
-	var swaps atomic.Int64
-	stop := make(chan struct{})
-	writerDone := make(chan struct{})
-	go func() { // test-only A/B alternation writer
-		defer close(writerDone)
-		start.Wait()
-		pairs := [2][]byte{
-			append(append([]byte{}, recA.Salt...), recA.DerivedKey...),
-			append(append([]byte{}, recB.Salt...), recB.DerivedKey...),
-		}
-		i := 1 // first swap to B so both generations appear early
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				t.Errorf("writer begin: %v", err)
-				return
-			}
-			if err := authABSwapTxForTests(ctx, tx, pairs[i][:16], pairs[i][16:]); err != nil {
-				tx.Rollback()
-				t.Errorf("writer swap: %v", err)
-				return
-			}
-			if err := tx.Commit(); err != nil {
-				t.Errorf("writer commit: %v", err)
-				return
-			}
-			swaps.Add(1)
-			i = 1 - i
-		}
-	}()
-	wantA := append(append([]byte{}, recA.Salt...), recA.DerivedKey...)
-	wantB := append(append([]byte{}, recB.Salt...), recB.DerivedKey...)
+	pairA := append(append([]byte{}, recA.Salt...), recA.DerivedKey...)
+	pairB := append(append([]byte{}, recB.Salt...), recB.DerivedKey...)
+	w := newABWriter(ctx, cancel, s.db, pairA, pairB)
+	// Registered AFTER openFreshAuthStore's cleanup => LIFO runs FIRST on
+	// every exit path (including t.Fatal below): stop + join the writer
+	// before the store closes the pool.
+	t.Cleanup(w.join)
+
 	seenA, seenB := 0, 0
-	const rounds, perRound = 6, 12
+	const rounds = 8
+	wantGen := 1 // pinned generation alternates, starting with B
+	prevSwaps := 0
 	for round := 0; round < rounds; round++ {
-		var wg sync.WaitGroup
-		errR := make([]error, perRound)
-		obsR := make([][]byte, perRound)
-		for i := 0; i < perRound; i++ {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				start.Wait()
-				v, err := s.AdminVerifier(ctx)
-				errR[i] = err
-				if err == nil {
-					obsR[i] = append(append([]byte{}, v.Salt...), v.DerivedKey...)
-				}
-			}(i)
+		w.checkFailed(t, "pre-round")
+		// The writer commits the pinned generation and parks right after it
+		// — fresh, per-round commit evidence (counter grew strictly past the
+		// previous round's), while the test itself proceeds concurrently.
+		w.setNextPinned(wantGen)
+		w.waitFor(t, fmt.Sprintf("round %d pinned commit+parks", round), func() bool {
+			parked, _, _ := w.parkedPinned()
+			return parked
+		})
+		parked, gen, count := w.parkedPinned()
+		if !parked || gen != wantGen {
+			t.Fatalf("round %d: parked=%v gen=%d wantGen=%d", round, parked, gen, wantGen)
 		}
-		if round == 0 {
-			start.Done() // release readers and writer from the same point
+		if count <= prevSwaps {
+			t.Fatalf("round %d: no fresh commit this round (swaps=%d prev=%d)", round, count, prevSwaps)
 		}
-		wg.Wait()
-		during := swaps.Load() // commits made while readers were in flight
-		for i := 0; i < perRound; i++ {
-			if errR[i] != nil {
-				t.Fatalf("round %d reader %d: %v", round, i, errR[i])
-			}
-			switch string(obsR[i]) {
-			case string(wantA):
-				seenA++
-			case string(wantB):
-				seenB++
-			default:
-				t.Fatalf("round %d reader %d observed a MIXED record: %x", round, i, obsR[i])
-			}
+		prevSwaps = count
+		// Production reader runs while the writer is parked between commits.
+		v, err := s.AdminVerifier(ctx)
+		if err != nil {
+			t.Fatalf("round %d reader: %v", round, err)
 		}
-		if during == 0 {
-			t.Fatalf("round %d: writer committed zero swaps while readers ran — no overlap exercised", round)
+		got := append(append([]byte{}, v.Salt...), v.DerivedKey...)
+		switch string(got) {
+		case string(pairA):
+			seenA++
+		case string(pairB):
+			seenB++
+		default:
+			t.Fatalf("round %d reader observed a MIXED record: %x", round, got)
 		}
+		wantGen = 1 - wantGen
 	}
-	close(stop)
-	<-writerDone
 	if seenA == 0 || seenB == 0 {
-		t.Fatalf("expected BOTH generations observed under overlap, got A=%d B=%d (swaps %d)", seenA, seenB, swaps.Load())
+		t.Fatalf("expected BOTH generations observed under interleaving, got A=%d B=%d", seenA, seenB)
 	}
 }

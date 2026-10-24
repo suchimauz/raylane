@@ -22,6 +22,9 @@ type migration struct {
 // appending a new higher version; existing steps never change.
 var migrations = []migration{
 	{Version: 1, Name: "core-config", Apply: migrateCore},
+	// T007 appends the secret-store step; the core migration above stays
+	// byte-unchanged and applied v1 databases upgrade transactionally.
+	{Version: 2, Name: "secret-store", Apply: migrateSecretStore},
 }
 
 const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (

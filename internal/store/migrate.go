@@ -25,6 +25,9 @@ var migrations = []migration{
 	// T007 appends the secret-store step; the core migration above stays
 	// byte-unchanged and applied v1 databases upgrade transactionally.
 	{Version: 2, Name: "secret-store", Apply: migrateSecretStore},
+	// T008 (storage-only) appends the auth-store step; steps 1 and 2 stay
+	// byte-unchanged and any applied database upgrades transactionally.
+	{Version: 3, Name: "auth-store", Apply: migrateAuthStore},
 }
 
 const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (

@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"net/url"
 )
 
 // migrateAuthStore is the T008 storage-only schema step (version 3). It only
@@ -58,34 +57,4 @@ func migrateAuthStore(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return nil
-}
-
-// OpenLegacyV1V2ForTests opens a database with ONLY migrations 1 and 2
-// applied — a faithful stand-in for a pre-T008 installation. Tests then reopen
-// it through Open to prove the v3 upgrade is transactional and preserves all
-// prior data. Test support inside the allowed file set only; production always
-// goes through Open.
-func OpenLegacyV1V2ForTests(ctx context.Context, path string) (*Store, error) {
-	dsn := "file:" + url.PathEscape(path) +
-		"?_pragma=busy_timeout(5000)" +
-		"&_pragma=foreign_keys(1)" +
-		"&_pragma=journal_mode(WAL)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
-	}
-	s := &Store{db: db}
-	if _, err := db.ExecContext(ctx, schemaMigrationsDDL); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := applyMigration(ctx, db, migrations[0]); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := applyMigration(ctx, db, migrations[1]); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return s, nil
 }

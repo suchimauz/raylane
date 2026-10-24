@@ -58,58 +58,44 @@ const k1GuardedSelect = `SELECT format_version, argon2_version, time_cost, memor
 	  AND typeof(salt) = 'blob' AND length(salt) = 16
 	  AND typeof(derived_key) = 'blob' AND length(derived_key) = 32`
 
-// k1MetadataSelect is the same guard WITHOUT the BLOB columns. It exists only
-// for tests that must positively prove the guard rejected a hostile row whose
-// BLOB bytes were never projected (byte-insensitive observation of the same
-// SQL predicate). Production typed reads use k1GuardedSelect; this constant
-// is unexported and referenced only from the two internal test files.
-var _ = k1MetadataSelect // referenced exclusively by TestT008* guards below
-const k1MetadataSelect = `SELECT format_version, argon2_version, time_cost, memory_kib, parallelism
-	FROM admin_verifier
-	WHERE id = 1
-	  AND typeof(format_version) = 'integer' AND format_version = 1
-	  AND typeof(argon2_version) = 'integer' AND argon2_version = 19
-	  AND typeof(time_cost) = 'integer' AND time_cost = 3
-	  AND typeof(memory_kib) = 'integer' AND memory_kib = 65536
-	  AND typeof(parallelism) = 'integer' AND parallelism = 4
-	  AND typeof(salt) = 'blob' AND length(salt) = 16
-	  AND typeof(derived_key) = 'blob' AND length(derived_key) = 32`
-
 // AdminVerifier returns the single validated admin record, or
-// domain.ErrNotFound when no well-formed record exists. K2: the guard and the
-// full projection run on ONE connection pinned to ONE read snapshot (deferred
-// ReadUncommitted tx), so the bytes returned are exactly the bytes the guard
-// validated — no second fetch, no check/fetch race. The result is rejected
-// unless it matches the fixed parameter set; corrupt/hostile stored rows fail
-// closed as ErrNotFound without any repair or fallback.
+// domain.ErrNotFound when no well-formed record exists.
+//
+// K1 (source guarantee): the statement executed here is k1GuardedSelect — its
+// WHERE clause evaluates storage class (typeof), exact signed-integer values
+// and exact BLOB byte lengths inside SQLite, so a wrong-class, wrong-value,
+// NULL or oversized row yields NO ROW and its BLOB bytes are never projected
+// by that statement. Scan-then-len, LIMIT alone or table CHECKs are not the
+// guard; this predicate runs on every production typed read.
+//
+// K2 (source guarantee): the guarded statement runs as ONE query inside ONE
+// read-only transaction (BeginTx TxOptions{ReadOnly:true}, default
+// isolation — NOT ReadUncommitted), on the single connection that transaction
+// is pinned to. The bytes Scan returns are exactly the bytes the guard
+// evaluated in that same snapshot — one statement, no second fetch, no
+// check/fetch refetch window inside this call.
+//
+// The defensive exact-constant re-check below copies from the already
+// validated record; corrupt or hostile stored data fails closed as
+// ErrNotFound with no repair and no fallback.
 func (s *Store) AdminVerifier(ctx context.Context) (AdminVerifier, error) {
-	return s.adminVerifierFrom(ctx, s.db, k1GuardedSelect, true)
-}
-
-func (s *Store) adminVerifierFrom(ctx context.Context, q *sql.DB, query string, full bool) (AdminVerifier, error) {
-	tx, err := q.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return AdminVerifier{}, err
 	}
 	defer tx.Rollback()
 	var v AdminVerifier
-	err = tx.QueryRowContext(ctx, query).Scan(
+	err = tx.QueryRowContext(ctx, k1GuardedSelect).Scan(
 		&v.FormatVersion, &v.Argon2Version, &v.TimeCost, &v.MemoryKiB,
 		&v.Parallelism, &v.Salt, &v.DerivedKey)
-	if full {
-		_ = full // guarded select admits exactly the full projection shape
-	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return AdminVerifier{}, fmt.Errorf("%w: no well-formed admin verifier", domain.ErrNotFound)
 	}
 	if err != nil {
 		return AdminVerifier{}, err
 	}
-	// The guarded query already projected the only columns it admits; the
-	// fixed-length slices are the validated bytes themselves.
-	// Defensive exact-constant re-check after the guarded projection: the
-	// returned record must equal the frozen set. This is a copy of validated
-	// data, never a narrowing of unvalidated values.
+	// Post-read exact-constant re-check of the validated copy: never a
+	// narrowing of unvalidated values, only a final defense-in-depth gate.
 	if v.FormatVersion != authFormatVersion || v.Argon2Version != authArgon2Version ||
 		v.TimeCost != authTimeCost || v.MemoryKiB != authMemoryKiB || v.Parallelism != authParallelism ||
 		len(v.Salt) != authSaltBytes || len(v.DerivedKey) != authDerivedKeyByte {

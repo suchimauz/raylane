@@ -71,10 +71,12 @@ const k1GuardedSelect = `SELECT format_version, argon2_version, time_cost, memor
 // K2 (source guarantee): the guarded statement runs as ONE SQL statement
 // inside ONE transaction pinned to a single connection, so salt and
 // derived_key cannot be torn between separate fetches within this call.
-// TxOptions{ReadOnly:true} here is the driver-ADVISORY hint the pinned
-// modernc.org/sqlite driver applies to its connection (plain deferred
-// BEGIN plus a driver-side write guard); it is not a claim of a new
-// engine-enforced isolation boundary. Atomicity comes from the CODE SHAPE:
+// TxOptions{ReadOnly:true} here is the driver-ADVISORY hint only: the
+// pinned modernc.org/sqlite driver (tx.go newTx) maps every transaction,
+// including ReadOnly ones, to a plain deferred BEGIN — it installs no
+// driver-side write guard and no query_only enforcement. It is not a claim
+// of a new engine-enforced isolation boundary. Atomicity comes from the
+// CODE SHAPE:
 // exactly one SELECT, no write, no refetch — the bytes Scan returns are
 // exactly the bytes the guard evaluated in that same statement. No
 // query_only PRAGMA, pool, isolation or session change is relied on or

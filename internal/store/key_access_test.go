@@ -80,6 +80,15 @@ func trustedDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("fixture mkdir: %v", err)
 	}
+	// Lifetime (fixture-cleanup packet): register removal of THIS fresh,
+	// test-owned directory — and only it, never the base or any shared path —
+	// before any subsequent fallible step, so even a failing chmod or a later
+	// t.Fatal inside the owning test cannot leave orphan fixtures behind.
+	t.Cleanup(func() {
+		if err := os.RemoveAll(d); err != nil {
+			t.Errorf("remove owned fixture %s: %v", d, err)
+		}
+	})
 	if err := os.Chmod(d, 0o700); err != nil { // fresh, empty, ours
 		t.Fatalf("chmod fresh fixture: %v", err)
 	}
@@ -447,5 +456,38 @@ func TestFixturesDoNotMutateSharedDirectories(t *testing.T) {
 	}
 	if got := modeOf(home); got != beforeHome {
 		t.Fatalf("test changed mode of shared home %s: %o -> %o", home, beforeHome, got)
+	}
+}
+
+// TestTrustedFixtureLifetimeIsOwnedByTest closes the fixture-lifetime finding
+// of the fixture-cleanup packet: a fixture created inside a subtest, together
+// with synthetic children (dirs and key files written into it), must be fully
+// removed the moment the OWNING t.Run returns — the base and every shared
+// path stay untouched. This is the lifecycle counterpart to
+// TestFixturesDoNotMutateSharedDirectories (which guards modes, not lifetime).
+func TestTrustedFixtureLifetimeIsOwnedByTest(t *testing.T) {
+	var saved string
+	var savedKey string
+	t.Run("inner", func(t *testing.T) {
+		d := trustedDir(t)
+		saved = d
+		sub := trustedSubDir(t, d, "sub")
+		savedKey = writeKeyFile(t, sub, "master.key", validTestKey(), 0o600)
+		// Positive control while the subtest is alive: fixture and child exist.
+		if fi, err := os.Lstat(savedKey); err != nil || !fi.Mode().IsRegular() {
+			t.Fatalf("synthetic key missing inside subtest: %v", err)
+		}
+		// The production boundary sees it too (no test skip/relaxation).
+		if _, err := openKeyStore(t, savedKey); err != nil {
+			t.Fatalf("openKeyStore in owned fixture: %v", err)
+		}
+	})
+	// After the owning subtest returned, its cleanup must have removed the
+	// fixture root and everything inside it.
+	if _, err := os.Lstat(saved); !errors.Is(err, syscall.ENOENT) || !os.IsNotExist(err) {
+		t.Fatalf("owned fixture %s survived subtest end: %v", saved, err)
+	}
+	if _, err := os.Lstat(savedKey); !os.IsNotExist(err) {
+		t.Fatalf("synthetic child %s survived subtest end: %v", savedKey, err)
 	}
 }

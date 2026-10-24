@@ -15,10 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/suchimauz/raylane/internal/domain"
 )
@@ -425,166 +425,131 @@ func TestT008StorageProductionReaderFailsClosedAndSurvivesReopen(t *testing.T) {
 	}
 }
 
-// TestT008StorageK2CompleteRecordUnderAlternatingWriter exercises the ACTUAL
-// production reader against a test-only writer that transactionally swaps
-// complete records A and B (salt+key always move together inside one
-// committed transaction; the product API never overwrites, so the swap is the
-// test stand-in for a concurrent committed change).
+// --- T2 test-only writer with a credit-gated pipeline (design notes) ------
 //
-// Lifecycle (fixes the prior post-test panic): the writer NEVER calls
-// testing.T. It reports failures through a bounded error channel and exits on
-// a cancelable context; a t.Cleanup registered after the store fixture's
-// cleanup runs FIRST (LIFO) and always cancels + joins the writer before the
-// Store pool closes, on every exit path including Fatal and mixed-record
-// failure.
+// The writer commits COMPLETE admin records transactionally (salt+key always
+// move together; the product API never overwrites, so this fixture stands in
+// for a concurrent committed change). The test orchestrates it with a CLOSED
+// pipeline used as an overlap witness:
 //
-// Overlap handshake (bounded, no sleeps, timers or random retries): each
-// round parks the writer at its NEXT commit boundary via a pause flag served
-// strictly at commit boundaries, then waits — yielding via runtime.Gosched
-// and observing per-round swap-counter DELTAS (cumulative totals can never
-// satisfy a later round) — until the writer (a) committed a fresh record
-// after the pause request and (b) parked again (pause re-set after that
-// commit). A reader read then begins while the writer is demonstrably
-// mid-stream — between committed generations, actively committing — and the
-// round closes with a THIRD fresh-progress demand after the read. The two
-// pause-waits therefore prove the writer was progressing before AND after
-// each read, not that the read merely happened after all writes finished.
+//	pump --credit(w.commit)--> writer swap --completion(w.commitDone)-->
+//	pump mirror --pumpDone--> owner collect
 //
-// Assertions: every returned record equals EXACTLY all-A or all-B (never a
-// salt/key mix); both generations are observed across rounds; per-round
-// progress demands are enforced. These are finite interleaving observations,
-// not an exhaustive race/timing proof; the SOURCE guarantee remains the
-// single guarded statement inside one read-only transaction with no refetch
-// (auth.go). If the required overlap progress cannot be demonstrated the
-// test FAILS honestly (writer exit or error channel) — no post-write-only
-// substitute.
-// substitute.
-
-// abWriter is the T2 test-only writer: it commits COMPLETE records A/B
-// transactionally (salt+key always together; the product API never
-// overwrites, so this is the stand-in for a concurrent committed change),
-// and NOTHING ELSE — it never spins, so a WAL read snapshot can never spin
-// it against the busy_timeout (run5's 10-minute resource-exhaustion
-// deadlock came from unbounded spin-swap volume, not from the production
-// reader). It NEVER calls testing.T: failures go to a bounded error channel
-// and the goroutine exits; termination is cancel + join on every path.
+// The pump grants a bounded budget of credits per OPEN read-window, hands at
+// most ONE credit at a time, and only from the state "previous swap already
+// drained" — so at most one swap is live and mirrored completions reach the
+// owner in exact COMMIT order. A window switch (open/close) is an exact
+// sync point via a SETTLE barrier: a switch accepted while a swap is live
+// is remembered and its ack (an unbuffered rendezvous for OPENs, a channel
+// close for quiet CLOSEs) fires only after the live swap's completion has
+// been mirrored — so when switchWindow returns, zero swaps are unobserved
+// and zero credits are undelivered, and every completion the owner then
+// collects belongs to a swap HANDED strictly after that sync point. Each
+// round therefore forces minOverlapPerRound commits that were authorized,
+// executed and committed AFTER the production read call started — durable
+// A<->B progress racing the read — and strict generation alternation,
+// checked continuously ACROSS sync points, proves both generations moved
+// with no lost or reordered witness.
 //
-// Bounded handshake per round (no sleeps/timers/random retries):
-//   - setNextPinned(i): the writer commits generation i, then parks at that
-//     commit boundary (committed record == pinned generation).
-//   - The orchestrator reads while parked, verifies the record, then
-//     setNextPinned(1-i) releases the park for the NEXT pinned commit.
-//
-// Each parked record therefore follows a FRESH commit of the known
-// generation made WHILE the test is interleaved with the writer, and both
-// generations recur across rounds.
+// Boundedness (N1): every handshake is a select on ctx.Done/stop/stopRun/
+// exit/fatal/watch — no busy spin, no sleep, no polling. Writer, pump and
+// helpers NEVER touch testing.T; failures go to a bounded error channel
+// (w.err + w.fatal) the owner drains while alive. Cleanup order is
+// load-bearing: the owner QUIET-STOPS the writer (quiet flag set, stopRun
+// closed) only after the close+drain protocol proved the pipeline quiet, so
+// no legitimate swap is canceled and no spurious error races a dead test;
+// close(stop) releases the pump; ctx cancel is the last-resort backstop for
+// Fatal-mid-window paths. The cleanup join is itself bounded.
 type abWriter struct {
-	db     *sql.DB
-	pairA  []byte
-	pairB  []byte
-	cancel context.CancelFunc
-	err    chan error    // bounded (1); non-blocking send
-	exit   chan struct{} // closed when the goroutine has returned
+	db         *sql.DB
+	pairA      []byte
+	pairB      []byte
+	commit     chan int      // credit: commit generation gen next (blocks)
+	commitDone chan int      // 1-buffered: gen of each committed swap
+	err        chan error    // bounded (1); non-blocking send
+	fatal      chan struct{} // closed when a writer failure was recorded
+	stopRun    chan struct{} // owner-only quiet stop (closed AFTER draining)
+	exit       chan struct{} // closed when the goroutine has returned
 
-	mu              sync.Mutex
-	swaps           int  // cumulative committed swaps
-	lastGen         int  // generation of the most recent commit (0=A,1=B)
-	nextIdx         int  // generation to commit next (0=A, 1=B)
-	pinned          bool // park after committing nextIdx
-	pauseAtBoundary bool // true while parked at a commit boundary
+	mu    sync.Mutex // guards quiet; taken only on the writer's exit path
+	quiet bool       // set before stopRun closes: swaps end silently
+	log   [][2]int   // gen of every durable commit in order; guarded by mu, surfaced in alternation-failure diagnostics
 }
 
-func newABWriter(ctx context.Context, cancel context.CancelFunc, db *sql.DB, pairA, pairB []byte) *abWriter {
-	w := &abWriter{
-		db: db, pairA: pairA, pairB: pairB, cancel: cancel,
-		err: make(chan error, 1), exit: make(chan struct{}),
+func newABWriter(db *sql.DB, pairA, pairB []byte) *abWriter {
+	return &abWriter{
+		db: db, pairA: pairA, pairB: pairB,
+		commit:     make(chan int),
+		commitDone: make(chan int, 1),
+		err:        make(chan error, 1),
+		fatal:      make(chan struct{}),
+		stopRun:    make(chan struct{}),
+		exit:       make(chan struct{}),
 	}
-	go w.run(ctx)
-	return w
 }
 
+func (w *abWriter) isQuiet() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.quiet
+}
+
+// run handles owner credits only: begin+commit one COMPLETE record under the
+// shared ctx per credit, report the completion, then block for the next
+// credit (no DB work, no spinning while unauthorized).
 func (w *abWriter) run(ctx context.Context) {
 	defer close(w.exit)
 	for {
-		w.mu.Lock()
-		if !w.pinned {
-			// Idle: wait for a pinned request; no DB work, no spinning.
-			w.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			runtime.Gosched()
-			continue
+		var gen int
+		select {
+		case gen = <-w.commit:
+		case <-w.stopRun:
+			return
+		case <-ctx.Done():
+			return
 		}
-		next := w.nextIdx
-		w.mu.Unlock()
-		tx, err := w.db.BeginTx(ctx, nil)
-		if err == nil {
-			salt, key := w.pairB[:16], w.pairB[16:]
-			if next == 0 {
-				salt, key = w.pairA[:16], w.pairA[16:]
-			}
-			if err = authABSwapTxForTests(ctx, tx, salt, key); err == nil {
-				err = tx.Commit()
-			} else {
-				tx.Rollback()
-			}
-		}
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
+		if err := w.swap(ctx, gen); err != nil {
+			if !w.isQuiet() && !errors.Is(err, context.Canceled) {
 				select {
 				case w.err <- err:
 				default:
 				}
+				close(w.fatal)
 			}
 			return
 		}
 		w.mu.Lock()
-		w.swaps++
-		w.lastGen = next
-		w.pinned = false
-		w.pauseAtBoundary = true // park right AFTER the pinned commit
+		w.log = append(w.log, [2]int{gen, len(w.log)})
 		w.mu.Unlock()
+		select {
+		case w.commitDone <- gen:
+		case <-w.stopRun:
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
-// setNextPinned pins generation i (0=A,1=B) as the next commit and releases
-// any current park: the writer commits i once and parks immediately after.
-func (w *abWriter) setNextPinned(i int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.nextIdx = i
-	w.pinned = true
-	w.pauseAtBoundary = false
+// swap commits ONE COMPLETE record (fixed frozen metadata + caller bytes) in
+// its own transaction on the private pool.
+func (w *abWriter) swap(ctx context.Context, gen int) error {
+	salt, key := w.pairB[:16], w.pairB[16:]
+	if gen == 0 {
+		salt, key = w.pairA[:16], w.pairA[16:]
+	}
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := authABSwapTxForTests(ctx, tx, salt, key); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
-// parkedPinned reports parked-at-boundary state with the committed
-// generation (single atomic snapshot under mu).
-func (w *abWriter) parkedPinned() (parked bool, gen int, count int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.pauseAtBoundary, w.lastGen, w.swaps
-}
-
-// resume releases any park without pinning a new commit (cleanup path).
-func (w *abWriter) resume() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.pinned = false
-	w.pauseAtBoundary = false
-}
-
-// join cancels the writer, releases any park, and waits for its goroutine to
-// return exactly. Safe from cleanup on every exit path.
-func (w *abWriter) join() {
-	w.cancel()
-	w.resume()
-	<-w.exit
-}
-
-// checkFailed fails the test if the writer recorded an error (non-blocking).
+// checkFailed surfaces a writer-recorded error while the OWNER is alive.
 func (w *abWriter) checkFailed(t *testing.T, at string) {
 	select {
 	case err := <-w.err:
@@ -593,26 +558,45 @@ func (w *abWriter) checkFailed(t *testing.T, at string) {
 	}
 }
 
-// waitFor yields until cond holds, failing if the writer errored or exited
-// early. Bounded cooperative yield; no sleeps or timers.
-func (w *abWriter) waitFor(t *testing.T, at string, cond func() bool) {
-	for {
-		w.checkFailed(t, at)
-		select {
-		case <-w.exit:
-			t.Fatalf("%s: writer exited before condition held", at)
-		default:
+// deadlineWatcher bounds test-side waits with the TEST's own deadline
+// (testing.common.Deadline), firing well before it so protocol waits fail
+// with a precise message instead of the process-wide panic dump.
+func deadlineWatcher(t *testing.T) (<-chan struct{}, func()) {
+	fire := make(chan struct{})
+	var stop func()
+	if d, ok := t.Deadline(); ok {
+		left := time.Until(d)
+		if left < 60*time.Second {
+			left = 60 * time.Second
 		}
-		if cond() {
-			return
-		}
-		runtime.Gosched()
+		timer := time.NewTimer(left - 30*time.Second)
+		stop = func() { timer.Stop() }
+		go func() { defer close(fire); <-timer.C }()
+	} else {
+		close(fire) // no test deadline: waits rely on ctx/exit bounds only
+		stop = func() {}
 	}
+	return fire, stop
 }
 
+// TestT008StorageK2CompleteRecordUnderAlternatingWriter exercises the ACTUAL
+// production read path (Store.AdminVerifier -> adminVerifierTx) while a
+// concurrent writer commits COMPLETE admin records (salt+key always move
+// together, transactionally), alternating between two full generations A<->B.
+// The credit-gated pipeline (abWriter + pump below) witnesses COMMITTED A<->B
+// progress completing AFTER the read call started, with zero mixed reads —
+// the T2 criterion from the independent review: overlap must be proven by
+// durable commits racing the read, not by a parked writer.
+// Honest limits: the A/B swap is a TEST-ONLY fixture transaction (the product
+// API never overwrites); the 8 rounds are interleaving evidence, not an
+// exhaustive timing proof; single-statement/single-snapshot atomicity is a
+// SOURCE property of auth.go, asserted by design, not measured here.
 func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	// Explicit protocol bound far below the 900 s outer shell timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
+	watch, stopWatch := deadlineWatcher(t)
+	defer stopWatch()
 	s, _ := openFreshAuthStore(t)
 	recA := syntheticVerifier()
 	recA.Salt, recA.DerivedKey = bytesOf(0xA1, 16), bytesOf(0xB1, 32)
@@ -623,46 +607,313 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 	}
 	pairA := append(append([]byte{}, recA.Salt...), recA.DerivedKey...)
 	pairB := append(append([]byte{}, recB.Salt...), recB.DerivedKey...)
-	w := newABWriter(ctx, cancel, s.db, pairA, pairB)
+	w := newABWriter(s.db, pairA, pairB)
+	go w.run(ctx)
+
+	stop := make(chan struct{})
+	pumpExit := make(chan struct{})
 	// Registered AFTER openFreshAuthStore's cleanup => LIFO runs FIRST on
-	// every exit path (including t.Fatal below): stop + join the writer
-	// before the store closes the pool.
-	t.Cleanup(w.join)
-	// Limitations of THIS test, recorded not hidden:
-	//   - the A/B swap is a TEST-ONLY fixture transaction
-	//     (authABSwapTxForTests) standing in for a concurrent committed
-	//     change to the admin row; the production API never overwrites, so
-	//     what is proven is reader consistency against EXTERNAL committed
-	//     changes, not a production write path;
-	//   - the schedule is finite (8 pinned rounds), i.e. interleaving
-	//     evidence, not an exhaustive race proof.
+	// every exit path (including t.Fatal below), BEFORE the store closes the
+	// pool: quiet-stop the writer (at normal end the close+drain protocol
+	// provably left no swap in flight; on Fatal paths quiet suppresses the
+	// cancellation error instead of racing a dead test), release the pump,
+	// cancel as the last-resort backstop (kills stuck statements carrying
+	// this ctx), then BOUNDED-join the writer.
+	t.Cleanup(func() {
+		w.mu.Lock()
+		w.quiet = true
+		w.mu.Unlock()
+		close(w.stopRun)
+		close(stop)
+		cancel()
+		select {
+		case <-w.exit:
+		case <-time.After(45 * time.Second):
+			t.Fatalf("T2/N1 gap: writer goroutine never exited after stop — join NOT bounded")
+		}
+		select {
+		case <-pumpExit:
+		case <-time.After(45 * time.Second):
+			t.Fatalf("T2/N1 gap: pump goroutine never exited after stop — join NOT bounded")
+		}
+	})
+
+	const perRoundBudget = 3      // max swaps authorized per window (bound)
+	const minOverlapPerRound = 2  // swaps required to COMPLETE during the read
+	pumpDone := make(chan int, 1) // ordered completions mirrored by the pump
+	pumpReq := make(chan struct {
+		on     bool
+		budget int
+		ack    chan struct{}
+	})
+
+	go func() { // credit pump (never touches testing.T)
+		defer close(pumpExit)
+		// DETERMINISTIC pump: states are sequential blocks, not select races.
+		// N1: every wait is a select bounded by stop/stopRun/ctx/exit/fatal
+		// — no busy loop, no sleep, no polling; the pump can never starve a
+		// window switch (requests are served between swaps, never after a
+		// partial hand: unbuffered hands complete only at rendezvous).
+		//   S_wait:  no window open. Wait for a switch request and CLOSE-ack
+		//            it immediately (nothing live: exact sync by
+		//            construction — the ack happens-before any later hand).
+		//   S_run:   window open with budget. One iteration = one swap:
+		//            (1) check pending switch FIRST (non-blocking): CLOSE
+		//            before the hand stops the window exactly;
+		//            (2) hand a credit — rendezvous == swap STARTED, strictly
+		//            AFTER every event processed before it, including the
+		//            OPEN-ack;
+		//            (3) drain the swap's completion (writer writes
+		//            w.commitDone AFTER the durable COMMIT) into pumpDone —
+		//            exact COMMIT order (one live swap at a time);
+		//            (4) check pending switch again: a CLOSE accepted here is
+		//            acked ONLY after the swap's completion was mirrored, so
+		//            a close-ack means "nothing authorized-but-unobserved".
+		//   Budget:  per-window bound; an OPEN may arrive while swapping ->
+		//            handled in S_run (re-armed budget, next hand post-ack).
+		//   Stop:    the pump NEVER consumes w.err (the owner's transport);
+		//            it exits on w.fatal, w.exit, stopRun, stop or ctx.
+		type switchReq = struct {
+			on     bool
+			budget int
+			ack    chan struct{}
+		}
+		open := false
+		budget := 0
+		nextGen := 1
+		altGen := func() int {
+			g := nextGen
+			nextGen = 1 - g
+			return g
+		}
+		ackNow := func(ack chan struct{}) bool {
+			select {
+			case ack <- struct{}{}: // rendezvous: owner has the ack
+			case <-stop:
+				return false
+			case <-ctx.Done():
+				return false
+			}
+			return true
+		}
+		// takeSwitch non-blocking: report a pending window request if any.
+		takeSwitch := func() (switchReq, bool) {
+			select {
+			case p := <-pumpReq:
+				return p, true
+			default:
+				return switchReq{}, false
+			}
+		}
+		// serveSwitch applies a request and acks it. CLOSE acks are exact by
+		// S_run ordering (acked only between swaps, post-drain). OPEN acks:
+		// if called from S_run a swap MAY be mid-flight — in that case the
+		// ack is deferred and sent after that swap's drain (S_run step 4).
+		for {
+			// S_wait
+			for !open || budget <= 0 {
+				select {
+				case p := <-pumpReq:
+					open, budget = p.on, p.budget
+					if open {
+						// Re-enter S_run after the ack.
+						if !ackNow(p.ack) {
+							return
+						}
+					} else {
+						if !ackNow(p.ack) {
+							return
+						}
+					}
+					continue
+				case <-w.fatal:
+					return
+				case <-w.exit:
+					return
+				case <-w.stopRun:
+					return
+				case <-stop:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			// S_run: one swap per iteration, switch-checked both sides.
+			var req switchReq
+			var haveReq bool
+			if req, haveReq = takeSwitch(); haveReq {
+				open, budget = req.on, req.budget
+				if !ackNow(req.ack) {
+					return
+				}
+				continue
+			}
+			// hand credit (rendezvous == start). Bounded + switch-aware:
+			// a switch may NOT slip in mid-hand — the unbuffered send
+			// completes only with the writer's take — but stop/fatal/exit
+			// still bound the wait; a switch queued meanwhile is served on
+			// the next loop's step (1), strictly before the NEXT hand.
+			select {
+			case w.commit <- altGen():
+			case <-w.fatal:
+				return
+			case <-w.exit:
+				return
+			case <-w.stopRun:
+				return
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+			// drain: the ONLY consumer of w.commitDone; arrives AFTER the
+			// durable COMMIT; mirror to pumpDone in exact commit order.
+			var gen int
+		drain:
+			for {
+				select {
+				case gen = <-w.commitDone:
+					break drain
+				case <-w.fatal:
+					return
+				case <-w.exit:
+					return
+				case <-w.stopRun:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			select {
+			case pumpDone <- gen:
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+			budget--
+			// Step 4: if a switch is pending NOW, it is acked only after
+			// this swap's completion was mirrored — CLOSE exactness.
+			if req, haveReq = takeSwitch(); haveReq {
+				open, budget = req.on, req.budget
+				if !ackNow(req.ack) {
+					return
+				}
+			}
+		}
+	}()
 
 	seenA, seenB := 0, 0
+	prevGen := -1
+	checkGen := func(gens []int, at string) {
+		for _, g := range gens {
+			if prevGen >= 0 && g == prevGen {
+				w.mu.Lock()
+				diag := fmt.Sprint(w.log)
+				w.mu.Unlock()
+				t.Fatalf("%s: writer gens not alternating: prev=%d batch=%v writerLog=%s", at, prevGen, gens, diag)
+			}
+			prevGen = g
+		}
+	}
+	// switchWindow is an EXACT sync point with the pump.
+	//
+	// CLOSE: when the ack returns, no credit is undelivered and at most one
+	// swap is live; the owner drains that completion (settle loop below), so
+	// the round boundary is provably quiet.
+	//
+	// OPEN is a TWO-STEP barrier (settle): the request reaches the pump from
+	// its post-credit state (hand or drain) — it can therefore never slip in
+	// before an unobserved hand — and the pump ACKS ONLY AFTER the in-flight
+	// swap is fully drained to pumpDone. The owner then consumes that one
+	// settled completion. When switchWindow(true) returns: exactly zero
+	// undelivered credits, zero undrained swaps — every completion collected
+	// afterwards belongs to a swap the pump HANDED strictly after this sync
+	// point, i.e. committed strictly after the round's read call started.
+	switchWindow := func(on bool, budget int, at string) {
+		ack := make(chan struct{})
+		select {
+		case pumpReq <- struct {
+			on     bool
+			budget int
+			ack    chan struct{}
+		}{on: on, budget: budget, ack: ack}:
+		case <-watch:
+			t.Fatalf("%s: test-deadline bound requesting window switch (on=%v)", at, on)
+		}
+		select {
+		case <-ack:
+		case err := <-w.err:
+			t.Fatalf("%s: writer failure during window switch: %v", at, err)
+		case <-w.exit:
+			t.Fatalf("%s: writer exited during window switch", at)
+		case <-pumpExit:
+			t.Fatalf("%s: pump exited during window switch", at)
+		case <-watch:
+			t.Fatalf("%s: test-deadline bound awaiting window ack (on=%v)", at, on)
+		}
+	}
+
+	// switchWindowOpen opens the window. The settle-ack guarantees: zero
+	// swaps live, zero credits undelivered, and pumpDone holds AT MOST the
+	// single completion drained for the switch (already checkGen'd here, so
+	// generation continuity is verified across the round boundary). Every
+	// completion collected after this point is a swap HANDED after the ack:
+	// started and committed strictly after it.
+	switchWindowOpen := func(at string) {
+		switchWindow(true, perRoundBudget, at)
+		select {
+		case g := <-pumpDone:
+			checkGen([]int{g}, fmt.Sprintf("%s settled-drain", at))
+		default:
+		}
+	}
+	// switchWindowClose revokes all further credits.
+	switchWindowClose := func(at string) { switchWindow(false, 0, at) }
+
+	collect := func(n int, at string) []int {
+		gens := make([]int, 0, n)
+		for len(gens) < n {
+			select {
+			case g := <-pumpDone:
+				gens = append(gens, g)
+			case err := <-w.err:
+				t.Fatalf("%s: writer failure: %v", at, err)
+				return nil
+			case <-w.exit:
+				t.Fatalf("%s: writer exited after %d/%d commits", at, len(gens), n)
+				return nil
+			case <-pumpExit:
+				t.Fatalf("%s: pump exited after %d/%d commits", at, len(gens), n)
+				return nil
+			case <-ctx.Done():
+				t.Fatalf("%s: ctx done after %d/%d commits: %v", at, len(gens), n, ctx.Err())
+				return nil
+			case <-watch:
+				t.Fatalf("%s: test-deadline bound after %d/%d commits", at, len(gens), n)
+				return nil
+			}
+		}
+		return gens
+	}
+
 	const rounds = 8
-	wantGen := 1 // pinned generation alternates, starting with B
-	prevSwaps := 0
 	for round := 0; round < rounds; round++ {
 		w.checkFailed(t, "pre-round")
-		// The writer commits the pinned generation and parks right after it
-		// — fresh, per-round commit evidence (counter grew strictly past the
-		// previous round's), while the test itself proceeds concurrently.
-		w.setNextPinned(wantGen)
-		w.waitFor(t, fmt.Sprintf("round %d pinned commit+parks", round), func() bool {
-			parked, _, _ := w.parkedPinned()
-			return parked
-		})
-		parked, gen, count := w.parkedPinned()
-		if !parked || gen != wantGen {
-			t.Fatalf("round %d: parked=%v gen=%d wantGen=%d", round, parked, gen, wantGen)
-		}
-		if count <= prevSwaps {
-			t.Fatalf("round %d: no fresh commit this round (swaps=%d prev=%d)", round, count, prevSwaps)
-		}
-		prevSwaps = count
-		// Production reader runs while the writer is parked between commits.
-		v, err := s.AdminVerifier(ctx)
-		if err != nil {
-			t.Fatalf("round %d reader: %v", round, err)
+		// OPEN: rendezvous-acked at the pump's decision point (S_wait, or
+		// step (1)/(4) of S_run between swaps). From the instant the ack is
+		// received, EVERY hand the pump makes starts strictly after it, so
+		// every completion collected from now belongs to a swap started
+		// after the ack. A swap that was mid-flight when the OPEN arrived
+		// has its completion mirrored BEFORE the pump acks (S_run step (3)
+		// precedes (4)); the drain below consumes it, preserving the
+		// round-boundary invariant "nothing authorized-but-unobserved".
+		switchWindowOpen(fmt.Sprintf("round %d open", round))
+		// ACTIVE READ INTERVAL begins at this call.
+		v, rerr := s.AdminVerifier(ctx)
+		w.checkFailed(t, fmt.Sprintf("round %d post-read", round))
+		if rerr != nil {
+			t.Fatalf("round %d reader: %v", round, rerr)
 		}
 		got := append(append([]byte{}, v.Salt...), v.DerivedKey...)
 		switch string(got) {
@@ -673,9 +924,36 @@ func TestT008StorageK2CompleteRecordUnderAlternatingWriter(t *testing.T) {
 		default:
 			t.Fatalf("round %d reader observed a MIXED record: %x", round, got)
 		}
-		wantGen = 1 - wantGen
+		// OVERLAP WITNESSES: the read returned; the read window stays open,
+		// so the pump keeps handing credits (bounded by perRoundBudget) and
+		// completions keep arriving. Collecting minOverlapPerRound=2 of
+		// them — each mirrored only AFTER its durable COMMIT, each HANDED
+		// after this round's OPEN ack which itself precedes the read call —
+		// witnesses commits completing while the production read is active.
+		gens := collect(minOverlapPerRound, fmt.Sprintf("round %d overlap", round))
+		checkGen(gens, fmt.Sprintf("round %d overlap-alternation", round))
+		// CLOSE: the ack is delivered only BETWEEN swaps, after that swap's
+		// completion was mirrored (S_run step (4)) — a close-ack means the
+		// pipeline is settled. A completion may already sit buffered in
+		// pumpDone (mirrored just before the close was taken): consume it as
+		// the round's last witness.
+		switchWindowClose(fmt.Sprintf("round %d close", round))
+		select {
+		case g := <-pumpDone:
+			checkGen([]int{g}, fmt.Sprintf("round %d settled-at-close", round))
+		default:
+		}
+		// Post-close the window is revoked: no hand may start, nothing is
+		// live (step-(4) exactness), so no further completion can appear.
+		select {
+		case g2 := <-pumpDone:
+			t.Fatalf("round %d: completion gen=%d after settled close — pipeline accounting violated", round, g2)
+		case err := <-w.err:
+			t.Fatalf("round %d: writer failure after close: %v", round, err)
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 	if seenA == 0 || seenB == 0 {
-		t.Fatalf("expected BOTH generations observed under interleaving, got A=%d B=%d", seenA, seenB)
+		t.Fatalf("expected BOTH generations observed under overlap, got A=%d B=%d", seenA, seenB)
 	}
 }

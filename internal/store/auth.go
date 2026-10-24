@@ -68,12 +68,17 @@ const k1GuardedSelect = `SELECT format_version, argon2_version, time_cost, memor
 // by that statement. Scan-then-len, LIMIT alone or table CHECKs are not the
 // guard; this predicate runs on every production typed read.
 //
-// K2 (source guarantee): the guarded statement runs as ONE query inside ONE
-// read-only transaction (BeginTx TxOptions{ReadOnly:true}, default
-// isolation — NOT ReadUncommitted), on the single connection that transaction
-// is pinned to. The bytes Scan returns are exactly the bytes the guard
-// evaluated in that same snapshot — one statement, no second fetch, no
-// check/fetch refetch window inside this call.
+// K2 (source guarantee): the guarded statement runs as ONE SQL statement
+// inside ONE transaction pinned to a single connection, so salt and
+// derived_key cannot be torn between separate fetches within this call.
+// TxOptions{ReadOnly:true} here is the driver-ADVISORY hint the pinned
+// modernc.org/sqlite driver applies to its connection (plain deferred
+// BEGIN plus a driver-side write guard); it is not a claim of a new
+// engine-enforced isolation boundary. Atomicity comes from the CODE SHAPE:
+// exactly one SELECT, no write, no refetch — the bytes Scan returns are
+// exactly the bytes the guard evaluated in that same statement. No
+// query_only PRAGMA, pool, isolation or session change is relied on or
+// implied.
 //
 // The defensive exact-constant re-check below copies from the already
 // validated record; corrupt or hostile stored data fails closed as

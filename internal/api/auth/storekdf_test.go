@@ -1454,78 +1454,111 @@ func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) e
 // through named[] so `type w struct{ hook func() }; struct{ x w }` is
 // caught via the declaration walk, not terminated here; unresolved or
 // cyclic named types fail closed inside seamUnderlying, not here.
-func checkNestedFieldList(e ast.Expr, named map[string]ast.Expr, what string) error {
-	return checkNestedFieldListSeen(e, named, what, map[string]bool{})
+// namedEdge is a named-type descent edge: the named type plus whether the
+// reference to it passed through indirection (pointer, slice, map, channel,
+// func, or interface) on THIS step. The indirection flag is what makes a
+// recursive type finite in Go: a cycle reached through a pointer has finite
+// size, while a direct by-value cycle (struct{ x T }) is infinitely sized
+// and ill-formed.
+type namedEdge struct {
+	under       ast.Expr
+	indirection bool
 }
 
-// checkNestedFieldListSeen is the cycle-guarded worker for
-// checkNestedFieldList. seen tracks named types already entered on the
-// current descent path: a named struct that refers back to itself through
-// a pointer, slice, map or channel (struct{ x *Self }) re-enters here
-// after seamUnderlying stopped at the outer StructType, so without a path
-// guard the recursion would not terminate. A re-entered name is NOT an
-// error by itself — a self-referential struct with no function-typed field
-// is legitimate — so the guard only stops the recursion; a genuine
-// function-typed field underneath is still caught by the nested
-// checkFieldList/checkSeamExpr descent. Unresolved names return nil (the
+// checkNestedFieldList recurses into the fields of an anonymous struct or
+// the methods of an anonymous interface that is the (possibly wrapped)
+// type of an enclosing field, tracking named-type descent edges so a legal
+// pointer-mediated cycle (such as the frozen admissionOwnerID/admissionLimiter
+// pair) is accepted while a direct by-value cycle fails closed. It does NOT
+// mutate named.
+func checkNestedFieldList(e ast.Expr, named map[string]ast.Expr, what string) error {
+	return checkNestedFieldListEdges(e, named, what, map[string]namedEdge{})
+}
+
+// checkNestedFieldListEdges is the cycle-aware worker for
+// checkNestedFieldList. active maps a named type to the edge it was entered
+// through on the current descent path. On re-entering a name already on the
+// path, the reference is LEGAL iff the cycle passes through indirection
+// (a pointer/slice/map/chan/func/interface broke it, so the type is finite);
+// a direct by-value re-entry is a cycle with no indirection — infinitely
+// sized and ill-formed in Go — and FAILS CLOSED. Entries are pushed on the
+// way down and removed on the way back up, so a name reused on a sibling
+// branch is ordinary finite reuse. Indirection on an EARLIER, unrelated
+// path never masks a by-value cycle on the current one: only the edges that
+// actually form the loop are decisive. Unresolved names return nil (the
 // enclosing seamUnderlying already fails closed on them), so a missing
-// entry here can never mask a function-typed seam.
-func checkNestedFieldListSeen(e ast.Expr, named map[string]ast.Expr, what string, seen map[string]bool) error {
+// entry here can never mask a function-typed seam; every field reachable
+// without re-entering an active name is still scanned.
+func checkNestedFieldListEdges(e ast.Expr, named map[string]ast.Expr, what string, active map[string]namedEdge) error {
 	switch t := e.(type) {
 	case *ast.StructType:
-		return checkFieldListNested(t.Fields, named, what+" struct", seen)
+		return checkFieldListEdges(t.Fields, named, what+" struct", active)
 	case *ast.InterfaceType:
-		return checkFieldListNested(t.Methods, named, what+" interface", seen)
+		return checkFieldListEdges(t.Methods, named, what+" interface", active)
 	case *ast.ParenExpr:
-		return checkNestedFieldListSeen(t.X, named, what, seen)
+		return checkNestedFieldListEdges(t.X, named, what, active)
 	case *ast.StarExpr:
-		return checkNestedFieldListSeen(t.X, named, what, seen)
+		return nestedWithIndirection(t.X, named, what, active)
 	case *ast.ArrayType:
-		return checkNestedFieldListSeen(t.Elt, named, what, seen)
+		return nestedWithIndirection(t.Elt, named, what, active)
 	case *ast.ChanType:
-		return checkNestedFieldListSeen(t.Value, named, what, seen)
+		return nestedWithIndirection(t.Value, named, what, active)
 	case *ast.MapType:
 		// A map key is comparable and cannot be a struct holding a func, but
 		// scanning both key and value keeps the rule uniform and fail closed.
-		if err := checkNestedFieldListSeen(t.Key, named, what, seen); err != nil {
+		// The map itself is indirection, so a cycle through its key or value
+		// is finite.
+		if err := nestedWithIndirection(t.Key, named, what, active); err != nil {
 			return err
 		}
-		return checkNestedFieldListSeen(t.Value, named, what, seen)
+		return nestedWithIndirection(t.Value, named, what, active)
 	case *ast.Ident:
-		// A named wrapper type is validated by the declaration walk; here we
-		// only recurse if the name resolves to an anonymous struct/interface
-		// in this file, guarding the descent path against self-reference.
-		//
-		// POLARITY: a name re-entered ON THE SAME DESCENT PATH means the type
-		// expands through itself without terminating (struct T { x *T } reached
-		// again from inside T's own fields) — an ill-formed, infinitely-sized
-		// type that must FAIL CLOSED, not succeed. A name already visited on a
-		// DIFFERENT, completed branch is ordinary noncyclic reuse of a finite
-		// named type (struct A { x B }; struct B { y *B } where B is re-entered
-		// only after A's branch finished) and is NOT an error — it is a genuine
-		// recursive Go type. The seen set is per active path: entries are added
-		// on the way down and must be removed on the way back up so a later
-		// sibling branch can reuse the name.
-		if seen[t.Name] {
-			return fmt.Errorf("named type %s re-entered on the same descent path — cyclic fail closed", t.Name)
-		}
-		if under, ok := named[t.Name]; ok {
-			seen[t.Name] = true
-			defer delete(seen, t.Name)
-			return checkNestedFieldListSeen(under, named, what, seen)
-		}
-		return nil
+		// Enter a named type through a by-value (non-indirected) reference.
+		return enterNamed(t.Name, false, named, what, active)
 	default:
 		return nil
 	}
 }
 
-// checkFieldListNested is the field-list walker that threads the shared
-// seen set through every nested field so a self-referential type is
-// entered once per path, not per occurrence. It applies the same per-field
-// checks as checkFieldList (seam rejection plus nested descent) but keeps
-// the cycle guard alive across the whole recursion.
-func checkFieldListNested(fl *ast.FieldList, named map[string]ast.Expr, what string, seen map[string]bool) error {
+// nestedWithIndirection descends into the inner expression of an indirected
+// type (pointer element, slice element, map key/value, channel value): the
+// reference to whatever it leads to is indirected, so a cycle closed through
+// it is finite and legal.
+func nestedWithIndirection(e ast.Expr, named map[string]ast.Expr, what string, active map[string]namedEdge) error {
+	if id, ok := e.(*ast.Ident); ok {
+		return enterNamed(id.Name, true, named, what, active)
+	}
+	return checkNestedFieldListEdges(e, named, what, active)
+}
+
+// enterNamed resolves and descends into a named type, applying the cycle
+// rule. indirection records whether the reference to this name passed
+// through indirection on this step.
+func enterNamed(name string, indirection bool, named map[string]ast.Expr, what string, active map[string]namedEdge) error {
+	if _, onPath := active[name]; onPath {
+		// The cycle closes on THIS reference. It is legal exactly when the
+		// cycle passes through indirection on this closing edge (finite in
+		// Go); a direct by-value re-entry has no indirection and fails closed.
+		if indirection {
+			return nil
+		}
+		return fmt.Errorf("named type %s re-entered by value on the same descent path — cyclic fail closed", name)
+	}
+	under, ok := named[name]
+	if !ok {
+		// Unresolved: seamUnderlying in the enclosing checkSeamExpr fails
+		// closed, so nothing is masked here.
+		return nil
+	}
+	active[name] = namedEdge{under: under, indirection: indirection}
+	defer delete(active, name)
+	return checkNestedFieldListEdges(under, named, what, active)
+}
+
+// checkFieldListEdges is the field-list walker that threads the shared
+// active-edge map through every nested field so a self-referential type is
+// entered once per path and the cycle decision uses the closing edge.
+func checkFieldListEdges(fl *ast.FieldList, named map[string]ast.Expr, what string, active map[string]namedEdge) error {
 	if fl == nil {
 		return nil
 	}
@@ -1533,21 +1566,32 @@ func checkFieldListNested(fl *ast.FieldList, named map[string]ast.Expr, what str
 		if err := checkSeamExpr(fld.Type, named, what); err != nil {
 			return err
 		}
-		if err := checkNestedFieldListSeen(fld.Type, named, what+" nested field", seen); err != nil {
+		if err := checkNestedFieldListEdges(fld.Type, named, what+" nested field", active); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// receiverTypeName returns the named type a method receiver refers to,
+// unwrapping a leading pointer (value receivers match bareIdent; pointer
+// receivers strip one *). It is used ONLY to build the selector-evidence
+// method table, so the pointer-receiver methods are included; it does NOT
+// replace bareIdent, which stays value-only for the Error-receiver census.
+func receiverTypeName(e ast.Expr) string {
+	if star, ok := e.(*ast.StarExpr); ok {
+		return bareIdent(star.X)
+	}
+	return bareIdent(e)
+}
+
 // receiverMethodSets maps each local named type to the set of method names
-// declared ON THAT TYPE by this file's own FuncDecls (value or pointer
-// receiver). It lets the selector-binding rule distinguish a method value
-// recv.Method (a function-typed dispatch seam) from an ordinary struct
-// FIELD recv.Field: a selector whose name is NOT a method of the receiver's
-// named type is provably a field, never a method value. Built once per file
-// from the parsed AST; it reflects exactly the methods declared in this file
-// and nothing else.
+// declared ON THAT TYPE by this file's own FuncDecls — value AND pointer
+// receivers (receiverTypeName unwraps the leading *). It lets the
+// selector-binding rule distinguish a bound method value recv.Method (a
+// function-typed dispatch seam) from an ordinary struct FIELD recv.Field.
+// Built once per file from the parsed AST; it reflects exactly the methods
+// declared in this file and nothing else.
 func receiverMethodSets(decls []ast.Decl) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
 	for _, d := range decls {
@@ -1555,7 +1599,7 @@ func receiverMethodSets(decls []ast.Decl) map[string]map[string]bool {
 		if !ok || fd.Recv == nil || len(fd.Recv.List) != 1 || fd.Name == nil {
 			continue
 		}
-		recv := bareIdent(fd.Recv.List[0].Type)
+		recv := receiverTypeName(fd.Recv.List[0].Type)
 		if recv == "" {
 			continue
 		}
@@ -1583,6 +1627,75 @@ func mergedRecvMethods(recvMethods map[string]map[string]bool) map[string]bool {
 		}
 	}
 	return out
+}
+
+// classifyBindingRHS applies the declaration-time function-value rule to a
+// single variable's right-hand-side expression, shared by := short
+// declarations and var/const ValueSpec initialisers so both spellings are
+// classified identically. Parens/aliases are unwrapped first; an Ident bound
+// to a this-file function, a value-receiver method (methods table), a
+// package function, or any unresolvable selector is a function-typed dispatch
+// seam rejected even if never called. A bare non-function name, a closed
+// non-func package value, or a provably-field selector is recorded as an
+// ordinary value; any other producer is an opaque value binding.
+func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool) error {
+	r := rhs
+	for {
+		if p, ok := r.(*ast.ParenExpr); ok {
+			r = p.X
+			continue
+		}
+		break
+	}
+	switch v := r.(type) {
+	case *ast.Ident:
+		// A short binding to a declared function of this file is a
+		// function-typed value, hence a dispatch seam, even if never called.
+		// A bare name that is NOT a this-file function (package-level value,
+		// builtin) is not a function value and stays recorded.
+		if fileFuncs[v.Name] {
+			return fmt.Errorf("variable %s is bound to function %s — fail closed", id.Name, v.Name)
+		}
+		named[id.Name] = &ast.Ident{Name: v.Name}
+	case *ast.SelectorExpr:
+		if v.Sel == nil {
+			return fmt.Errorf("assignment target %s receives a malformed selector value — fail closed", id.Name)
+		}
+		// A SelectorExpr RHS names either pkg.Member or recv.Member,
+		// distinguished by the BASE, never by the mere presence of a dot:
+		// pkg.Function is a function VALUE (a seam); pkg.Const/pkg.Var are
+		// ordinary pinned values; recv.Method is a bound method value (a
+		// seam); recv.Field is an ordinary field.
+		base, baseIsIdent := v.X.(*ast.Ident)
+		switch {
+		case baseIsIdent && filePkgs[base.Name]:
+			// Package-qualified member. An imported namespace does NOT prove
+			// the member is a constant: pkg.Function is a function value and is
+			// rejected. pkg.Const/pkg.Var are ordinary values and are recorded;
+			// membership in the closed non-func set proves non-func for the
+			// qualified types this file set actually uses.
+			if closedNonFuncIdents[base.Name+"."+v.Sel.Name] {
+				named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+				break
+			}
+			return fmt.Errorf("variable %s is bound to package member %s.%s — fail closed", id.Name, base.Name, v.Sel.Name)
+		case baseIsIdent:
+			// Value receiver recv.Sel: a dispatch seam exactly when Sel is a
+			// method declared on a local named type (methods table, including
+			// pointer-receiver methods); an ordinary field otherwise.
+			if methods[v.Sel.Name] {
+				return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
+			}
+			named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+		default:
+			// Selector on an unresolvable base: cannot prove it is not a
+			// function value — fail closed.
+			return fmt.Errorf("variable %s is bound to an unresolvable selector %s — fail closed", id.Name, v.Sel.Name)
+		}
+	default:
+		named[id.Name] = localKindValue
+	}
+	return nil
 }
 
 // checkStmt fails on function-typed variables (explicit type or inferred
@@ -1620,90 +1733,16 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 			}
 		}
 		// SEC-2 binding closure (conservative, DEFINE only): a new `:=`
-		// declaration records a value binding for the single-assign form:
-		//   v := existingFunc  -> bound to that name; a later v(...) call is
-		//                        judged through fileFuncs (function of this
-		//                        file captured into a variable = dispatch
-		//                        seam; anything else fails closed)
-		//   v := recv.method   -> bound to the method selector name; a later
-		//                        v(...) call fails closed
-		//   v := f(...) or any other single-value producer -> opaque value
-		//                        binding; calling v later fails closed, the
-		//                        result kind is syntactically invisible
-		// Ordinary `=` re-assignments NEVER re-bind, so a control-flow
-		// dependent err = anotherCall() can never overwrite — and thereby
-		// unlock — the binding recorded when err was declared. Ordinary use
-		// of such locals (field access, arithmetic, plain reads) stays
-		// allowed exactly as before; only CALLS consult the bindings.
+		// declaration records a value binding for the single-assign form via
+		// the shared classifyBindingRHS helper, so := and var/const ValueSpec
+		// initialisers classify a function value identically (parens, bare
+		// identifiers, selectors, aliases), rejecting a bound function/method
+		// at the declaration even when it is never called.
 		if st.Tok == token.DEFINE {
 			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-					// Unwrap parenthesised (and parenthesised-within-parentheses)
-					// right-hand sides so the binding classification below sees the
-					// real value form, not the paren wrapper: f := (existingFunc)
-					// and f := ((recv.Method)) must be rejected exactly like their
-					// unparenthesised spellings, not recorded as an opaque value.
-					rhs := st.Rhs[0]
-					for {
-						if p, ok := rhs.(*ast.ParenExpr); ok {
-							rhs = p.X
-							continue
-						}
-						break
-					}
-					switch v := rhs.(type) {
-					case *ast.Ident:
-						// SEC-2 closure: a short `v := name` binding a declared
-						// function of this file is a function-typed value, hence a
-						// dispatch seam, even if it is never called — reject at the
-						// declaration, not only on a later call. A bare name that is
-						// NOT a this-file function (package-level value, builtin) is
-						// not a function value and stays recorded for call checks.
-						if fileFuncs[v.Name] {
-							return fmt.Errorf("variable %s is bound to function %s — fail closed", id.Name, v.Name)
-						}
-						named[id.Name] = &ast.Ident{Name: v.Name}
-					case *ast.SelectorExpr:
-						if v.Sel == nil {
-							return fmt.Errorf("assignment target %s receives a malformed selector value — fail closed", id.Name)
-						}
-						// A SelectorExpr RHS names either pkg.Member or recv.Member.
-						// The two are distinguished by the BASE, never by the mere
-						// presence of a dot: pkg.Function is a function VALUE (a seam),
-						// pkg.Const/pkg.Var are ordinary pinned values; recv.Method is a
-						// bound method value (a seam), recv.Field is an ordinary field.
-						base, baseIsIdent := v.X.(*ast.Ident)
-						switch {
-						case baseIsIdent && filePkgs[base.Name]:
-							// Package-qualified member. An imported namespace does NOT
-							// prove the member is a constant: pkg.Function is a
-							// function value, so it is rejected. pkg.Const/pkg.Var are
-							// ordinary values and are recorded; membership in the closed
-							// non-func set proves non-func for the qualified types this
-							// file set actually uses.
-							if closedNonFuncIdents[base.Name+"."+v.Sel.Name] {
-								named[id.Name] = &ast.Ident{Name: v.Sel.Name}
-								break
-							}
-							return fmt.Errorf("variable %s is bound to package member %s.%s — fail closed", id.Name, base.Name, v.Sel.Name)
-						case baseIsIdent:
-							// Value receiver recv.Sel. It is a function-typed dispatch seam
-							// exactly when Sel is a method declared on a local named type
-							// (methods table) — a bound method value — and an ordinary field
-							// otherwise. A field is accepted by recording the binding; a
-							// bound method is rejected even if never called.
-							if methods[v.Sel.Name] {
-								return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
-							}
-							named[id.Name] = &ast.Ident{Name: v.Sel.Name}
-						default:
-							// Selector on an unresolvable base (parenthesised receiver,
-							// index, call result): cannot prove it is not a function
-							// value — fail closed.
-							return fmt.Errorf("variable %s is bound to an unresolvable selector %s — fail closed", id.Name, v.Sel.Name)
-						}
-					default:
-						named[id.Name] = localKindValue
+					if err := classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods); err != nil {
+						return err
 					}
 				}
 			}
@@ -2027,13 +2066,30 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 							return err
 						}
 					}
-					for _, v := range vs.Values {
+					// Declaration-time function-value classification identical to :=
+					// (classifyBindingRHS): a bare-identifier, selector, or
+					// parenthesised/aliased initialiser that binds a function or
+					// method value is rejected here, even when the variable is never
+					// called. exprReachesFuncType alone only catches literal
+					// FuncType/FuncLit initialisers, so non-literal function values
+					// are classified by name/kind below.
+					for i, v := range vs.Values {
 						if exprReachesFuncType(v) {
 							names := "?"
 							if len(vs.Names) > 0 {
 								names = vs.Names[0].Name
 							}
 							return fmt.Errorf("variable %s initialised from a function-typed value", names)
+						}
+						// Only a single-name/single-value spec carries an unambiguous
+						// binding; anything else stays an opaque value (call-checked).
+						if len(vs.Names) == 1 && len(vs.Values) == 1 {
+							id := vs.Names[0]
+							if id.Name != "_" {
+								if err := classifyBindingRHS(id, vs.Values[i], named, fileFuncs, filePkgs, methods); err != nil {
+									return err
+								}
+							}
 						}
 					}
 				}

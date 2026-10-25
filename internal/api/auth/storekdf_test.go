@@ -1467,16 +1467,16 @@ type namedEdge struct {
 
 // activePath carries the live descent state so a cycle decision uses ONLY
 // the repeated-name loop itself — never an incoming prefix or a sibling
-// branch. Entries maps each active named type to the edge it was entered
-// through; segment records, per active name, whether indirection has been
-// seen on the descent from that name's occurrence to the current node, so a
-// re-entry consults the actual loop back to the first occurrence. Because
-// segment is keyed by the active name and rebuilt on each entry, a sibling
-// branch's indirection and an incoming prefix's indirection can never taint
-// a by-value cycle under the same ancestor.
+// branch. entries maps each active named type to the edge it was entered
+// through. loopSeen maps each active named type to whether the path from
+// THAT type's occurrence down to the current node has crossed an indirection
+// (a pointer/slice/map/chan element). Because loopSeen is re-seeded to false
+// on every entry and restored on exit, an incoming prefix's indirection and
+// a sibling branch's indirection can never leak into a loop they are not
+// part of.
 type activePath struct {
-	entries map[string]namedEdge
-	segment map[string]bool
+	entries  map[string]namedEdge
+	loopSeen map[string]bool
 }
 
 // checkNestedFieldList recurses into the fields of an anonymous struct or
@@ -1488,7 +1488,7 @@ type activePath struct {
 // there is no incoming prefix and no ancestor, so only the loop itself can
 // decide a cycle.
 func checkNestedFieldList(e ast.Expr, named map[string]ast.Expr, what string) error {
-	return checkNestedFieldListEdges(e, named, what, &activePath{entries: map[string]namedEdge{}, segment: map[string]bool{}})
+	return checkNestedFieldListEdges(e, named, what, &activePath{entries: map[string]namedEdge{}, loopSeen: map[string]bool{}})
 }
 
 // checkNestedFieldListEdges is the cycle-aware worker for
@@ -1538,9 +1538,12 @@ func checkNestedFieldListEdges(e ast.Expr, named map[string]ast.Expr, what strin
 // nestedWithIndirection descends into the inner expression of an indirected
 // type (pointer element, slice element, map key/value, channel value): the
 // reference to whatever it leads to is indirected, so a cycle closed through
-// it is finite and legal. Composite (non-Ident) elements pass the
+// it is finite and legal. The indirection is recorded on the loop state of
+// every active named occurrence BEFORE descending, so a loop back to any of
+// them is known to contain it. Composite (non-Ident) elements pass the
 // indirection down so a struct literal behind a pointer is marked indirect.
 func nestedWithIndirection(e ast.Expr, named map[string]ast.Expr, what string, ap *activePath) error {
+	markLoopIndirection(ap)
 	if id, ok := e.(*ast.Ident); ok {
 		return enterNamed(id.Name, true, named, what, ap)
 	}
@@ -1586,19 +1589,18 @@ func descendWithIndirection(e ast.Expr, named map[string]ast.Expr, what string, 
 // REPEATED-NAME LOOP — every edge traversed from the first occurrence of the
 // re-entered name around the loop back to it — passes through at least one
 // indirected edge, which is exactly Go's size rule (the loop then has finite
-// size). The loop's indirection is tracked per active name in ap.segment,
-// rebuilt on each entry and restored on exit, so an incoming prefix's
-// indirection and a sibling branch's indirection can never taint the loop:
-// the loop is exactly the path from the re-entered name's first occurrence
-// to this re-entry.
+// size). The loop's indirection is tracked per active name in ap.loopSeen,
+// re-seeded to false on each entry and restored on exit, so an incoming
+// prefix's indirection and a sibling branch's indirection can never leak
+// into the loop: the loop is exactly the path from the re-entered name's
+// first occurrence to this re-entry.
 func enterNamed(name string, indirection bool, named map[string]ast.Expr, what string, ap *activePath) error {
-	if entry, onPath := ap.entries[name]; onPath {
-		// The cycle closes on THIS reference. It is legal exactly when the
-		// loop from the original occurrence back to it passed through
-		// indirection (finite in Go); a by-value-only loop is infinitely
-		// sized and fails closed. The stored ap.segment[name] is the loop's
-		// own indirection; the current reference is the closing edge.
-		if ap.segment[name] || indirection {
+	if _, onPath := ap.entries[name]; onPath {
+		// The cycle closes on THIS reference. The ONLY decisive evidence is
+		// whether the path from this name's first occurrence to here crossed
+		// an indirection — ap.loopSeen[name] — never the incoming edge that
+		// entered this name (that edge belongs to the prefix before the loop).
+		if ap.loopSeen[name] {
 			return nil
 		}
 		return fmt.Errorf("named type %s re-entered through a by-value-only cycle loop — cyclic fail closed", name)
@@ -1609,39 +1611,37 @@ func enterNamed(name string, indirection bool, named map[string]ast.Expr, what s
 		// closed, so nothing is masked here.
 		return nil
 	}
-	// Push this occurrence. The loop starts fresh: any indirection seen
-	// before this name's first occurrence belongs to an incoming prefix or a
-	// sibling branch and MUST NOT count toward this loop, so the snapshot is
-	// restored on exit.
-	prevEdge, hadPrev := ap.entries[name]
-	prevSeg, hadSeg := ap.segment[name]
+	// Push this occurrence. The loop indirection starts FRESH at false: any
+	// indirection seen before this name's first occurrence belongs to an
+	// incoming prefix or a sibling branch and MUST NOT count toward this
+	// loop. The previous loopSeen is snapshotted and restored on exit so a
+	// sibling branch that reuses this name sees its own loop state, not this
+	// one.
+	prevSeen, hadSeen := ap.loopSeen[name]
 	ap.entries[name] = namedEdge{under: under, indirection: indirection}
-	ap.segment[name] = indirection
+	ap.loopSeen[name] = false
 	defer func() {
-		if hadPrev {
-			ap.entries[name] = prevEdge
+		delete(ap.entries, name)
+		if hadSeen {
+			ap.loopSeen[name] = prevSeen
 		} else {
-			delete(ap.entries, name)
-		}
-		if hadSeg {
-			ap.segment[name] = prevSeg
-		} else {
-			delete(ap.segment, name)
+			delete(ap.loopSeen, name)
 		}
 	}()
 	return checkNestedFieldListEdges(under, named, what, ap)
 }
 
-// markPathIndirection records, for every active named occurrence, that the
-// descent from that occurrence to the current node has now passed through an
-// indirected edge. It is applied when an indirection is traversed, so the
-// loop back to any active name is known to contain indirection. Because it
-// only writes to names currently on the path, a sibling branch that already
-// returned cannot be affected; and because each enterNamed snapshots the
-// segment value it replaces, its own state is restored exactly on exit.
-func markPathIndirection(ap *activePath) {
+// markLoopIndirection records, for every active named occurrence, that the
+// descent from that occurrence down to the current node has crossed an
+// indirected edge. It is called at EACH indirection — a pointer, slice, map
+// or channel element — so that when a name re-enters, ap.loopSeen[name]
+// reflects whether the ACTUAL LOOP back to it contains an indirection. It
+// only mutates loopSeen for names currently on the path, so a sibling branch
+// that already returned is unaffected, and each enterNamed restores its own
+// loopSeen slot exactly on exit.
+func markLoopIndirection(ap *activePath) {
 	for name := range ap.entries {
-		ap.segment[name] = true
+		ap.loopSeen[name] = true
 	}
 }
 
@@ -1674,7 +1674,6 @@ func checkFieldListEdgesIndirected(fl *ast.FieldList, named map[string]ast.Expr,
 	if fl == nil {
 		return nil
 	}
-	markPathIndirection(ap)
 	for _, fld := range fl.List {
 		if err := checkSeamExpr(fld.Type, named, what); err != nil {
 			return err
@@ -1696,6 +1695,35 @@ func receiverTypeName(e ast.Expr) string {
 		return bareIdent(star.X)
 	}
 	return bareIdent(e)
+}
+
+// funcResultTypes maps each function/method declared in this file to the
+// result field types of its OWN signature. It is the C4 positive
+// result-kind evidence: a direct call f(...) is accepted as a value only
+// when every result type resolves non-function (funcResultsAllNonFunc).
+// Methods are keyed by method name (the same key fileFuncs uses).
+func funcResultTypes(decls []ast.Decl) map[string][]ast.Expr {
+	out := map[string][]ast.Expr{}
+	for _, d := range decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name == nil || fd.Type == nil {
+			continue
+		}
+		var results []ast.Expr
+		if fd.Type.Results != nil {
+			for _, fld := range fd.Type.Results.List {
+				for range fld.Names {
+					results = append(results, fld.Type)
+				}
+				// Unnamed result: one field, one result.
+				if len(fld.Names) == 0 {
+					results = append(results, fld.Type)
+				}
+			}
+		}
+		out[fd.Name.Name] = results
+	}
+	return out
 }
 
 // receiverMethodSets maps each local named type to the set of method names
@@ -1731,10 +1759,11 @@ func receiverMethodSets(decls []ast.Decl) map[string]map[string]bool {
 // value exactly when Sel is a declared method of SOME local type — recv is
 // only ever one type, but a name bound from an opaque source cannot be
 // narrowed further, so unioning is the conservative over-approximation. A
-// Sel absent from every method set is then checked against the declared
-// NON-FUNCTION field table (mergedRecvFields); only a positive field match
-// accepts the selector as an ordinary value — absence from BOTH is not
-// proof and fails closed.
+// Sel absent from every method set is then checked for a declared
+// NON-FUNCTION field via receiverHasNonFuncField, which resolves the ACTUAL
+// receiver type; only a positive per-receiver field match accepts the
+// selector as an ordinary value — absence of positive evidence is not proof
+// and fails closed.
 func mergedRecvMethods(recvMethods map[string]map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	for _, set := range recvMethods {
@@ -1745,17 +1774,26 @@ func mergedRecvMethods(recvMethods map[string]map[string]bool) map[string]bool {
 	return out
 }
 
-// declaredRecvFields maps each local named struct type to the set of FIELD
-// names declared directly in its own struct literal. It is the positive
-// NON-FUNCTION-field evidence for the selector rule: a selector recv.Sel
-// whose Sel names a declared field of a local struct type is provably an
-// ordinary value, never a method value. Named fields are collected from
-// every struct TypeSpec in the file (a field's type is never a FuncType,
-// which checkSeamExpr already rejects, so a declared field is a value
-// field); embedded fields contribute their type name. Absence of Sel from
-// this table is NOT proof of non-function — it fails closed.
-func declaredRecvFields(decls []ast.Decl) map[string]map[string]bool {
-	out := map[string]map[string]bool{}
+// recvField records a single declared field of a local struct type: its
+// type expression (for non-function proof) and whether it is exported.
+type recvField struct {
+	typ     ast.Expr
+	exported bool
+}
+
+// declaredRecvFields maps each local named struct type to the fields
+// declared directly in its OWN struct literal. It is the positive
+// NON-FUNCTION-field evidence for the selector rule: recv.Sel is accepted
+// only when the ACTUAL receiver type's OWN struct declares a field named
+// Sel whose type is positively non-function. A global name union is NOT
+// used — two different structs may share a field name, so the receiver's
+// own type is resolved and consulted. Named fields are collected from every
+// struct TypeSpec; a declared field's type is never a FuncType (checkSeamExpr
+// already rejects FuncType in field position), so a declared field is a
+// value field when its type resolves non-function. Absence is NOT proof —
+// it fails closed.
+func declaredRecvFields(decls []ast.Decl) map[string]map[string]recvField {
+	out := map[string]map[string]recvField{}
 	for _, d := range decls {
 		gd, ok := d.(*ast.GenDecl)
 		if !ok || gd.Tok != token.TYPE {
@@ -1771,16 +1809,16 @@ func declaredRecvFields(decls []ast.Decl) map[string]map[string]bool {
 				continue
 			}
 			if out[ts.Name.Name] == nil {
-				out[ts.Name.Name] = map[string]bool{}
+				out[ts.Name.Name] = map[string]recvField{}
 			}
 			for _, fld := range st.Fields.List {
 				for _, nm := range fld.Names {
-					out[ts.Name.Name][nm.Name] = true
+					out[ts.Name.Name][nm.Name] = recvField{typ: fld.Type, exported: nm.IsExported()}
 				}
 				// Embedded field: its type name is the field name.
 				if len(fld.Names) == 0 {
 					if id, ok := fld.Type.(*ast.Ident); ok {
-						out[ts.Name.Name][id.Name] = true
+						out[ts.Name.Name][id.Name] = recvField{typ: fld.Type, exported: id.IsExported()}
 					}
 				}
 			}
@@ -1789,17 +1827,54 @@ func declaredRecvFields(decls []ast.Decl) map[string]map[string]bool {
 	return out
 }
 
-// mergedRecvFields unions every local struct type's declared field set into
-// one name set, mirroring mergedRecvMethods. A value-receiver selector is
-// accepted as an ordinary field ONLY on a positive match here.
-func mergedRecvFields(recvFields map[string]map[string]bool) map[string]bool {
-	out := map[string]bool{}
-	for _, set := range recvFields {
-		for f := range set {
-			out[f] = true
-		}
+// receiverHasNonFuncField is the C3 positive proof: it resolves the ACTUAL
+// receiver base to its named type and checks that type's OWN struct declares
+// a field named sel whose type is positively non-function. The receiver's
+// declared type is taken from the named-value table; a name whose type is
+// unknown, or whose struct does not declare sel as a non-function field,
+// yields no proof (returns false), so the caller fails closed.
+func receiverHasNonFuncField(recvBase string, sel string, named map[string]ast.Expr, typeFields map[string]map[string]recvField) bool {
+	tn := declaredTypeName(recvBase, named)
+	if tn == "" {
+		return false
 	}
-	return out
+	flds, ok := typeFields[tn]
+	if !ok {
+		return false
+	}
+	f, ok := flds[sel]
+	if !ok {
+		return false
+	}
+	// The field's type must resolve positively non-function.
+	reaches, err := seamUnderlying(f.typ, named, map[string]bool{})
+	if err != nil {
+		return false
+	}
+	return !reaches
+}
+
+// declaredTypeName resolves a value name to its declared named TYPE by
+// looking up its recorded binding. A := or var/const binding records either
+// a bare type name (struct variable), a selector field name, or an opaque
+// value. Only a binding that names a local named type (via a bare Ident
+// whose underlying is a struct) yields a type name; anything else resolves
+// to "" (unknown type), which the selector rule treats as no proof.
+func declaredTypeName(name string, named map[string]ast.Expr) string {
+	b, ok := named[name]
+	if !ok {
+		return ""
+	}
+	id, ok := b.(*ast.Ident)
+	if !ok {
+		return ""
+	}
+	// The binding names a type only if that name is a declared local type
+	// whose underlying is a struct (not a function, not an unresolvable).
+	if _, isType := named[id.Name]; !isType {
+		return ""
+	}
+	return id.Name
 }
 
 // classifyBindingRHS applies the declaration-time function-value rule to a
@@ -1811,7 +1886,7 @@ func mergedRecvFields(recvFields map[string]map[string]bool) map[string]bool {
 // seam rejected even if never called. A bare non-function name, a closed
 // non-func package value, or a provably-field selector is recorded as an
 // ordinary value; any other producer is an opaque value binding.
-func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) error {
+func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	r := rhs
 	for {
 		if p, ok := r.(*ast.ParenExpr); ok {
@@ -1855,15 +1930,15 @@ func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 		case baseIsIdent:
 			// Value receiver recv.Sel: a dispatch seam when Sel is a declared
 			// method of a local named type (methods table, including pointer
-			// receivers); an ordinary value ONLY on positive evidence that Sel
-			// is a declared NON-FUNCTION field of a local struct type (fields
-			// table). Absence from both tables is not proof of non-function —
-			// a promoted, embedded, or cross-file member cannot be ruled out —
-			// so it fails closed.
+			// receivers); an ordinary value ONLY on positive evidence that the
+			// ACTUAL receiver type's OWN struct declares Sel as a
+			// NON-FUNCTION field (receiverHasNonFuncField). A global field-name
+			// union is NOT proof — the receiver's own type is resolved and
+			// consulted. Absence of positive evidence fails closed.
 			if methods[v.Sel.Name] {
 				return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
 			}
-			if fields[v.Sel.Name] {
+			if receiverHasNonFuncField(base.Name, v.Sel.Name, named, typeFields) {
 				named[id.Name] = &ast.Ident{Name: v.Sel.Name}
 				break
 			}
@@ -1890,7 +1965,7 @@ func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 // independent value for each LHS. The accepted comma-ok map lookup and
 // direct-call forms classify as value via bindingValueKind's positive
 // result/element evidence.
-func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) error {
+func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	// Classify the declaration's actual result producer once. For 1:1 this is
 	// the per-index RHS; for a single-RHS form it is that one RHS. A named
 	// function/method value in the actual result tuple is a dispatch seam.
@@ -1900,7 +1975,7 @@ func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named
 			if id.Name == "_" {
 				continue
 			}
-			if err := classifyOneBinding(id, values[i], named, fileFuncs, filePkgs, methods, fields); err != nil {
+			if err := classifyOneBinding(id, values[i], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 				return err
 			}
 		}
@@ -1909,7 +1984,7 @@ func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named
 		// One result tuple applied to several names: classify the single
 		// actual RHS once, and record a binding for each named variable so a
 		// later alias or call of any of them resolves to the same value.
-		kind := bindingValueKind(values[0], named, fileFuncs, filePkgs, methods, fields)
+		kind := bindingValueKind(values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		if kind == "func" {
 			return fmt.Errorf("declaration binds a function or method value — fail closed")
 		}
@@ -1932,11 +2007,11 @@ func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named
 // classifyOneBinding rejects a single name/value binding whose RHS is a
 // named function or method value, and records an ordinary value binding
 // otherwise so a later alias or call of the name resolves.
-func classifyOneBinding(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) error {
+func classifyOneBinding(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	if rhs == nil {
 		return nil
 	}
-	kind := bindingValueKind(rhs, named, fileFuncs, filePkgs, methods, fields)
+	kind := bindingValueKind(rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	if kind == "func" {
 		return fmt.Errorf("variable %s is bound to a function or method value — fail closed", id.Name)
 	}
@@ -1957,7 +2032,7 @@ func classifyOneBinding(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 // or a declared method selector is 'func'; anything whose kind cannot be
 // positively determined is 'unknown' (never assumed a value) and fails
 // closed.
-func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) string {
+func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) string {
 	r := rhs
 	for {
 		if p, ok := r.(*ast.ParenExpr); ok {
@@ -1995,13 +2070,14 @@ func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[str
 			}
 			return "unknown"
 		}
-		// Value receiver: a declared method is a function value; a declared
-		// NON-FUNCTION field is positive non-function evidence. Absence from
-		// both tables is not proof, so it is unknown.
+		// Value receiver: a declared method is a function value; the ACTUAL
+		// receiver type's OWN declared NON-FUNCTION field is positive
+		// non-function evidence. A global field-name union is NOT proof, and
+		// absence of positive evidence is unknown, never assumed a value.
 		if methods[v.Sel.Name] {
 			return "func"
 		}
-		if fields[v.Sel.Name] {
+		if receiverHasNonFuncField(base.Name, v.Sel.Name, named, typeFields) {
 			return "value"
 		}
 		return "unknown"
@@ -2010,26 +2086,34 @@ func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[str
 		// (recv.Field(...), pkg.Value(...), time.Duration(...)) is classified
 		// by its callee like the selector it wraps.
 		if sel, ok := v.Fun.(*ast.SelectorExpr); ok {
-			return bindingValueKind(sel, named, fileFuncs, filePkgs, methods, fields)
+			return bindingValueKind(sel, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		}
-		// A direct call f(...) is a value when the callee is positively
-		// non-function: a declared function of this file (none returns a
-		// function), a builtin, or a named non-function TYPE used as a
-		// conversion. Anything else is unknown.
+		// A direct call f(...) is a value when its ACTUAL return kinds are
+		// positively non-function: the callee is a declared function whose
+		// result fields (from its own signature) resolve non-function, or a
+		// builtin/named non-function type used as a conversion. Callee
+		// membership in fileFuncs alone is NOT result-kind proof.
 		if id, ok := v.Fun.(*ast.Ident); ok {
-			if fileFuncs[id.Name] || isBuiltinTypeName(id.Name) || isGoBuiltinName(id.Name) {
+			if isBuiltinTypeName(id.Name) || isGoBuiltinName(id.Name) {
 				return "value"
 			}
 			if typeIsNonFunc(id.Name, named) {
+				return "value"
+			}
+			if fileFuncs[id.Name] && funcResultsAllNonFunc(id.Name, funcResults) {
 				return "value"
 			}
 			return "unknown"
 		}
 		return "unknown"
 	case *ast.IndexExpr, *ast.IndexListExpr:
-		// An index into a container (map/slice/array element) is a value
-		// position; the comma-ok map lookup m.records[key] is exactly this.
-		return "value"
+		// An index into a container (the comma-ok map lookup m.records[key],
+		// slice/array element) is a value ONLY on positive element-kind proof:
+		// the container's element type resolves non-function.
+		if containerElementNonFunc(v.X, named) {
+			return "value"
+		}
+		return "unknown"
 	case *ast.CompositeLit:
 		// A struct/array/slice/map literal is a composite value.
 		return "value"
@@ -2082,11 +2166,83 @@ func typeIsNonFunc(name string, named map[string]ast.Expr) bool {
 	return !reaches
 }
 
+// funcResultsAllNonFunc is the C4 positive result-kind proof for a direct
+// call f(...): every result field in f's OWN declared signature must resolve
+// positively non-function. funcResults maps each declared function to its
+// result field types; if f is not declared, declares no results, or ANY
+// result resolves to a function type, there is no positive proof and the
+// call is not accepted on callee membership alone.
+func funcResultsAllNonFunc(name string, funcResults map[string][]ast.Expr) bool {
+	results, ok := funcResults[name]
+	if !ok {
+		return false
+	}
+	return exprsAllNonFunc(results)
+}
+
+// containerElementNonFunc is the C4 positive element-kind proof for an index
+// expression container[key]: it resolves the container's element type (a
+// map value, slice/array element, or pointer element) and requires it to
+// resolve positively non-function. The comma-ok map lookup m.records[key] is
+// accepted exactly when the map's value type (sessionRecord, a struct of
+// time.Time fields) is non-function.
+func containerElementNonFunc(container ast.Expr, named map[string]ast.Expr) bool {
+	switch c := container.(type) {
+	case *ast.Ident:
+		under, ok := named[c.Name]
+		if !ok {
+			return false
+		}
+		elem := containerElemType(under)
+		if elem == nil {
+			return false
+		}
+		reaches, err := seamUnderlying(elem, named, map[string]bool{})
+		if err != nil {
+			return false
+		}
+		return !reaches
+	default:
+		return false
+	}
+}
+
+// containerElemType returns the element type of a container underlying type:
+// a map's value, a slice/array's element, or a pointer's element. Any other
+// shape has no single element type.
+func containerElemType(under ast.Expr) ast.Expr {
+	switch t := under.(type) {
+	case *ast.MapType:
+		return t.Value
+	case *ast.ArrayType:
+		return t.Elt
+	case *ast.StarExpr:
+		return t.X
+	default:
+		return nil
+	}
+}
+
+// exprsAllNonFunc reports whether every expression in list resolves
+// positively non-function (no FuncType at any depth, no resolution error).
+func exprsAllNonFunc(list []ast.Expr) bool {
+	for _, e := range list {
+		reaches, err := seamUnderlying(e, map[string]ast.Expr{}, map[string]bool{})
+		if err != nil {
+			return false
+		}
+		if reaches {
+			return false
+		}
+	}
+	return true
+}
+
 // checkStmt fails on function-typed variables (explicit type or inferred
 // from a function literal), assignment or return of a function-typed
 // expression, function literals appearing as values, and any call or
 // conversion whose target or nested expression is function-typed.
-func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) error {
+func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	switch st := s.(type) {
 	case *ast.BadStmt:
 		return fmt.Errorf("parser produced a malformed statement — fail closed")
@@ -2097,7 +2253,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		// position; they cannot introduce or dispatch a function value.
 	case *ast.DeclStmt:
 		if gd, ok := st.Decl.(*ast.GenDecl); ok {
-			return checkDecls([]ast.Decl{gd}, named, fileFuncs, filePkgs, methods, fields)
+			return checkDecls([]ast.Decl{gd}, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		}
 	case *ast.AssignStmt:
 		if st.Tok == token.DEFINE {
@@ -2126,7 +2282,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		if st.Tok == token.DEFINE {
 			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-					if err := classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods, fields); err != nil {
+					if err := classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return err
 					}
 				}
@@ -2137,7 +2293,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						ids = append(ids, id)
 					}
 				}
-				if err := checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods, fields); err != nil {
+				if err := checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 					return err
 				}
 			}
@@ -2155,41 +2311,41 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		}
 	case *ast.BlockStmt:
 		for _, inner := range st.List {
-			if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, fields); err != nil {
+			if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 				return err
 			}
 		}
 	case *ast.IfStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
 		if st.Else != nil {
-			if err := checkStmt(st.Else, named, fileFuncs, filePkgs, methods, fields); err != nil {
+			if err := checkStmt(st.Else, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 				return err
 			}
 		}
 	case *ast.ForStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
-		if err := checkBranchStmtInitAssign(st.Post, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkBranchStmtInitAssign(st.Post, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
 	case *ast.RangeStmt:
 		if exprReachesFuncType(st.X) {
 			return fmt.Errorf("ranged-over expression is function-typed")
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
 	case *ast.SwitchStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
 		if st.Body != nil {
@@ -2204,7 +2360,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, fields); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return err
 					}
 				}
@@ -2229,7 +2385,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 			}
 		}
 	case *ast.LabeledStmt:
-		if err := checkStmt(st.Stmt, named, fileFuncs, filePkgs, methods, fields); err != nil {
+		if err := checkStmt(st.Stmt, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
 	case *ast.GoStmt:
@@ -2256,12 +2412,12 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 					return fmt.Errorf("select body holds a non-communication clause — fail closed")
 				}
 				if cc.Comm != nil {
-					if err := checkStmt(cc.Comm, named, fileFuncs, filePkgs, methods, fields); err != nil {
+					if err := checkStmt(cc.Comm, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return err
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, fields); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return err
 					}
 				}
@@ -2269,7 +2425,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		}
 	case *ast.TypeSwitchStmt:
 		if st.Assign != nil {
-			if err := checkStmt(st.Assign, named, fileFuncs, filePkgs, methods, fields); err != nil {
+			if err := checkStmt(st.Assign, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 				return err
 			}
 		}
@@ -2285,7 +2441,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, fields); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return err
 					}
 				}
@@ -2410,11 +2566,11 @@ func checkFuncCallSite(call *ast.CallExpr, named map[string]ast.Expr, fileFuncs 
 	return nil
 }
 
-func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) error {
+func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	if s == nil {
 		return nil
 	}
-	return checkStmt(s, named, fileFuncs, filePkgs, methods, fields)
+	return checkStmt(s, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 }
 
 // checkDecls enforces the D-6b/SEC-2 seam ban over whole declarations and
@@ -2425,7 +2581,7 @@ func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs 
 // is a forbidden seam. Struct fields, named/aliased function types,
 // variables (explicit or inferred), literals, nested wrappers and every
 // body statement are covered.
-func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, fields map[string]bool) error {
+func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	for _, d := range decls {
 		switch decl := d.(type) {
 		case *ast.GenDecl:
@@ -2481,7 +2637,7 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 						if len(vs.Names) == 1 && len(vs.Values) == 1 {
 							id := vs.Names[0]
 							if id.Name != "_" {
-								if err := classifyBindingRHS(id, vs.Values[i], named, fileFuncs, filePkgs, methods, fields); err != nil {
+								if err := classifyBindingRHS(id, vs.Values[i], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 									return err
 								}
 							}
@@ -2490,7 +2646,7 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 							for _, nm := range vs.Names {
 								ids = append(ids, nm)
 							}
-							if err := checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, fields); err != nil {
+							if err := checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 								return err
 							}
 						}
@@ -2512,7 +2668,7 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 			}
 			if decl.Body != nil {
 				for _, s := range decl.Body.List {
-					if err := checkStmt(s, named, fileFuncs, filePkgs, methods, fields); err != nil {
+					if err := checkStmt(s, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return fmt.Errorf("in %s: %w", decl.Name.Name, err)
 					}
 				}
@@ -2593,12 +2749,20 @@ func assertNoFunctionSeams(fileName string, f *ast.File) error {
 	// positive-evidence tables for the selector rule: a recv.Sel whose Sel IS
 	// a declared method is a bound method value (a function-typed seam).
 	methods := mergedRecvMethods(receiverMethodSets(f.Decls))
-	// fields is the union of every FIELD name declared on a local named
-	// struct type by this file — the second positive-evidence table. A
-	// recv.Sel whose Sel is a declared field is provably an ordinary value;
-	// a Sel matching NEITHER table has no positive proof and fails closed.
-	fields := mergedRecvFields(declaredRecvFields(f.Decls))
-	return checkDecls(f.Decls, named, fileFuncs, filePkgs, methods, fields)
+	// typeFields maps each local named struct type to the fields declared in
+	// its OWN struct literal (with each field's type). It is the second
+	// positive-evidence table for the selector rule: a value-receiver
+	// selector recv.Sel is accepted ONLY when receiverHasNonFuncField resolves
+	// the ACTUAL receiver type and finds Sel declared there as a
+	// non-function field — a global name union is never used.
+	typeFields := declaredRecvFields(f.Decls)
+	// funcResults maps each function/method declared in this file to the
+	// result field types of its OWN signature, so a direct call f(...) is
+	// accepted as a value ONLY when every actual result kind resolves
+	// non-function (funcResultsAllNonFunc) — callee membership alone is not
+	// result-kind proof.
+	funcResults := funcResultTypes(f.Decls)
+	return checkDecls(f.Decls, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 }
 
 // siblingPackageTypeNames is the closed set of package-local type names

@@ -1656,16 +1656,16 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		}
 		if st.Body != nil {
 			for _, cse := range st.Body.List {
-				tc, ok := cse.(*ast.TypeSwitchCase)
+				cc, ok := cse.(*ast.CaseClause)
 				if !ok {
 					return fmt.Errorf("type switch body holds a non-case clause — fail closed")
 				}
-				for _, e := range tc.Cases {
+				for _, e := range cc.List {
 					if exprReachesFuncType(e) {
 						return fmt.Errorf("type switch case type is function-typed")
 					}
 				}
-				for _, inner := range tc.Body {
+				for _, inner := range cc.Body {
 					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
 						return err
 					}
@@ -1732,13 +1732,6 @@ func checkCallTarget(fn ast.Expr, named map[string]ast.Expr, fileFuncs map[strin
 		// nor a predeclared name cannot be resolved from the parsed file —
 		// fail closed rather than assume it is not a function value.
 		return fmt.Errorf("%s call target %s is neither a function declared in this file nor a builtin — fail closed", what, t.Name)
-		if isGoBuiltinTypeName(t.Name) {
-			// Conversion to a predeclared type is not a dispatch seam.
-			return nil
-		}
-		// A bare name that is neither a local binding, a this-file function
-		// nor a predeclared name cannot be resolved from the parsed file —
-		// fail closed rather than assume it is not a function value.
 	case *ast.SelectorExpr:
 		// Qualified or method call: passes only when the base Ident names
 		// a package THIS file actually imports (filePackageNames-derived,

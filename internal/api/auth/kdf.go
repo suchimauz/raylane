@@ -1,6 +1,10 @@
 // Package auth holds the private admin-verifier KDF primitive (format V1).
 //
-// This package exports NOTHING: it is the in-memory boundary between the
+// This package exposes NO exported package-level authentication API: every
+// package-level func, type, const and var is unexported; the only exported
+// NAME anywhere in the package is the standard error interface method
+// Error() on the unexported saltSourceError receiver, required verbatim by
+// the error interface. The package is the in-memory boundary between the
 // decoded verifier fields and the maintained Argon2id implementation. The
 // storage-boundary guard in internal/store (the accepted K1 guard) is a
 // separate, authoritative gate; this primitive does not replace, weaken or
@@ -38,9 +42,10 @@ const (
 // CONSTRUCTION and is constructed fresh AT EVERY RETURN SITE — it never
 // consults any package-level variable. The message is a fixed, non-empty,
 // non-sensitive constant: no password, salt, key, record, length, reader or
-// caller data, and never foreign reader error text. (The capitalized "Auth"
-// is not used: error() text convention applies; this type and its method
-// are unexported, so the package still exports nothing.)
+// caller data, and never foreign reader error text. Error() below is the
+// REQUIRED standard-error method: its name must be capitalized to satisfy
+// the error interface, and a method on this unexported receiver is NOT an
+// exported package-level authentication API.
 type saltSourceError struct{}
 
 func (saltSourceError) Error() string {

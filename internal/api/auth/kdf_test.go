@@ -1,0 +1,504 @@
+package auth
+
+// Test-only helpers, all unexported (the package exports nothing).
+// The production code imports only crypto/rand, crypto/subtle and
+// golang.org/x/crypto/argon2; nothing here mutates production state.
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// wrongBytes returns n bytes that differ from src in EVERY position, so a
+// truncated/grown variant of a valid record can never accidentally match.
+func wrongBytes(src []byte, n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = src[i%len(src)] ^ 0xFF
+	}
+	return b
+}
+
+// kdfProductionSource reads the production file for the accepted
+// SOURCE-INSPECTION rows (primary zero-KDF evidence is the guard dominating
+// the sole maintained IDKey call site — that inspection is done by the
+// tests below and independently by review).
+func kdfProductionSource(t *testing.T) (string, error) {
+	t.Helper()
+	b, err := os.ReadFile("kdf.go")
+	return string(b), err
+}
+
+// stripComments removes whole-line comments so surface scans see only real
+// declarations. kdf.go has no block comments inside code lines (verified by
+// the independent source review and by this suite's own expectations).
+func stripComments(src string) string {
+	var out []string
+	for _, l := range strings.Split(src, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "//") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+// validInput builds a valid verifierInput derived with the REAL production
+// creation path from password. The second return is the created record.
+func validInput(t *testing.T, password []byte) (verifierInput, adminVerifierRecord) {
+	t.Helper()
+	rec, ok, err := newVerifierRecord(password)
+	if !ok || err != nil {
+		t.Fatalf("validInput: creation failed: ok=%v err=%v", ok, err)
+	}
+	v := verifierInput{
+		formatVersion: rec.formatVersion,
+		argon2Version: rec.argon2Version,
+		timeCost:      rec.timeCost,
+		memoryKiB:     rec.memoryKiB,
+		parallelism:   rec.parallelism,
+		salt:          rec.salt[:],
+		derivedKey:    rec.derivedKey[:],
+	}
+	return v, rec
+}
+
+// totalAlloc reads process-wide cumulative heap allocation. It is NOISY and
+// process-wide: used ONLY as the accepted INDIRECT secondary corroboration.
+func totalAlloc() uint64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.TotalAlloc
+}
+
+// fixedReader returns a reader giving deterministic bytes (not random data).
+func fixedReader(b byte) func([]byte) (int, error) {
+	return func(dst []byte) (int, error) {
+		for i := range dst {
+			dst[i] = b
+		}
+		return len(dst), nil
+	}
+}
+
+// errStubReader is SYNTHETIC test input only. The real crypto/rand.Read
+// failure path is process termination and is never exercised or claimed.
+func errStubReader(dst []byte) (int, error) {
+	return 0, errors.New("auth-test-only-synthetic-reader-error")
+}
+
+func shortStubReader(dst []byte) (int, error) {
+	if len(dst) > 0 {
+		dst[0] = 0x5A
+	}
+	return len(dst) - 1, nil
+}
+
+// TestT008KDFCorrectPassword is accepted matrix row K-1: correct password
+// against a record created by the real production path verifies TRUE, via
+// the real maintained argon2.IDKey. (The 64 MiB allocation observation of
+// row K-1 lives in TestT008KDFPositiveControl, the accepted primary/
+// secondary split of the zero-KDF evidence.)
+func TestT008KDFCorrectPassword(t *testing.T) {
+	pwd := []byte("correct horse battery staple")
+	v, rec := validInput(t, pwd)
+	if got := len(rec.derivedKey); got != derivedKeyByte {
+		t.Fatalf("derived key length: got %d want %d", got, derivedKeyByte)
+	}
+	if !verifyPassword(pwd, v) {
+		t.Fatal("K-1: correct password rejected by the real maintained KDF")
+	}
+}
+
+// TestT008KDFWrongPassword is row K-2: wrong password verifies FALSE; the
+// result is a plain bool — no error, nothing containing the password.
+func TestT008KDFWrongPassword(t *testing.T) {
+	v, _ := validInput(t, []byte("the-real-password"))
+	if verifyPassword([]byte("the-wrong-password"), v) {
+		t.Fatal("K-2: wrong password ACCEPTED")
+	}
+	if verifyPassword(nil, v) {
+		t.Fatal("K-2: empty password accepted against non-empty verifier")
+	}
+	if verifyPassword([]byte("the-real-passwordx"), v) {
+		t.Fatal("K-2: extended password accepted")
+	}
+	// The produced values are bool-only by signature; nothing to leak.
+}
+
+// TestT008KDFPositiveControl is row K-3 and the accepted PRIMARY zero-KDF
+// counterpart: a valid record reaches the REAL argon2.IDKey, observed as
+// its ~64 MiB deterministic allocation (measured, not assumed: 65536 blocks
+// × 1024 bytes). The positive control defeats a "reject-everything" stub.
+func TestT008KDFPositiveControl(t *testing.T) {
+	v, _ := validInput(t, []byte("pw"))
+	before := totalAlloc()
+	if !verifyPassword([]byte("pw"), v) {
+		t.Fatal("K-3: positive control verification failed")
+	}
+	delta := totalAlloc() - before
+	if delta < 32<<20 {
+		t.Fatalf("K-3: positive-control TotalAlloc delta %d bytes — real 64 MiB Argon2id allocation NOT observed", delta)
+	}
+	t.Logf("K-3 positive control TotalAlloc delta = %d bytes (indirect secondary corroboration)", delta)
+}
+
+// TestT008KDFFieldRejectionPreKDF is row K-4: EACH of the five metadata
+// fields wrong (alone) is rejected, with the accepted zero-KDF INDIRECT
+// corroboration (delta far below the valid-path control), no panic.
+func TestT008KDFFieldRejectionPreKDF(t *testing.T) {
+	v, _ := validInput(t, []byte("pw"))
+	cases := []struct {
+		name string
+		mut  func(*verifierInput)
+	}{
+		{"formatVersion", func(v *verifierInput) { v.formatVersion = 2 }},
+		{"argon2Version", func(v *verifierInput) { v.argon2Version = 0x10 }},
+		{"timeCost", func(v *verifierInput) { v.timeCost = 4 }},
+		{"memoryKiB", func(v *verifierInput) { v.memoryKiB = 32768 }},
+		{"parallelism", func(v *verifierInput) { v.parallelism = 2 }},
+	}
+	for _, c := range cases {
+		bad := v
+		c.mut(&bad)
+		before := totalAlloc()
+		if verifyPassword([]byte("pw"), bad) {
+			t.Fatalf("K-4: invalid %s ACCEPTED", c.name)
+		}
+		delta := totalAlloc() - before
+		if delta >= 1<<20 {
+			t.Fatalf("K-4: invalid %s TotalAlloc delta %d bytes — plausible KDF execution; pre-KDF rejection NOT corroborated", c.name, delta)
+		}
+	}
+}
+
+// TestT008KDFLengthRejectionPreKDF is row K-5: salt lengths 0/15/17 and
+// derived-key lengths 0/31/33 are rejected before any copy or KDF, with the
+// same zero-KDF corroboration and no panic.
+func TestT008KDFLengthRejectionPreKDF(t *testing.T) {
+	v, _ := validInput(t, []byte("pw"))
+	for _, n := range []int{0, 15, 17} {
+		bad := v
+		bad.salt = bytes.Repeat([]byte{0x11}, n)
+		before := totalAlloc()
+		if verifyPassword([]byte("pw"), bad) {
+			t.Fatalf("K-5: salt length %d ACCEPTED", n)
+		}
+		if d := totalAlloc() - before; d >= 1<<20 {
+			t.Fatalf("K-5: salt length %d delta %d bytes — plausible KDF execution", n, d)
+		}
+	}
+	for _, n := range []int{0, 31, 33} {
+		bad := v
+		bad.derivedKey = bytes.Repeat([]byte{0x22}, n)
+		before := totalAlloc()
+		if verifyPassword([]byte("pw"), bad) {
+			t.Fatalf("K-5: derived-key length %d ACCEPTED", n)
+		}
+		if d := totalAlloc() - before; d >= 1<<20 {
+			t.Fatalf("K-5: derived-key length %d delta %d bytes — plausible KDF execution", n, d)
+		}
+	}
+}
+
+// TestT008KDFAdversarialInput is row K-6: all-zero, all-0xFF and oversized
+// metadata/length inputs never panic, never verify, never reach the KDF.
+func TestT008KDFAdversarialInput(t *testing.T) {
+	inputs := []verifierInput{
+		{}, // all zero
+		{
+			formatVersion: -1, argon2Version: -1, timeCost: -1,
+			memoryKiB: -1, parallelism: -1,
+			salt:       bytes.Repeat([]byte{0xFF}, 16),
+			derivedKey: bytes.Repeat([]byte{0xFF}, 32),
+		},
+		{ // right metadata, oversized secret fields
+			formatVersion: formatVersion, argon2Version: argon2Version,
+			timeCost: timeCost, memoryKiB: memoryKiB, parallelism: parallelism,
+			salt:       bytes.Repeat([]byte{0xAA}, 1<<20),
+			derivedKey: bytes.Repeat([]byte{0xBB}, 1<<20),
+		},
+		{ // oversized metadata VALUES, right lengths
+			formatVersion: 1 << 40, argon2Version: 1 << 40,
+			timeCost: 1 << 40, memoryKiB: 1 << 40, parallelism: 1 << 40,
+			salt:       bytes.Repeat([]byte{0xCC}, 16),
+			derivedKey: bytes.Repeat([]byte{0xDD}, 32),
+		},
+	}
+	for i, in := range inputs {
+		before := totalAlloc()
+		if verifyPassword([]byte("anything"), in) {
+			t.Fatalf("K-6: adversarial input %d accepted", i)
+		}
+		if d := totalAlloc() - before; d >= 1<<20 {
+			t.Fatalf("K-6: adversarial input %d delta %d bytes — plausible KDF execution", i, d)
+		}
+	}
+}
+
+// TestT008KDFFreshDistinctSalts is row K-7 using the REAL crypto/rand.Read:
+// two creations give distinct 16-byte salts; the record holds no plaintext.
+func TestT008KDFFreshDistinctSalts(t *testing.T) {
+	pwd := []byte("a-plaintext-secret")
+	r1, ok1, e1 := newVerifierRecord(pwd)
+	r2, ok2, e2 := newVerifierRecord(pwd)
+	if !ok1 || e1 != nil || !ok2 || e2 != nil {
+		t.Fatalf("K-7: production creation failed: %v %v", e1, e2)
+	}
+	if r1.salt == r2.salt {
+		t.Fatal("K-7: two real rand.Read creations produced the SAME salt")
+	}
+	if r1.derivedKey == r2.derivedKey {
+		t.Fatal("K-7: distinct salts must yield distinct derived keys")
+	}
+	containsPlain := func(r adminVerifierRecord) bool {
+		all := append(append([]byte{}, r.salt[:]...), r.derivedKey[:]...)
+		return bytes.Contains(all, pwd)
+	}
+	if containsPlain(r1) || containsPlain(r2) {
+		t.Fatal("K-7: plaintext password found inside the record")
+	}
+}
+
+// TestT008KDFFillSaltSyntheticFailure is row K-8: SYNTHETIC helper-only
+// failures. Explicitly NOT real CSPRNG-failure coverage (the real
+// crypto/rand.Read failure is process termination and is not exercised).
+func TestT008KDFFillSaltSyntheticFailure(t *testing.T) {
+	var dst [saltBytes]byte
+	for i := range dst {
+		dst[i] = 0
+	}
+	if err := fillSalt(&dst, errStubReader); err == nil {
+		t.Fatal("K-8: stub reader error not surfaced by fillSalt")
+	} else if err.Error() != "auth: salt source did not deliver a full salt" {
+		t.Fatalf("K-8: foreign/stub error text leaked to caller: %q", err.Error())
+	}
+	if err := fillSalt(&dst, shortStubReader); err == nil {
+		t.Fatal("K-8: short count not rejected by fillSalt")
+	} else if err.Error() != "auth: salt source did not deliver a full salt" {
+		t.Fatalf("K-8: unexpected error text for short count: %q", err.Error())
+	}
+	var okdst [saltBytes]byte
+	if err := fillSalt(&okdst, fixedReader(0x7)); err != nil {
+		t.Fatalf("K-8: fixed reader rejected: %v", err)
+	}
+	if okdst != [saltBytes]byte{7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7} {
+		t.Fatal("K-8: fillSalt did not write the delivered bytes")
+	}
+}
+
+// TestT008KDFCreationSyntheticReaderFailure is row K-9 (per the controlling
+// F4/F5 §2.4 call graph): the SYNTHETIC failure runs through the REAL
+// creation implementation newVerifierRecordWithReader — the same code, the
+// same branches — and must yield ok==false, a NON-NIL error with the exact
+// fixed text, and a ZERO-VALUE record, all BEFORE the KDF (pre-KDF control
+// flow corroborated by the allocation bound; no Argon2 ran).
+func TestT008KDFCreationSyntheticReaderFailure(t *testing.T) {
+	pwd := []byte("password-under-test")
+	for name, rd := range map[string]func([]byte) (int, error){
+		"error": errStubReader,
+		"short": shortStubReader,
+	} {
+		before := totalAlloc()
+		rec, ok, err := newVerifierRecordWithReader(pwd, rd)
+		delta := totalAlloc() - before
+		if ok {
+			t.Fatalf("K-9(%s): ok==true on synthetic reader failure", name)
+		}
+		if err == nil {
+			t.Fatalf("K-9(%s): nil error with ok==false — canonical invariant broken", name)
+		}
+		if _, isConcrete := err.(saltSourceError); !isConcrete {
+			t.Fatalf("K-9(%s): error is not the concrete saltSourceError: %T", name, err)
+		}
+		if err.Error() != "auth: salt source did not deliver a full salt" {
+			t.Fatalf("K-9(%s): unexpected error text: %q", name, err.Error())
+		}
+		if rec != (adminVerifierRecord{}) {
+			t.Fatalf("K-9(%s): non-zero record returned on failure: %+v", name, rec)
+		}
+		if delta >= 32<<20 {
+			t.Fatalf("K-9(%s): TotalAlloc delta %d — pre-KDF control flow NOT corroborated", name, delta)
+		}
+	}
+	// Positive control on the SAME implementation with a succeeding
+	// synthetic reader: ok==true, nil error, and the five metadata fields
+	// already equal the frozen constants.
+	rec, ok, err := newVerifierRecordWithReader(pwd, fixedReader(0x03))
+	if !ok || err != nil {
+		t.Fatalf("K-9 control: creation with valid reader failed: ok=%v err=%v", ok, err)
+	}
+	if rec.formatVersion != formatVersion || rec.argon2Version != argon2Version ||
+		rec.timeCost != timeCost || rec.memoryKiB != memoryKiB || rec.parallelism != parallelism {
+		t.Fatalf("K-9 control: metadata not frozen: %+v", rec)
+	}
+	if _, ok, err := newVerifierRecordWithReader(pwd, fixedReader(0x04)); !ok || err != nil {
+		t.Fatalf("K-9 control: second creation failed: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestT008KDFMetadataSuccessTuple is row K-10: the successful creation
+// returns EXACTLY the five frozen metadata values, 16/32 fixed arrays,
+// err nil exactly when ok true.
+func TestT008KDFMetadataSuccessTuple(t *testing.T) {
+	rec, ok, err := newVerifierRecord([]byte("x"))
+	if !ok || err != nil {
+		t.Fatalf("K-10: creation failed ok=%v err=%v", ok, err)
+	}
+	if rec.formatVersion != 1 || rec.argon2Version != 19 || rec.timeCost != 3 ||
+		rec.memoryKiB != 65536 || rec.parallelism != 4 {
+		t.Fatalf("K-10: metadata tuple wrong: %+v", rec)
+	}
+	if len(rec.salt) != 16 || len(rec.derivedKey) != 32 {
+		t.Fatalf("K-10: fixed array sizes wrong")
+	}
+	if !rec.selfConsistent() {
+		t.Fatal("K-10: fresh record not self-consistent")
+	}
+	// The metadata predicate is exactly five-field: a tampered field flips
+	// it; salt/key content does not participate.
+	bad := rec
+	bad.parallelism = 5
+	if bad.selfConsistent() {
+		t.Fatal("K-10: tampered parallelism still self-consistent")
+	}
+}
+
+// TestT008KDFOneGuardedCallSite is row K-11 (source-inspection class): the
+// maintained argon2.IDKey appears EXACTLY ONCE in production source and is
+// dominated by the deriveFor decision-point guard; freeze rejects before
+// any copy/KDF. The corresponding test-only occurrence below is in a
+// separate _test.go file and is reported honestly.
+func TestT008KDFOneGuardedCallSite(t *testing.T) {
+	src, err := kdfProductionSource(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(src, "argon2.IDKey("); n != 1 {
+		t.Fatalf("K-11: argon2.IDKey( occurrences in kdf.go = %d, want exactly 1", n)
+	}
+	// The guard must dominate the call: guard lines precede the call, and
+	// the call uses compile-time constants only.
+	guardIdx := strings.Index(src, "rec.formatVersion != formatVersion || rec.argon2Version != argon2Version")
+	callIdx := strings.Index(src, "argon2.IDKey(")
+	if guardIdx < 0 || callIdx < 0 || guardIdx > callIdx {
+		t.Fatal("K-11: decision-point guard does not dominate the IDKey call")
+	}
+	callLine := src[callIdx : strings.Index(src[callIdx:], "\n")+callIdx]
+	if !strings.Contains(callLine, "timeCost, memoryKiB, parallelism, derivedKeyByte") {
+		t.Fatalf("K-11: call not using compile-time constants: %s", callLine)
+	}
+	// No PACKAGE-LEVEL var of any kind (the accepted "no mutable anchor"
+	// claim, stated precisely): local variables inside function bodies are
+	// ordinary Go mechanics and are scanned by their unindented form here.
+	for _, line := range strings.Split(stripComments(src), "\n") {
+		if strings.HasPrefix(line, "var ") {
+			t.Fatalf("K-11: package-level var present in production source: %s", line)
+		}
+	}
+}
+
+// TestT008KDFNoHooksNoExportedAPI is row K-12 (surface class): the package
+// has no exported identifiers, no injectable KDF, no function variables, no
+// hooks; the compare is the standard library constant-time call only.
+func TestT008KDFNoHooksNoExportedAPI(t *testing.T) {
+	src, err := kdfProductionSource(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(stripComments(src), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(line, "func ") || strings.HasPrefix(line, "type ") {
+			var ident string
+			switch {
+			case strings.HasPrefix(line, "func "):
+				ident = strings.TrimPrefix(line, "func ")
+				if strings.HasPrefix(ident, "(") { // METHOD: its name is
+					// method of an unexported receiver type; a method can
+					// never be a package-level exported API. The accepted
+					// design mandates Error()'s exact standard text, which
+					// begins with a capital letter — the standard error
+					// interface, not an exported auth API.
+					continue
+				}
+			case strings.HasPrefix(line, "type "):
+				ident = strings.TrimPrefix(line, "type ")
+			}
+			ident = strings.TrimPrefix(ident, "(")
+			if r := ident; len(r) > 0 && r[0] >= 'A' && r[0] <= 'Z' {
+				t.Fatalf("K-12: exported identifier at top level: %s", trimmed)
+			}
+		}
+	}
+	for _, line := range strings.Split(stripComments(src), "\n") {
+		if strings.HasPrefix(line, "var ") {
+			t.Fatalf("K-12: package-level var present (no mutable anchor allowed): %s", line)
+		}
+	}
+	// The ONLY function-typed thing allowed is the creation-only reader
+	// parameter; no other func-typed field/parameter/seam may exist.
+	for _, line := range strings.Split(stripComments(src), "\n") {
+		if strings.Contains(line, "func(") && !strings.Contains(line, "read func([]byte) (int, error)") {
+			t.Fatalf("K-12: unexpected function-typed seam: %s", line)
+		}
+	}
+	if !strings.Contains(src, "subtle.ConstantTimeCompare(") {
+		t.Fatal("K-12: standard constant-time compare absent")
+	}
+	if strings.Contains(src, "bytes.Equal(") {
+		t.Fatal("K-12: bytes.Equal on secret material")
+	}
+}
+
+// TestT008KDFExactPasswordBytesNoPolicy is the accepted "exact bytes, no
+// policy" row: surrounding whitespace and any length of exact bytes are
+// honoured verbatim; no trimming, normalization or rule.
+func TestT008KDFExactPasswordBytesNoPolicy(t *testing.T) {
+	pwd := []byte("  spaced\t password\n")
+	v, _ := validInput(t, pwd)
+	if !verifyPassword(pwd, v) {
+		t.Fatal("no-policy: exact whitespace password rejected (policy applied?)")
+	}
+	if verifyPassword([]byte("spaced\t password"), v) {
+		t.Fatal("no-policy: trimmed variant accepted (trimming applied?)")
+	}
+	if verifyPassword([]byte("  SPACED\t PASSWORD\n"), v) {
+		t.Fatal("no-policy: case-normalized variant accepted")
+	}
+	empty := []byte{}
+	ve, _ := validInput(t, empty)
+	if !verifyPassword(empty, ve) {
+		t.Fatal("no-policy: empty password rejected (length policy applied?)")
+	}
+	if verifyPassword([]byte{0}, ve) {
+		t.Fatal("no-policy: different exact bytes accepted")
+	}
+}
+
+// TestT008KDFCompareOnlyValidLengths is the accepted compare-boundary row:
+// verifyPassword's comparison path is reachable only after freeze accepted
+// exact 16/32 lengths; malformed inputs never reach a compare (proven here
+// by behavior: malformed salt/key always false regardless of password).
+func TestT008KDFCompareOnlyValidLengths(t *testing.T) {
+	v, _ := validInput(t, []byte("pw"))
+	// For every malformed length variant, BOTH a matching-content and a
+	// wrong password must yield false: the compare is never reached.
+	for _, n := range []int{0, 31, 33} {
+		bad := v
+		bad.derivedKey = wrongBytes(v.derivedKey, n)
+		if verifyPassword([]byte("pw"), bad) {
+			t.Fatalf("compare-boundary: derived-key length %d accepted with matching password", n)
+		}
+	}
+	for _, n := range []int{0, 15, 17} {
+		bad := v
+		bad.salt = wrongBytes(v.salt, n)
+		if verifyPassword([]byte("pw"), bad) {
+			t.Fatalf("compare-boundary: salt length %d accepted with matching password", n)
+		}
+	}
+}

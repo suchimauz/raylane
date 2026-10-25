@@ -1634,20 +1634,26 @@ func enterNamed(name string, indirection bool, named map[string]ast.Expr, what s
 // struct/interface: it applies the per-field seam check and the nested
 // descent, threading the shared activePath so a self-referential type is
 // entered once per path and the cycle decision uses the loop itself.
-// indirectStart reports whether a field's TYPE begins with an indirection:
-// a pointer, a slice, a map, a channel, or a bare named type entered
-// indirected. Such a field's whole subtree is an indirected branch.
-func indirectStart(e ast.Expr) bool {
+// containsIndirection reports whether a field's type CONTAINS an indirected
+// crossing anywhere — a pointer, slice, map, or channel — even through
+// parentheses or nested inside a fixed-size array. A fixed-size array ITSELF
+// stays by-value (never an indirection), but a pointer inside it IS one. A
+// bare by-value named type and a bare fixed-array-of-struct have no such
+// crossing. This closes the edge-routing gap so a genuine pointer crossing
+// inside the loop is marked, while the fixed-array rule is not weakened.
+func containsIndirection(e ast.Expr) bool {
 	switch t := e.(type) {
-	case *ast.StarExpr, *ast.MapType, *ast.ChanType:
-		return true
+	case *ast.ParenExpr:
+		return containsIndirection(t.X)
+	case *ast.StarExpr:
+		return true // a pointer is an indirected crossing
 	case *ast.ArrayType:
-		return t.Len == nil // slice = indirection; fixed array is by-value
-	case *ast.Ident:
-		// A bare named type is indirect-starting only if entered via an
-		// indirected edge. The caller passes whether this occurrence is
-		// indirected; here (field head) it is by-value, so false.
-		return false
+		if t.Len == nil {
+			return true // a slice is an indirected crossing
+		}
+		return containsIndirection(t.Elt) // fixed array is by-value; check its element
+	case *ast.MapType, *ast.ChanType:
+		return true
 	default:
 		return false
 	}
@@ -1691,7 +1697,7 @@ func checkFieldListEdges(fl *ast.FieldList, named map[string]ast.Expr, what stri
 		// scan the whole field subtree, then restore — so the mark lives for
 		// the branch's repeated-name checks but a sibling field's indirection
 		// is undone when that sibling returns.
-		if indirectStart(fld.Type) {
+		if containsIndirection(fld.Type) {
 			if err := withLoopIndirection(ap, func() error {
 				return checkNestedFieldListEdges(fld.Type, named, what+" nested field", ap)
 			}); err != nil {
@@ -1722,7 +1728,7 @@ func checkFieldListEdgesIndirected(fl *ast.FieldList, named map[string]ast.Expr,
 		if err := checkSeamExpr(fld.Type, named, what); err != nil {
 			return err
 		}
-		if indirectStart(fld.Type) {
+		if containsIndirection(fld.Type) {
 			if err := withLoopIndirection(ap, func() error {
 				return checkNestedFieldListEdges(fld.Type, named, what+" nested field", ap)
 			}); err != nil {
@@ -2006,50 +2012,48 @@ func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 	return nil
 }
 
-// snapshotNamed records the current binding (or absence) of each name in
-// `names` so the caller can restore them at block exit (lexical shadow). It
-// returns the previous bindings and a had-flag per name, plus the set of
-// names actually snapshotted.
-func snapshotNamed(named map[string]ast.Expr, names []string) (prev map[string]ast.Expr, had map[string]bool, touched map[string]bool) {
-	prev = map[string]ast.Expr{}
-	had = map[string]bool{}
-	touched = map[string]bool{}
-	for _, nm := range names {
-		if touched[nm] {
-			continue
-		}
-		touched[nm] = true
-		if old, ok := named[nm]; ok {
-			prev[nm] = old
-			had[nm] = true
-		} else {
-			had[nm] = false
-		}
-	}
-	return prev, had, touched
+// scopeFrame records, for one lexical block, the outer binding of every name
+// first DECLARED (:=/var/const) in that block, so popScope can restore the
+// true outer binding exactly once at the block's end (lexical shadow).
+type scopeFrame struct {
+	prev     map[string]ast.Expr
+	had      map[string]bool
+	declared map[string]bool
 }
 
-// restoreNamed undoes the bindings recorded by snapshotNamed, putting back
-// the prior binding (lexical shadow) or deleting a newly-introduced name.
-func restoreNamed(named map[string]ast.Expr, prev map[string]ast.Expr, had map[string]bool, touched map[string]bool) {
-	for nm := range touched {
-		if had[nm] {
-			named[nm] = prev[nm]
+func newScopeFrame() *scopeFrame {
+	return &scopeFrame{prev: map[string]ast.Expr{}, had: map[string]bool{}, declared: map[string]bool{}}
+}
+
+// pushScope enters a new lexical block; popScope restores every name declared
+// in it to its pre-block binding.
+func pushScope() *scopeFrame { return newScopeFrame() }
+
+func popScope(named map[string]ast.Expr, sc *scopeFrame) {
+	for nm := range sc.declared {
+		if sc.had[nm] {
+			named[nm] = sc.prev[nm]
 		} else {
 			delete(named, nm)
 		}
 	}
 }
 
-// shortVarNames lists the non-blank identifier names bound by an := LHS.
-func shortVarNames(lhs []ast.Expr) []string {
-	out := []string{}
-	for _, l := range lhs {
-		if id, ok := l.(*ast.Ident); ok && id.Name != "_" {
-			out = append(out, id.Name)
+// declareInScope binds `name` to `typ` in `named`, snapshotting the outer
+// binding the FIRST time `name` is declared in this block. A re-declaration in
+// the same block overwrites without re-snapshotting, so popScope restores the
+// true outer binding exactly once.
+func declareInScope(named map[string]ast.Expr, sc *scopeFrame, name string, typ ast.Expr) {
+	if !sc.declared[name] {
+		sc.declared[name] = true
+		if old, ok := named[name]; ok {
+			sc.prev[name] = old
+			sc.had[name] = true
+		} else {
+			sc.had[name] = false
 		}
 	}
-	return out
+	named[name] = typ
 }
 
 // checkPairwiseBindingClassifies applies declaration-time function-value
@@ -2063,6 +2067,51 @@ func shortVarNames(lhs []ast.Expr) []string {
 // independent value for each LHS. The accepted comma-ok map lookup and
 // direct-call forms classify as value via bindingValueKind's positive
 // result/element evidence.
+// classifyValueSpec classifies a var/const ValueSpec's initialisers exactly
+// as := does (same pairwise / single-name path), recording each name's REAL
+// slot/type. It binds the declared type (vs.Type) when present so a local's
+// own field/element selector resolves, and returns the list of non-blank
+// names introduced (for the caller's lexical-shadow snapshot/restore).
+func classifyValueSpec(vs *ast.ValueSpec, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) ([]string, error) {
+	// Record the declared type FIRST so a local declared with an explicit type
+	// keeps that ACTUAL type for a later selector/container proof.
+	if ts, ok := vs.Type.(*ast.Ident); ok {
+		for _, nm := range vs.Names {
+			if nm.Name != "_" {
+				named[nm.Name] = &ast.Ident{Name: ts.Name}
+			}
+		}
+	}
+	ids := []*ast.Ident{}
+	names := []string{}
+	for _, nm := range vs.Names {
+		ids = append(ids, nm)
+		if nm.Name != "_" {
+			names = append(names, nm.Name)
+		}
+	}
+	for _, v := range vs.Values {
+		if exprReachesFuncType(v) {
+			return names, fmt.Errorf("variable %s initialised from a function-typed value", vs.Names[0].Name)
+		}
+	}
+	if len(vs.Values) == 0 {
+		return names, nil
+	}
+	if len(ids) == 1 && len(vs.Values) == 1 {
+		if ids[0].Name != "_" {
+			if err := classifyOneBinding(ids[0], vs.Values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+				return names, err
+			}
+		}
+		return names, nil
+	}
+	if err := checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+		return names, err
+	}
+	return names, nil
+}
+
 func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	// Classify the declaration's actual result producer once. For 1:1 this is
 	// the per-index RHS; for a single-RHS form it is that one RHS. A named
@@ -2088,6 +2137,11 @@ func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named
 			if err := classifyCallTuple(names, ce, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 				return err
 			}
+			return nil
+		}
+		// Non-call single RHS (comma-ok map index / container element): prove
+		// the actual producer arity and bind each name its OWN slot type.
+		if classifyNonCallBinds(names, values[0], named, typeFields) {
 			return nil
 		}
 		kind := bindingValueKind(values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
@@ -2121,6 +2175,11 @@ func classifyOneBinding(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 	// exactly ONE non-function slot and bind the name to that slot's type.
 	if ce, ok := unparen(rhs).(*ast.CallExpr); ok {
 		return classifyCallSlots1(id, ce, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+	}
+	// A single-name non-call index (container element): bind to the element's
+	// ACTUAL type so a later continued use resolves the real type.
+	if classifyNonCallBinds([]*ast.Ident{id}, rhs, named, typeFields) {
+		return nil
 	}
 	kind := bindingValueKind(rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	if kind == "func" {
@@ -2168,10 +2227,51 @@ func callResultSlots(fun ast.Expr, fileFuncs map[string]bool, funcResults map[st
 // name's ACTUAL type); otherwise it returns localKindValue (the opaque value
 // marker) so non-named slots keep their conservative value binding.
 func slotTypeIdent(slot ast.Expr) ast.Expr {
+	// Retain the ACTUAL slot type expression, not just a bare name: a pointer,
+	// selector, or composite slot keeps its real type so a later container or
+	// selector proof on the bound name resolves the actual type. Only a bare
+	// named/builtin type is normalized to a fresh Ident of it.
 	if id, ok := unparen(slot).(*ast.Ident); ok {
 		return &ast.Ident{Name: id.Name}
 	}
-	return localKindValue
+	return slot
+}
+
+// indexElementType resolves an index-expression container's element type
+// (the value type of m.records[key] is sessionRecord; of l.buckets[key] is
+// *admissionPeerBucket), used as the C4 slot type for the value name of a
+// comma-ok map index. It returns nil when the element type is unresolvable.
+func indexElementType(indexed *ast.IndexExpr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) ast.Expr {
+	return containerElementType(indexed.X, named, typeFields)
+}
+
+// classifyNonCallBinds binds each name to the REAL retained type of a
+// supported non-call single RHS. For a comma-ok map index bound to exactly two
+// names (v, ok := m.records[key]) it binds name[0] to the container's element
+// type and name[1] to Ident{bool} — the actual producer arity and per-name
+// slot types. For a single name bound to any index form it binds the element
+// type. For any other non-call multi-name form it returns false so the caller
+// fails closed honestly (no automatic new producer coverage).
+func classifyNonCallBinds(names []*ast.Ident, rhs ast.Expr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) bool {
+	idx, isIndex := unparen(rhs).(*ast.IndexExpr)
+	if !isIndex {
+		return false
+	}
+	elem := indexElementType(idx, named, typeFields)
+	if elem == nil {
+		return false
+	}
+	if len(names) == 2 {
+		// comma-ok map index: exactly two slots (element type + the bool ok).
+		named[names[0].Name] = slotTypeIdent(elem)
+		named[names[1].Name] = &ast.Ident{Name: "bool"}
+		return true
+	}
+	if len(names) == 1 {
+		named[names[0].Name] = slotTypeIdent(elem)
+		return true
+	}
+	return false
 }
 
 // classifyCallSlots1 binds ONE name to a single-slot direct call's result
@@ -2481,6 +2581,44 @@ func containerElemType(under ast.Expr) ast.Expr {
 	}
 }
 
+// containerElementType resolves a container expression's element type in the
+// real named-type context: a bare value of container type (ident), or a
+// selector recv.field via the receiver's ACTUAL type's OWN field. It returns
+// the element type (map value / slice-array element / pointer element) or nil
+// when unresolvable. This is the C4 per-name slot type for an index form.
+func containerElementType(container ast.Expr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) ast.Expr {
+	var under ast.Expr
+	switch c := container.(type) {
+	case *ast.Ident:
+		u, ok := named[c.Name]
+		if !ok {
+			return nil
+		}
+		under = u
+	case *ast.SelectorExpr:
+		base, ok := c.X.(*ast.Ident)
+		if !ok || c.Sel == nil {
+			return nil
+		}
+		tn := declaredTypeName(base.Name, named)
+		if tn == "" {
+			return nil
+		}
+		flds, ok := typeFields[tn]
+		if !ok {
+			return nil
+		}
+		f, ok := flds[c.Sel.Name]
+		if !ok {
+			return nil
+		}
+		under = f.typ
+	default:
+		return nil
+	}
+	return containerElemType(under)
+}
+
 // exprsAllNonFunc reports whether every expression in list resolves
 // positively non-function in the REAL named-type context (no FuncType at any
 // depth, no resolution error). The named map is REQUIRED: a local named
@@ -2499,12 +2637,40 @@ func exprsAllNonFunc(list []ast.Expr, named map[string]ast.Expr) bool {
 	return true
 }
 
-// checkStmt fails on function-typed variables (explicit type or inferred
-// from a function literal), assignment or return of a function-typed
-// expression, function literals appearing as values, and any call or
-// conversion whose target or nested expression is function-typed.
+// checkStmt is the public entry that runs a statement under its OWN lexical
+// scope (so a := / var / const introduced here is restored when this statement
+// completes). Statements that contain nested statement lists (blocks,
+// if/for/switch bodies) recurse via checkStmtList, which owns those lists'
+// scopes.
 func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	sc := pushScope()
+	defer popScope(named, sc)
+	return checkStmtSc(s, named, sc, fileFuncs, filePkgs, methods, typeFields, funcResults)
+}
+
+// checkStmtList scans a statement list (a lexical block body) under ONE
+// shared scope, so a binding introduced by an early statement is LIVE for
+// every subsequent statement in the SAME list, and restores the outer binding
+// of every introduced name when the LIST finishes (the correct enclosing
+// lexical boundary).
+func checkStmtList(list []ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	sc := pushScope()
+	defer popScope(named, sc)
+	for _, s := range list {
+		if err := checkStmtSc(s, named, sc, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkStmtSc is the scope-aware statement checker: declarations (:=/var/
+// const) bind into `sc` (so they live to the end of the enclosing list) and
+// nested statement lists recurse via checkStmtList.
+func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
 	switch st := s.(type) {
+	case *ast.BlockStmt:
+		return checkStmtList(st.List, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	case *ast.BadStmt:
 		return fmt.Errorf("parser produced a malformed statement — fail closed")
 	case *ast.EmptyStmt:
@@ -2540,19 +2706,24 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		// identifiers, selectors, aliases), rejecting a bound function/method
 		// at the declaration even when it is never called. Multi-name forms
 		// are classified pairwise below so no position escapes the rule.
-		// C3 lexical scope: every name a := introduces is recorded with its
-		// actual (typed) binding, then restored to its previous binding at the
-		// end of this := (so a later statement in the same block sees the
-		// binding, but an outer same-spelled name is not corrupted once this
-		// scope unwinds). The classification still rejects a bound
-		// function/method at the declaration even when never called.
+		// C3 block-owned lexical scope: every name a := introduces is bound into
+		// the ENCLOSING scope frame `sc`, so it is LIVE for every subsequent
+		// statement in the SAME list (and for nested branch bodies) and is
+		// restored to its outer binding only when that list's scope pops — the
+		// correct enclosing lexical boundary, not at the end of this statement.
+		// The classification still rejects a bound function/method at the
+		// declaration even when never called.
 		if st.Tok == token.DEFINE {
-			names := shortVarNames(st.Lhs)
-			prevB, hadB, touched := snapshotNamed(named, names)
-			var classifyErr error
+			// First pass: classify (which may bind a REAL per-slot type into named)
+			// and capture the resulting type per name, then declare each into sc.
 			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-					classifyErr = classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+					before, _ := named[id.Name]
+					if err := classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+						return err
+					}
+					declareInScope(named, sc, id.Name, named[id.Name])
+					_ = before
 				}
 			} else {
 				ids := []*ast.Ident{}
@@ -2561,13 +2732,16 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						ids = append(ids, id)
 					}
 				}
-				classifyErr = checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
-			}
-			// Lexical shadow restore: undo this :='s bindings so an outer
-			// same-spelled name is not corrupted once this scope unwinds.
-			restoreNamed(named, prevB, hadB, touched)
-			if classifyErr != nil {
-				return classifyErr
+				if err := checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+					return err
+				}
+				for _, id := range ids {
+					if id.Name != "_" {
+						if bound, ok := named[id.Name]; ok {
+							declareInScope(named, sc, id.Name, bound)
+						}
+					}
+				}
 			}
 		}
 		for _, lhs := range st.Lhs {
@@ -2582,11 +2756,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 			}
 		}
 	case *ast.BlockStmt:
-		for _, inner := range st.List {
-			if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-				return err
-			}
-		}
+		return checkStmtList(st.List, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	case *ast.IfStmt:
 		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
@@ -2631,10 +2801,8 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						return fmt.Errorf("switch case expression is function-typed")
 					}
 				}
-				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-						return err
-					}
+				if err := checkStmtList(cc.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+					return err
 				}
 			}
 		}
@@ -2688,10 +2856,8 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						return err
 					}
 				}
-				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-						return err
-					}
+				if err := checkStmtList(cc.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+					return err
 				}
 			}
 		}
@@ -2712,10 +2878,8 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						return fmt.Errorf("type switch case type is function-typed")
 					}
 				}
-				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-						return err
-					}
+				if err := checkStmtList(cc.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+					return err
 				}
 			}
 		}
@@ -2905,66 +3069,15 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 					// Declaration-time function-value classification identical to :=
 					// (classifyBindingRHS): a bare-identifier, selector, or
 					// parenthesised/aliased initialiser that binds a function or
-					// method value is rejected here, even when the variable is never
-					// called. exprReachesFuncType alone only catches literal
-					// FuncType/FuncLit initialisers, so non-literal function values
-					// are classified by name/kind below. Multi-name forms are
-					// classified pairwise so no position escapes the rule.
 					// Declaration-time function-value classification identical to :=
-					// (classifyBindingRHS) ... and C3 lexical scope: each ValueSpec name
-					// is recorded with its ACTUAL declared type (typed binding) and the
-					// previous binding restored at the end of the spec, so locals/aliases
-					// keep their declared type and an outer same-spelled name is not
-					// corrupted. Any initialiser that binds a function/method value is
+					// (classifyValueSpec, which shares the pairwise/one-name path). The
+					// introduced names are recorded with their REAL declared/slot types and
+					// RETAINED through the rest of this declaration's block; the enclosing
+					// lexical boundary (a block owned by the caller) restores any outer
+					// same-spelled name. Any initialiser binding a function/method value is
 					// rejected even when the variable is never called.
-					{
-						vsNames := []string{}
-						for _, nm := range vs.Names {
-							if nm.Name != "_" {
-								vsNames = append(vsNames, nm.Name)
-							}
-						}
-						prevB, hadB, touched := snapshotNamed(named, vsNames)
-						var classifyErr error
-						for _, v := range vs.Values {
-							if exprReachesFuncType(v) {
-								names := "?"
-								if len(vs.Names) > 0 {
-									names = vs.Names[0].Name
-								}
-								classifyErr = fmt.Errorf("variable %s initialised from a function-typed value", names)
-								break
-							}
-						}
-						if classifyErr == nil {
-							// Record each name's ACTUAL declared type FIRST (typed binding)
-							// so a later selector on the local resolves its OWN field.
-							if ts, ok := vs.Type.(*ast.Ident); ok {
-								for _, nm := range vs.Names {
-									if nm.Name != "_" {
-										named[nm.Name] = &ast.Ident{Name: ts.Name}
-									}
-								}
-							}
-							if len(vs.Values) == 1 && len(vs.Names) == 1 {
-								id := vs.Names[0]
-								if id.Name != "_" {
-									classifyErr = classifyBindingRHS(id, vs.Values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
-								}
-							} else if len(vs.Values) > 0 {
-								ids := []*ast.Ident{}
-								for _, nm := range vs.Names {
-									ids = append(ids, nm)
-								}
-								classifyErr = checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
-							}
-						}
-						// Lexical shadow restore: undo this spec's bindings so an outer
-						// same-spelled name is not corrupted once this spec's scope unwinds.
-						restoreNamed(named, prevB, hadB, touched)
-						if classifyErr != nil {
-							return classifyErr
-						}
+					if _, cerr := classifyValueSpec(vs, named, fileFuncs, filePkgs, methods, typeFields, funcResults); cerr != nil {
+						return cerr
 					}
 				}
 			}
@@ -3020,10 +3133,8 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 				}
 			}
 			if decl.Body != nil {
-				for _, s := range decl.Body.List {
-					if err := checkStmt(s, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-						return fmt.Errorf("in %s: %w", decl.Name.Name, err)
-					}
+				if err := checkStmtList(decl.Body.List, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+					return fmt.Errorf("in %s: %w", decl.Name.Name, err)
 				}
 			}
 			// Restore every binding this function introduced.

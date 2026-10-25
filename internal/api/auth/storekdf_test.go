@@ -1467,39 +1467,77 @@ func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) e
 // caught via the declaration walk, not terminated here; unresolved or
 // cyclic named types fail closed inside seamUnderlying, not here.
 func checkNestedFieldList(e ast.Expr, named map[string]ast.Expr, what string) error {
+	return checkNestedFieldListSeen(e, named, what, map[string]bool{})
+}
+
+// checkNestedFieldListSeen is the cycle-guarded worker for
+// checkNestedFieldList. seen tracks named types already entered on the
+// current descent path: a named struct that refers back to itself through
+// a pointer, slice, map or channel (struct{ x *Self }) re-enters here
+// after seamUnderlying stopped at the outer StructType, so without a path
+// guard the recursion would not terminate. A re-entered name is NOT an
+// error by itself — a self-referential struct with no function-typed field
+// is legitimate — so the guard only stops the recursion; a genuine
+// function-typed field underneath is still caught by the nested
+// checkFieldList/checkSeamExpr descent. Unresolved names return nil (the
+// enclosing seamUnderlying already fails closed on them), so a missing
+// entry here can never mask a function-typed seam.
+func checkNestedFieldListSeen(e ast.Expr, named map[string]ast.Expr, what string, seen map[string]bool) error {
 	switch t := e.(type) {
 	case *ast.StructType:
-		return checkFieldList(t.Fields, named, what+" struct")
+		return checkFieldListNested(t.Fields, named, what+" struct", seen)
 	case *ast.InterfaceType:
-		return checkFieldList(t.Methods, named, what+" interface")
+		return checkFieldListNested(t.Methods, named, what+" interface", seen)
 	case *ast.ParenExpr:
-		return checkNestedFieldList(t.X, named, what)
+		return checkNestedFieldListSeen(t.X, named, what, seen)
 	case *ast.StarExpr:
-		return checkNestedFieldList(t.X, named, what)
+		return checkNestedFieldListSeen(t.X, named, what, seen)
 	case *ast.ArrayType:
-		return checkNestedFieldList(t.Elt, named, what)
+		return checkNestedFieldListSeen(t.Elt, named, what, seen)
 	case *ast.ChanType:
-		return checkNestedFieldList(t.Value, named, what)
+		return checkNestedFieldListSeen(t.Value, named, what, seen)
 	case *ast.MapType:
 		// A map key is comparable and cannot be a struct holding a func, but
 		// scanning both key and value keeps the rule uniform and fail closed.
-		if err := checkNestedFieldList(t.Key, named, what); err != nil {
+		if err := checkNestedFieldListSeen(t.Key, named, what, seen); err != nil {
 			return err
 		}
-		return checkNestedFieldList(t.Value, named, what)
+		return checkNestedFieldListSeen(t.Value, named, what, seen)
 	case *ast.Ident:
 		// A named wrapper type is validated by the declaration walk; here we
 		// only recurse if the name resolves to an anonymous struct/interface
-		// in this file. Unresolved or cyclic names are NOT unwrapped here —
-		// seamUnderlying in the enclosing checkSeamExpr already fails closed
-		// on them, so returning nil cannot mask a function-typed seam.
+		// in this file, guarding the descent path against self-reference.
+		if seen[t.Name] {
+			return nil
+		}
 		if under, ok := named[t.Name]; ok {
-			return checkNestedFieldList(under, named, what)
+			seen[t.Name] = true
+			return checkNestedFieldListSeen(under, named, what, seen)
 		}
 		return nil
 	default:
 		return nil
 	}
+}
+
+// checkFieldListNested is the field-list walker that threads the shared
+// seen set through every nested field so a self-referential type is
+// entered once per path, not per occurrence. It applies the same per-field
+// checks as checkFieldList (seam rejection plus nested descent) but keeps
+// the cycle guard alive across the whole recursion.
+func checkFieldListNested(fl *ast.FieldList, named map[string]ast.Expr, what string, seen map[string]bool) error {
+	if fl == nil {
+		return nil
+	}
+	for _, fld := range fl.List {
+		if err := checkSeamExpr(fld.Type, named, what); err != nil {
+			return err
+		}
+		if err := checkNestedFieldListSeen(fld.Type, named, what+" nested field", seen); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkStmt fails on function-typed variables (explicit type or inferred
@@ -1555,7 +1593,20 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		if st.Tok == token.DEFINE {
 			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-					switch v := st.Rhs[0].(type) {
+					// Unwrap parenthesised (and parenthesised-within-parentheses)
+					// right-hand sides so the binding classification below sees the
+					// real value form, not the paren wrapper: f := (existingFunc)
+					// and f := ((recv.Method)) must be rejected exactly like their
+					// unparenthesised spellings, not recorded as an opaque value.
+					rhs := st.Rhs[0]
+					for {
+						if p, ok := rhs.(*ast.ParenExpr); ok {
+							rhs = p.X
+							continue
+						}
+						break
+					}
+					switch v := rhs.(type) {
 					case *ast.Ident:
 						// SEC-2 closure: a short `v := name` binding a declared
 						// function of this file is a function-typed value, hence a
@@ -1571,10 +1622,33 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						if v.Sel == nil {
 							return fmt.Errorf("assignment target %s receives a malformed selector value — fail closed", id.Name)
 						}
-						// SEC-2 closure: a method value `v := recv.Method` is a
-						// function-typed bound method — a dispatch seam — even when
-						// never called; reject at the declaration.
-						return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
+						// Distinguish a bound METHOD value from a package-qualified
+						// constant/value. A method value `v := recv.Method` has a
+						// VALUE receiver and is a function-typed dispatch seam — reject
+						// at the declaration even when never called. A
+						// package-qualified constant (`v := pkg.Const`) has a package
+						// receiver (a name this file imports, from filePkgs) and is a
+						// legitimate pinned value, not a function value — record it for
+						// the call-target checks instead of overbanning it. Anything
+						// else — a selector on an unresolved base — fails closed.
+						base, baseIsIdent := v.X.(*ast.Ident)
+						switch {
+						case baseIsIdent && filePkgs[base.Name]:
+							// Package-qualified value: legitimate pinned constant/value.
+							named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+						case baseIsIdent && closedNonFuncIdents[base.Name+"."+v.Sel.Name]:
+							// Closed non-func qualified type/value: legitimate, recorded.
+							named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+						case baseIsIdent:
+							// Value receiver: a bound method `recv.Method` is a
+							// function-typed dispatch seam, even if never called.
+							return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
+						default:
+							// Selector on an unresolvable base (parenthesised receiver,
+							// index, call result): cannot prove it is not a function
+							// value — fail closed.
+							return fmt.Errorf("variable %s is bound to an unresolvable selector %s — fail closed", id.Name, v.Sel.Name)
+						}
 					default:
 						named[id.Name] = localKindValue
 					}

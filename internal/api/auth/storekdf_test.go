@@ -48,7 +48,8 @@ func bridgeOpenStore(t *testing.T, path string) *store.Store {
 	return s
 }
 
-// TestT008StoreKDFCreateThenVerifyRoundTrip is row N-1 + N-5: the full typed
+// TestT008StoreKDFCreateThenVerifyRoundTrip is rows N-4 + N-5 (plus the
+// create/persist/closure assertions of this composition): the full typed
 // composition over a real store and REAL Argon2id — create persists exactly
 // one K1-valid record with a fresh 16-byte salt and consumes bootstrap, the
 // record survives close + reopen, correct password verifies true, wrong /
@@ -60,28 +61,28 @@ func TestT008StoreKDFCreateThenVerifyRoundTrip(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "rt.db")
 	s := bridgeOpenStore(t, db)
 	if err := createAdminVerifier(ctx, s, []byte("correct horse")); err != nil {
-		t.Fatalf("N-1: createAdminVerifier: %v", err)
+		t.Fatalf("N-5: createAdminVerifier: %v", err)
 	}
 	consumed, err := s.BootstrapConsumed(ctx)
 	if err != nil || !consumed {
-		t.Fatalf("N-1: bootstrap closure after create: consumed=%v err=%v", consumed, err)
+		t.Fatalf("N-5: bootstrap closure after create: consumed=%v err=%v", consumed, err)
 	}
 	v, err := s.AdminVerifier(ctx)
 	if err != nil {
-		t.Fatalf("N-1: typed read after create: %v", err)
+		t.Fatalf("N-5: typed read after create: %v", err)
 	}
 	if v.FormatVersion != formatVersion || v.Argon2Version != argon2Version ||
 		v.TimeCost != timeCost || v.MemoryKiB != memoryKiB || v.Parallelism != parallelism {
-		t.Fatalf("N-1: stored metadata outside frozen set: %+v", v)
+		t.Fatalf("N-5: stored metadata outside frozen set: %+v", v)
 	}
 	if len(v.Salt) != saltBytes || len(v.DerivedKey) != derivedKeyByte {
-		t.Fatalf("N-1: stored material lengths wrong: %d/%d", len(v.Salt), len(v.DerivedKey))
+		t.Fatalf("N-5: stored material lengths wrong: %d/%d", len(v.Salt), len(v.DerivedKey))
 	}
 	if bytes.Equal(v.Salt, make([]byte, saltBytes)) {
-		t.Fatal("N-1: all-zero salt stored")
+		t.Fatal("N-5: all-zero salt stored")
 	}
 	if err := s.Close(); err != nil {
-		t.Fatalf("N-1: close: %v", err)
+		t.Fatalf("N-5: close: %v", err)
 	}
 	s2 := bridgeOpenStore(t, db)
 	defer s2.Close()
@@ -92,12 +93,12 @@ func TestT008StoreKDFCreateThenVerifyRoundTrip(t *testing.T) {
 	for _, bad := range [][]byte{nil, []byte("wrong"), []byte("correct horseX")} {
 		ok, err := verifyAdminPassword(ctx, s2, bad)
 		if err != nil || ok {
-			t.Fatalf("N-1: wrong password %q accepted: ok=%v err=%v", bad, ok, err)
+			t.Fatalf("N-4: wrong password %q accepted: ok=%v err=%v", bad, ok, err)
 		}
 	}
 }
 
-// TestT008StoreKDFAbsentVerifierCategory is row N-3: with NO admin row the
+// TestT008StoreKDFAbsentVerifierCategory is row N-1: with NO admin row the
 // bridge returns (false, bridgeError{bridgeErrNoVerifier}) with the exact
 // fixed text — never success, never a nil error, never a wrapped store error.
 func TestT008StoreKDFAbsentVerifierCategory(t *testing.T) {
@@ -106,48 +107,48 @@ func TestT008StoreKDFAbsentVerifierCategory(t *testing.T) {
 	defer s.Close()
 	ok, err := verifyAdminPassword(ctx, s, []byte("anything"))
 	if ok {
-		t.Fatal("N-3: absent verifier produced success")
+		t.Fatal("N-1: absent verifier produced success")
 	}
 	be, isBridge := err.(bridgeError)
 	if !isBridge {
-		t.Fatalf("N-3: error is not the concrete bridgeError: %T %v", err, err)
+		t.Fatalf("N-1: error is not the concrete bridgeError: %T %v", err, err)
 	}
 	if be.kind != bridgeErrNoVerifier {
-		t.Fatalf("N-3: wrong category %v", be.kind)
+		t.Fatalf("N-1: wrong category %v", be.kind)
 	}
 	if err.Error() != "auth: no usable admin verifier" {
-		t.Fatalf("N-3: unexpected error text: %q", err.Error())
+		t.Fatalf("N-1: unexpected error text: %q", err.Error())
 	}
 	if errors.Unwrap(err) != nil {
-		t.Fatal("N-3: bridge error unwraps to a cause — store text could leak")
+		t.Fatal("N-1: bridge error unwraps to a cause — store text could leak")
 	}
 }
 
-// TestT008StoreKDFReadFailureStorageCategory is row N-4: a closed store makes
+// TestT008StoreKDFReadFailureStorageCategory is row N-3: a closed store makes
 // the typed read fail operationally; the bridge maps that to the storage
 // category, returns false, and never reports success or absent.
 func TestT008StoreKDFReadFailureStorageCategory(t *testing.T) {
 	ctx := context.Background()
 	s := bridgeOpenStore(t, filepath.Join(t.TempDir(), "closed.db"))
 	if err := s.Close(); err != nil {
-		t.Fatalf("N-4: close: %v", err)
+		t.Fatalf("N-3: close: %v", err)
 	}
 	ok, err := verifyAdminPassword(ctx, s, []byte("x"))
 	if ok {
-		t.Fatal("N-4: unavailable storage produced success")
+		t.Fatal("N-3: unavailable storage produced success")
 	}
 	be, isBridge := err.(bridgeError)
 	if !isBridge {
-		t.Fatalf("N-4: error is not the concrete bridgeError: %T %v", err, err)
+		t.Fatalf("N-3: error is not the concrete bridgeError: %T %v", err, err)
 	}
 	if be.kind == bridgeErrNoVerifier {
-		t.Fatal("N-4: operational read failure misclassified as absent")
+		t.Fatal("N-3: operational read failure misclassified as absent")
 	}
 	if be.kind != bridgeErrStorage {
-		t.Fatalf("N-4: unexpected category %v", be.kind)
+		t.Fatalf("N-3: unexpected category %v", be.kind)
 	}
 	if err.Error() != "auth: storage unavailable" {
-		t.Fatalf("N-4: unexpected error text: %q", err.Error())
+		t.Fatalf("N-3: unexpected error text: %q", err.Error())
 	}
 }
 
@@ -234,7 +235,8 @@ func TestT008StoreKDFAdapterValidationAndNoAliasing(t *testing.T) {
 		if ok2 {
 			t.Fatalf("N-2: invalid adapter field %s accepted", m.name)
 		}
-		if in2 != (verifierInput{}) {
+		if in2.formatVersion != 0 || in2.argon2Version != 0 || in2.timeCost != 0 ||
+			in2.memoryKiB != 0 || in2.parallelism != 0 || in2.salt != nil || in2.derivedKey != nil {
 			t.Fatalf("N-2: invalid %s did not yield zero verifierInput: %+v", m.name, in2)
 		}
 	}
@@ -602,7 +604,7 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 // unknown/zero kind share it, asserted at the honest unit layer below
 // (synthetic in-test kind values are a test-only observation device; the
 // production bridgeError gains no exported surface, seam or API). Behaviour
-// of these categories under real flows is rows N-3/N-4/N-6; this row pins
+// of these categories under real flows is rows N-1/N-3/N-6; this row pins
 // the shape at the text level.
 func TestT008StoreKDFBridgeErrorShapeAndCategories(t *testing.T) {
 	s := string(mustRead(t, "storekdf.go"))

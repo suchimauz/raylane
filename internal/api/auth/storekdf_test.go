@@ -1076,14 +1076,12 @@ func commentMask(src string) (string, error) {
 				}
 				// F5: Text keeps the "//" opener, so the exact accepted delta
 				// is plain (end-start)-len(Text) — no delimiter overhead; the
-				// only loss is folded CR (internal CR, or the CR of a CRLF
-				// line ending, which sits one byte past the raw end; the LF
-				// itself is not a foldable loss).
-				agreeEnd := end
-				if end < len(src) && src[end] == '\n' && end > start && src[end-1] == '\r' {
-					agreeEnd = end + 1
-				}
-				if err := agreeSpan("line", start, end, src[start:agreeEnd], c.Text); err != nil {
+				// only loss is a CR byte the parser folds. The validated raw
+				// span is the half-open [start,end): for a CRLF line ending the
+				// '\r' sits at end-1, INSIDE [start,end), so it is already counted
+				// by countCR on src[start:end] — pass exactly src[start:end] with
+				// no LF/CR extension and no +1 allowance.
+				if err := agreeSpan("line", start, end, src[start:end], c.Text); err != nil {
 					return "", err
 				}
 			case string(out[start:start+2]) == "/*":
@@ -1126,27 +1124,17 @@ func commentMask(src string) (string, error) {
 // F5 closure: ast.Comment.Text INCLUDES the "//" or "/*" … "*/" delimiters,
 // so the EXACT accepted formula subtracts NO structural overhead. The only
 // size loss is the parser folding CR bytes away. The caller passes the
-// ALREADY VALIDATED raw span bytes (the half-open [start,end) slice, plus,
-// for a line comment ending in a verified CRLF, the one foldable CR past
-// the end). Accepted iff
+// ALREADY VALIDATED raw span bytes (exactly the half-open [start,end)
+// slice, with NO LF extension and NO extra CR allowance). Accepted iff
 //
 //	d := (end-start) - len(c.Text), 0 <= d <= countCR(spanBytes)
 //
-// This is a sanity constraint on span derivation, NOT a content or
-// authenticity oracle.
+// Every CR inside [start,end) is counted exactly once by countCR; the
+// trailing LF of a CRLF line ending lies at end (outside the span) and is
+// never a foldable loss, so it adds nothing. This is a sanity constraint
+// on span derivation, NOT a content or authenticity oracle.
 func agreeSpan(kind string, start, end int, spanBytes string, text string) error {
 	cr := countCR(spanBytes)
-	// The trailing LF of a CRLF line comment is inside spanBytes but not
-	// inside the raw span [start,end); an LF is never a foldable loss, so
-	// it must not inflate the CR allowance.
-	if kind == "line" && len(spanBytes) > end-start && spanBytes[len(spanBytes)-1] == '\n' && spanBytes[len(spanBytes)-2] == '\r' {
-		// spanBytes reaches one byte past the raw end (verified CRLF). That
-		// CR lies OUTSIDE the raw span [start,end), so countCR above did NOT
-		// see it — yet it is exactly the CR the parser folds, so the
-		// allowance must GAIN it; the LF itself is never foldable, so the
-		// net correction is +1.
-		cr += 1
-	}
 	d := (end - start) - len(text)
 	if d < 0 || d > cr {
 		return fmt.Errorf("commentMask: %s span [%d,%d) and comment text length %d disagree (delta %d, CR %d)", kind, start, end, len(text), d, cr)
@@ -1627,21 +1615,32 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						// VALUE receiver and is a function-typed dispatch seam — reject
 						// at the declaration even when never called. A
 						// package-qualified constant (`v := pkg.Const`) has a package
-						// receiver (a name this file imports, from filePkgs) and is a
-						// legitimate pinned value, not a function value — record it for
-						// the call-target checks instead of overbanning it. Anything
-						// else — a selector on an unresolved base — fails closed.
+						// A SelectorExpr RHS names either pkg.Member or recv.Member.
+						// The two are distinguished by the BASE, never by the mere
+						// presence of a dot: pkg.Function is a function VALUE (a seam),
+						// pkg.Const/pkg.Var are ordinary pinned values; recv.Method is a
+						// bound method value (a seam), recv.Field is an ordinary field.
 						base, baseIsIdent := v.X.(*ast.Ident)
 						switch {
 						case baseIsIdent && filePkgs[base.Name]:
-							// Package-qualified value: legitimate pinned constant/value.
-							named[id.Name] = &ast.Ident{Name: v.Sel.Name}
-						case baseIsIdent && closedNonFuncIdents[base.Name+"."+v.Sel.Name]:
-							// Closed non-func qualified type/value: legitimate, recorded.
-							named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+							// Package-qualified member. An imported namespace does NOT
+							// prove the member is a constant: pkg.Function is a
+							// function value, so it is rejected. pkg.Const/pkg.Var are
+							// ordinary values and are recorded; membership in the closed
+							// non-func set proves non-func for the qualified types this
+							// file set actually uses.
+							if closedNonFuncIdents[base.Name+"."+v.Sel.Name] {
+								named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+								break
+							}
+							return fmt.Errorf("variable %s is bound to package member %s.%s — fail closed", id.Name, base.Name, v.Sel.Name)
 						case baseIsIdent:
-							// Value receiver: a bound method `recv.Method` is a
-							// function-typed dispatch seam, even if never called.
+							// Value receiver: recv.Sel. A method value recv.Method is a
+							// function-typed dispatch seam, rejected even if never called.
+							// The scanner does not model per-receiver method sets, so it
+							// cannot prove a bare recv.Sel is a field rather than a method;
+							// that proof needs receiver-type method tables this closed file
+							// set does not build. Fail closed on it.
 							return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
 						default:
 							// Selector on an unresolvable base (parenthesised receiver,

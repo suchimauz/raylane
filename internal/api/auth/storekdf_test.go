@@ -449,8 +449,11 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 		// — declarations and bodies — for the three new protection primitive
 		// files. Ordinary function/method declaration headers are NOT seams
 		// and stay allowed. Fail closed when a named type cannot be resolved.
-		if name == "protect_token.go" || name == "protect_session.go" || name == "protect_admission.go" {
-			if verr := assertNoFunctionSeams(f); verr != nil {
+		// F6 closure: gate on the ACTUAL FILENAME `name` from the closed
+		// production-file loop — never on f.Name.Name, which is the package
+		// identifier and identical for every file.
+		if functionSeamFileSet[name] {
+			if verr := assertNoFunctionSeams(name, f); verr != nil {
 				t.Fatalf("G-2/D-6b: %s: %v", name, verr)
 			}
 		}
@@ -912,6 +915,53 @@ func fileImports(f *ast.File) (map[string]bool, error) {
 	return imports, nil
 }
 
+// filePackageNames returns the package identifiers of f, keyed by the
+// package-directory name of each import path (last path element). A real
+// selector call pkg.Symbol always names a package imported by THIS file,
+// so the qualified name can only resolve through this set; an unknown
+// package fails closed. An EXPLICIT rename (alias/dot/blank import) and a
+// versioned module directory (…/vN) both hide the true package name from
+// syntax, so filePackageNames returns nil (unresolvable) and every
+// qualified call then fails closed instead of resolving under a guessed
+// name.
+func filePackageNames(f *ast.File) map[string]bool {
+	names := map[string]bool{}
+	for _, spec := range f.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			return nil // undecodable literal: unresolvable, fail closed
+		}
+		if spec.Name != nil && spec.Name.Name != "" {
+			// Explicit rename (alias, dot or blank): the real package name
+			// is not syntactically derivable — the guard refuses to resolve
+			// any qualified call in this file.
+			return nil
+		}
+		elem := path
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			elem = path[i+1:]
+		}
+		if strings.HasPrefix(elem, "v") && len(elem) > 1 && allASCIIDigits(elem[1:]) {
+			// Versioned module directory: package name not derivable.
+			return nil
+		}
+		names[elem] = true
+	}
+	return names
+}
+
+func allASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // commentMask returns a byte-for-byte same-length copy of src in which
 // every comment's span is replaced by 0x00, except '\n' which is preserved
 // (so line structure, byte offsets and every string literal survive).
@@ -948,16 +998,19 @@ func commentMask(src string) (string, error) {
 	if count != 1 || owned == nil {
 		return "", fmt.Errorf("commentMask: fresh FileSet holds %d files, want exactly the one parsed file", count)
 	}
-	// SEC-3 mandatory omission 1: the fresh FileSet must still be at its
-	// base — no caller-added file may have advanced it (checked BEFORE any
-	// use of positions).
-	if fset.Base() > 0 {
-		return "", fmt.Errorf("commentMask: fresh FileSet base %d > 0", fset.Base())
+	// SEC-3 mandatory base relation 1 (accepted polarity): a token.FileSet
+	// is REQUIRED to be positive, and the invalid opposite (a non-positive
+	// FileSet base) is rejected here, BEFORE any use of positions.
+	if fset.Base() <= 0 {
+		return "", fmt.Errorf("commentMask: FileSet base %d is not positive", fset.Base())
 	}
-	// SEC-3 mandatory omission 2: the parser-created file must live INSIDE
-	// this FileSet's address range (checked BEFORE any base subtraction).
-	if owned.Base() <= 0 || owned.Base() <= fset.Base() {
-		return "", fmt.Errorf("commentMask: owning file base %d not above FileSet base %d", owned.Base(), fset.Base())
+	// SEC-3 mandatory base relation 2 (accepted polarity): the owned file
+	// base is REQUIRED positive and NOT ABOVE the FileSet base it lives in
+	// — accepted iff owned.Base() > 0 && owned.Base() <= fset.Base(); the
+	// invalid opposites (non-positive owned base, or an owned base above
+	// the FileSet base) are rejected here, BEFORE any base subtraction.
+	if owned.Base() <= 0 || owned.Base() > fset.Base() {
+		return "", fmt.Errorf("commentMask: owning file base %d outside (0, fset.Base()=%d]", owned.Base(), fset.Base())
 	}
 	if owned.Size() != len(src) {
 		return "", fmt.Errorf("commentMask: owning file size %d != source length %d", owned.Size(), len(src))
@@ -1004,9 +1057,14 @@ func commentMask(src string) (string, error) {
 				// Evaluated so an empty or 1-byte source cannot underflow.
 				return "", fmt.Errorf("commentMask: no room for an opener at offset %d of %d", start, len(out))
 			}
+			// F1 closure: ONE end in the per-comment scope, assigned by both
+			// recognised branches, so the post-switch full-mask confirmation
+			// below reads a variable that is actually in scope. Unknown
+			// openers still fail closed in default before any use.
+			var end int
 			switch {
 			case string(out[start:start+2]) == "//":
-				end := len(out)
+				end = len(out)
 				for i := start + 2; i < len(out); i++ {
 					if out[i] == '\n' {
 						end = i
@@ -1016,19 +1074,20 @@ func commentMask(src string) (string, error) {
 				if err := mask(start, end); err != nil {
 					return "", err
 				}
-				// Agreement for a line comment: Text = span minus the
-				// two-byte opener, modulo folded CR (an internal CR, or
-				// the CR of a CRLF ending the line — that CR sits one
-				// byte past the raw end).
+				// F5: Text keeps the "//" opener, so the exact accepted delta
+				// is plain (end-start)-len(Text) — no delimiter overhead; the
+				// only loss is folded CR (internal CR, or the CR of a CRLF
+				// line ending, which sits one byte past the raw end; the LF
+				// itself is not a foldable loss).
 				agreeEnd := end
 				if end < len(src) && src[end] == '\n' && end > start && src[end-1] == '\r' {
 					agreeEnd = end + 1
 				}
-				if err := agreeSpan("line", start, end, 2, src[start:agreeEnd], c.Text); err != nil {
+				if err := agreeSpan("line", start, end, src[start:agreeEnd], c.Text); err != nil {
 					return "", err
 				}
 			case string(out[start:start+2]) == "/*":
-				end := -1
+				end = -1
 				for i := start + 2; i+1 < len(out); i++ {
 					if out[i] == '*' && out[i+1] == '/' {
 						end = i + 2
@@ -1041,10 +1100,10 @@ func commentMask(src string) (string, error) {
 				if err := mask(start, end); err != nil {
 					return "", err
 				}
-				// Agreement for a block comment: Text = span minus the
-				// two-byte opener and the two-byte closer ("*/" has no
-				// CR to fold), modulo CRs inside the span.
-				if err := agreeSpan("block", start, end, 4, src[start:end], c.Text); err != nil {
+				// F5: Text keeps BOTH "/*" and "*/", so again the exact
+				// accepted delta is plain (end-start)-len(Text), no overhead;
+				// only CRs inside the validated raw span may be folded away.
+				if err := agreeSpan("block", start, end, src[start:end], c.Text); err != nil {
 					return "", err
 				}
 			default:
@@ -1063,23 +1122,32 @@ func commentMask(src string) (string, error) {
 }
 
 
-// agreeSpan is the SEC-3 mandatory raw-span/normalized-comment agreement.
-// The caller passes the ALREADY VALIDATED raw span bytes (the half-open
-// [start,end) slice of the source, plus, for a line comment ending in a
-// verified CRLF, the one folded CR past the end) and the structural
-// overhead — 2 for "//" openers, 4 for "/*" ... "*/". The parser folds
-// ONLY CR bytes away, so the required bound is
-// 0 <= len(span)-overhead-len(c.Text) <= countCR(spanBytes). This is a
-// sanity constraint on span derivation, NOT a content or authenticity
-// oracle.
-func agreeSpan(kind string, start, end, overhead int, spanBytes string, text string) error {
+	// agreeSpan is the SEC-3 mandatory raw-span/normalized-comment agreement.
+// F5 closure: ast.Comment.Text INCLUDES the "//" or "/*" … "*/" delimiters,
+// so the EXACT accepted formula subtracts NO structural overhead. The only
+// size loss is the parser folding CR bytes away. The caller passes the
+// ALREADY VALIDATED raw span bytes (the half-open [start,end) slice, plus,
+// for a line comment ending in a verified CRLF, the one foldable CR past
+// the end). Accepted iff
+//
+//	d := (end-start) - len(c.Text), 0 <= d <= countCR(spanBytes)
+//
+// This is a sanity constraint on span derivation, NOT a content or
+// authenticity oracle.
+func agreeSpan(kind string, start, end int, spanBytes string, text string) error {
 	cr := countCR(spanBytes)
 	// The trailing LF of a CRLF line comment is inside spanBytes but not
-	// inside the raw span [start,end); do not count it as foldable.
-	if kind == "line" && len(spanBytes) > end-start && spanBytes[len(spanBytes)-1] == '\n' {
-		cr -= 1
+	// inside the raw span [start,end); an LF is never a foldable loss, so
+	// it must not inflate the CR allowance.
+	if kind == "line" && len(spanBytes) > end-start && spanBytes[len(spanBytes)-1] == '\n' && spanBytes[len(spanBytes)-2] == '\r' {
+		// spanBytes reaches one byte past the raw end (verified CRLF). That
+		// CR lies OUTSIDE the raw span [start,end), so countCR above did NOT
+		// see it — yet it is exactly the CR the parser folds, so the
+		// allowance must GAIN it; the LF itself is never foldable, so the
+		// net correction is +1.
+		cr += 1
 	}
-	d := (end - start) - overhead - len(text)
+	d := (end - start) - len(text)
 	if d < 0 || d > cr {
 		return fmt.Errorf("commentMask: %s span [%d,%d) and comment text length %d disagree (delta %d, CR %d)", kind, start, end, len(text), d, cr)
 	}
@@ -1243,10 +1311,12 @@ func seamUnderlying(e ast.Expr, named map[string]ast.Expr, seen map[string]bool)
 		// A qualified type from another package cannot name a function type
 		// of THIS package; only the closed list is accepted, everything
 		// else fails closed.
-		if id, ok := t.X.(*ast.Ident); ok {
-			if sel, ok2 := t.Sel.(*ast.Ident); ok2 && closedNonFuncIdents[id.Name+"."+sel.Name] {
-				return false, nil
-			}
+		// F2 closure: ast.SelectorExpr.Sel is CONCRETELY *ast.Ident — a type
+		// assertion on it would not compile — so Sel.Name is read directly
+		// after a defensive nil check. Only X is an interface field needing
+		// the Ident assertion.
+		if id, ok := t.X.(*ast.Ident); ok && t.Sel != nil && closedNonFuncIdents[id.Name+"."+t.Sel.Name] {
+			return false, nil
 		}
 		return false, fmt.Errorf("qualified type outside the closed resolvable set — fail closed")
 	case *ast.InterfaceType:
@@ -1369,6 +1439,19 @@ func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) e
 		if err := checkSeamExpr(fld.Type, named, what); err != nil {
 			return err
 		}
+		// SEC-2 closure: nested anonymous struct/interface field types must
+		// not bypass the ban by hiding behind an "otherwise safe" outer
+		// field — descend into every nested field position at any depth.
+		if st, ok := fld.Type.(*ast.StructType); ok {
+			if err := checkFieldList(st.Fields, named, what+" nested struct field"); err != nil {
+				return err
+			}
+		}
+		if it, ok := fld.Type.(*ast.InterfaceType); ok {
+			if err := checkFieldList(it.Methods, named, what+" nested interface field"); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -1377,11 +1460,18 @@ func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) e
 // from a function literal), assignment or return of a function-typed
 // expression, function literals appearing as values, and any call or
 // conversion whose target or nested expression is function-typed.
-func checkStmt(s ast.Stmt, named map[string]ast.Expr) error {
+func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool) error {
 	switch st := s.(type) {
+	case *ast.BadStmt:
+		return fmt.Errorf("parser produced a malformed statement — fail closed")
+	case *ast.EmptyStmt:
+		// A bare ';' carries no value position at all.
+	case *ast.BranchStmt:
+		// break/continue/goto/fallthrough carry no expression or value
+		// position; they cannot introduce or dispatch a function value.
 	case *ast.DeclStmt:
 		if gd, ok := st.Decl.(*ast.GenDecl); ok {
-			return checkDecls([]ast.Decl{gd}, named)
+			return checkDecls([]ast.Decl{gd}, named, fileFuncs, filePkgs)
 		}
 	case *ast.AssignStmt:
 		if st.Tok == token.DEFINE {
@@ -1395,9 +1485,42 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr) error {
 				}
 			}
 		}
-		for _, rhs := range st.Rhs {
+			for _, rhs := range st.Rhs {
 			if exprReachesFuncType(rhs) {
 				return fmt.Errorf("assignment of a function-typed expression")
+			}
+		}
+		// SEC-2 binding closure (conservative, DEFINE only): a new `:=`
+		// declaration records a value binding for the single-assign form:
+		//   v := existingFunc  -> bound to that name; a later v(...) call is
+		//                        judged through fileFuncs (function of this
+		//                        file captured into a variable = dispatch
+		//                        seam; anything else fails closed)
+		//   v := recv.method   -> bound to the method selector name; a later
+		//                        v(...) call fails closed
+		//   v := f(...) or any other single-value producer -> opaque value
+		//                        binding; calling v later fails closed, the
+		//                        result kind is syntactically invisible
+		// Ordinary `=` re-assignments NEVER re-bind, so a control-flow
+		// dependent err = anotherCall() can never overwrite — and thereby
+		// unlock — the binding recorded when err was declared. Ordinary use
+		// of such locals (field access, arithmetic, plain reads) stays
+		// allowed exactly as before; only CALLS consult the bindings.
+		if st.Tok == token.DEFINE {
+			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
+				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+					switch v := st.Rhs[0].(type) {
+					case *ast.Ident:
+						named[id.Name] = &ast.Ident{Name: v.Name}
+					case *ast.SelectorExpr:
+						if v.Sel == nil {
+							return fmt.Errorf("assignment target %s receives a malformed selector value — fail closed", id.Name)
+						}
+						named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+					default:
+						named[id.Name] = localKindValue
+					}
+				}
 			}
 		}
 		for _, lhs := range st.Lhs {
@@ -1413,41 +1536,41 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr) error {
 		}
 	case *ast.BlockStmt:
 		for _, inner := range st.List {
-			if err := checkStmt(inner, named); err != nil {
+			if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
 				return err
 			}
 		}
 	case *ast.IfStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
-		if err := checkStmt(st.Body, named); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
 		if st.Else != nil {
-			if err := checkStmt(st.Else, named); err != nil {
+			if err := checkStmt(st.Else, named, fileFuncs, filePkgs); err != nil {
 				return err
 			}
 		}
 	case *ast.ForStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
-		if err := checkBranchStmtInitAssign(st.Post, named); err != nil {
+		if err := checkBranchStmtInitAssign(st.Post, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
-		if err := checkStmt(st.Body, named); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
 	case *ast.RangeStmt:
 		if exprReachesFuncType(st.X) {
 			return fmt.Errorf("ranged-over expression is function-typed")
 		}
-		if err := checkStmt(st.Body, named); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
 	case *ast.SwitchStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs); err != nil {
 			return err
 		}
 		if st.Body != nil {
@@ -1462,7 +1585,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr) error {
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
 						return err
 					}
 				}
@@ -1472,15 +1595,214 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr) error {
 		if exprReachesFuncType(st.X) {
 			return fmt.Errorf("expression statement carries a function-typed value")
 		}
+		// SEC-2 dispatch-seam closure: a statement call f(...) where f is a
+		// LOCAL variable (function value capture, method value, or opaque
+		// value producer) fails closed; a direct call of a function
+		// declared in this file passes exactly as before.
+		if call, isCall := st.X.(*ast.CallExpr); isCall {
+			if err := checkCallTarget(call.Fun, named, fileFuncs, filePkgs, "expression statement"); err != nil {
+				return err
+			}
+			for _, a := range call.Args {
+				if exprReachesFuncType(a) {
+					return fmt.Errorf("call argument is function-typed")
+				}
+			}
+		}
+	case *ast.LabeledStmt:
+		if err := checkStmt(st.Stmt, named, fileFuncs, filePkgs); err != nil {
+			return err
+		}
+	case *ast.GoStmt:
+		if err := checkFuncCallSite(st.Call, named, fileFuncs, filePkgs, "go"); err != nil {
+			return err
+		}
+	case *ast.DeferStmt:
+		if err := checkFuncCallSite(st.Call, named, fileFuncs, filePkgs, "defer"); err != nil {
+			return err
+		}
+	case *ast.IncDecStmt:
+		if exprReachesFuncType(st.X) {
+			return fmt.Errorf("increment/decrement of a function-typed value")
+		}
+	case *ast.SendStmt:
+		if exprReachesFuncType(st.Chan) || exprReachesFuncType(st.Value) {
+			return fmt.Errorf("channel send of a function-typed value")
+		}
+	case *ast.SelectStmt:
+		if st.Body != nil {
+			for _, cse := range st.Body.List {
+				cc, ok := cse.(*ast.CommClause)
+				if !ok {
+					return fmt.Errorf("select body holds a non-communication clause — fail closed")
+				}
+				if cc.Comm != nil {
+					if err := checkStmt(cc.Comm, named, fileFuncs, filePkgs); err != nil {
+						return err
+					}
+				}
+				for _, inner := range cc.Body {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	case *ast.TypeSwitchStmt:
+		if st.Assign != nil {
+			if err := checkStmt(st.Assign, named, fileFuncs, filePkgs); err != nil {
+				return err
+			}
+		}
+		if st.Body != nil {
+			for _, cse := range st.Body.List {
+				tc, ok := cse.(*ast.TypeSwitchCase)
+				if !ok {
+					return fmt.Errorf("type switch body holds a non-case clause — fail closed")
+				}
+				for _, e := range tc.Cases {
+					if exprReachesFuncType(e) {
+						return fmt.Errorf("type switch case type is function-typed")
+					}
+				}
+				for _, inner := range tc.Body {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	default:
+		// Fail closed on any statement container this scanner does not
+		// explicitly understand, instead of silently skipping its bodies.
+		return fmt.Errorf("statement %T is outside the closed statement container set — fail closed", s)
 	}
 	return nil
 }
 
-func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr) error {
+// localKindValue is the named[] binding shape for a local assigned an
+// opaque single-value producer (call result, parenthesized expression):
+// its value kind is syntactically uncertain, so calling it fails closed.
+var localKindValue = &ast.CallExpr{}
+
+// checkCallTarget is the SEC-2 dispatch-seam rule shared by ordinary
+// expression statements and the go/defer positions. A call target may be
+// a function literal, a named function value captured into a local
+// variable (f := existingFunc; f(...)), or a method value — all are
+// dispatch seams. The classification is deliberately CONSERVATIVE at the
+// call site: only a target bound to a plain package/local NAME is
+// allowed, because in these closed files a called bare identifier is
+// always a directly declared function; a target bound to a method
+// selector name, or to an opaque value (call result, paren), or resolved
+// from the enclosing package file set to anything but a FuncDecl, fails
+// closed. Call argument expressions are literal-scanned too.
+func checkCallTarget(fn ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, what string) error {
+	if fn == nil {
+		return fmt.Errorf("%s call position is empty — fail closed", what)
+	}
+	if exprReachesFuncType(fn) {
+		return fmt.Errorf("%s call target is a function literal or function-typed expression", what)
+	}
+	switch t := fn.(type) {
+	case *ast.Ident:
+		if isGoBuiltinName(t.Name) {
+			return nil
+		}
+		if binding, bound := named[t.Name]; bound {
+			if nameNode, isIdent := binding.(*ast.Ident); isIdent {
+				if fileFuncs[nameNode.Name] {
+					// Bound to a name that IS a function in this file: the
+					// indirected call is a dispatch seam.
+					return fmt.Errorf("%s call target %s is a function-typed value captured from %s", what, t.Name, nameNode.Name)
+				}
+				return fmt.Errorf("%s call target %s is a variable bound to %s of unverified kind — fail closed", what, t.Name, nameNode.Name)
+			}
+			// Opaque binding (call result, paren): value kind uncertain.
+			return fmt.Errorf("%s call target %s is a variable of unverified value kind — fail closed", what, t.Name)
+		}
+		if fileFuncs[t.Name] {
+			// Direct call of a function declared in this file — allowed.
+			return nil
+		}
+		if isBuiltinTypeName(t.Name) {
+			// Conversion to a predeclared type is not a dispatch seam.
+			return nil
+		}
+		// A bare name that is neither a local binding, a this-file function
+		// nor a predeclared name cannot be resolved from the parsed file —
+		// fail closed rather than assume it is not a function value.
+		return fmt.Errorf("%s call target %s is neither a function declared in this file nor a builtin — fail closed", what, t.Name)
+		if isGoBuiltinTypeName(t.Name) {
+			// Conversion to a predeclared type is not a dispatch seam.
+			return nil
+		}
+		// A bare name that is neither a local binding, a this-file function
+		// nor a predeclared name cannot be resolved from the parsed file —
+		// fail closed rather than assume it is not a function value.
+	case *ast.SelectorExpr:
+		// Qualified or method call: passes only when the base Ident names
+		// a package THIS file actually imports (filePackageNames-derived,
+		// alias-aware) and the selector is in the closed call set;
+		// anything else — including a method value behind a variable —
+		// fails closed.
+		base, ok := t.X.(*ast.Ident)
+		// A nil filePkgs means the file's imports were not resolvable
+		// exactly (explicit rename, versioned module, undecodable literal):
+		// fail closed on ALL qualified calls. An absent name also fails
+		// closed; only a true entry is a genuinely resolvable import.
+		if ok && t.Sel != nil && filePkgs[base.Name] && closedCallSelectors[t.Sel.Name] {
+			return nil
+		}
+		return fmt.Errorf("%s call target %v is outside the closed qualified-call set — fail closed", what, t)
+	default:
+		// Call of a parenthesized expression, index, type conversion or
+		// any other form: not a direct declared-function call — fail closed.
+		return fmt.Errorf("%s call target %T is not a direct function call — fail closed", what, fn)
+	}
+}
+
+// isGoBuiltinName recognises the predeclared callable functions.
+func isGoBuiltinName(n string) bool {
+	switch n {
+	case "append", "cap", "clear", "close", "copy", "complex", "delete", "imag",
+		"len", "make", "max", "min", "new", "panic", "print", "println", "real", "recover":
+		return true
+	}
+	return false
+}
+
+// closedCallSelectors is the closed set of selector call names the three
+// protection files legitimately use on values of the accepted non-func
+// types (sync.Mutex, time.Time; crypto/rand's Reader is a value, never a
+// call target). Adding a member is a contract change; anything else fails
+// closed.
+var closedCallSelectors = map[string]bool{
+	"Lock": true, "Unlock": true, // sync.Mutex methods
+	"Before": true, "After": true, "Unix": true, "Sub": true, "Add": true, "Equal": true, "Nanosecond": true, // time.Time methods
+}
+
+// checkFuncCallSite covers the go/defer call positions through the same
+// conservative call-target rule, and checks call arguments.
+func checkFuncCallSite(call *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, what string) error {
+	if call == nil {
+		return fmt.Errorf("%s statement without a call — fail closed", what)
+	}
+	if err := checkCallTarget(call.Fun, named, fileFuncs, filePkgs, what); err != nil {
+		return err
+	}
+	for _, a := range call.Args {
+		if exprReachesFuncType(a) {
+			return fmt.Errorf("%s call argument is function-typed", what)
+		}
+	}
+	return nil
+}
+
+func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool) error {
 	if s == nil {
 		return nil
 	}
-	return checkStmt(s, named)
+	return checkStmt(s, named, fileFuncs, filePkgs)
 }
 
 // checkDecls enforces the D-6b/SEC-2 seam ban over whole declarations and
@@ -1491,7 +1813,7 @@ func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr) error {
 // is a forbidden seam. Struct fields, named/aliased function types,
 // variables (explicit or inferred), literals, nested wrappers and every
 // body statement are covered.
-func checkDecls(decls []ast.Decl, named map[string]ast.Expr) error {
+func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool) error {
 	for _, d := range decls {
 		switch decl := d.(type) {
 		case *ast.GenDecl:
@@ -1553,7 +1875,7 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr) error {
 			}
 			if decl.Body != nil {
 				for _, s := range decl.Body.List {
-					if err := checkStmt(s, named); err != nil {
+					if err := checkStmt(s, named, fileFuncs, filePkgs); err != nil {
 						return fmt.Errorf("in %s: %w", decl.Name.Name, err)
 					}
 				}
@@ -1570,9 +1892,15 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr) error {
 // parameter, explicit or inferred function-typed variable, function
 // literal value, named/aliased function type, nested pointer/array/map/
 // chan wrapper — fails.
-func assertNoFunctionSeams(f *ast.File) error {
-	if !functionSeamFileSet[f.Name.Name] {
-		return fmt.Errorf("assertNoFunctionSeams: %s is outside the closed three-file seam scope", f.Name.Name)
+func assertNoFunctionSeams(fileName string, f *ast.File) error {
+	if !functionSeamFileSet[fileName] {
+		return fmt.Errorf("assertNoFunctionSeams: %s is outside the closed three-file seam scope", fileName)
+	}
+	// The package identifier is verified SEPARATELY from the filename gate:
+	// it names the package, never a file (using it as the filename key was
+	// the F6 never-runs defect). Fail closed on any mismatch.
+	if f.Name == nil || f.Name.Name != "auth" {
+		return fmt.Errorf("assertNoFunctionSeams: %s parses as package %v, not auth — fail closed", fileName, f.Name)
 	}
 	local := localNamedTypes(f)
 	if _, leaked := local[ownErrorTypeFailClosed]; leaked {
@@ -1608,7 +1936,22 @@ func assertNoFunctionSeams(f *ast.File) error {
 			named[n] = siblingStructShape()
 		}
 	}
-	return checkDecls(f.Decls, named)
+	// fileFuncs is the set of function/method names declared IN THIS FILE,
+	// from its own top-level FuncDecls (never a hardcoded list). A bare
+	// call target resolves only through this set; anything else fails
+	// closed via checkCallTarget. filePkgs names the packages THIS file
+	// imports, so a qualified selector call resolves by the imported
+	// package's actual name (renamed imports included); neither map ever
+	// deletes entries, so a call classification can never be peeled off by
+	// re-assignment.
+	fileFuncs := map[string]bool{}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name != nil {
+			fileFuncs[fd.Name.Name] = true
+		}
+	}
+	filePkgs := filePackageNames(f)
+	return checkDecls(f.Decls, named, fileFuncs, filePkgs)
 }
 
 // siblingPackageTypeNames is the closed set of package-local type names

@@ -2072,6 +2072,74 @@ func declareInScope(named map[string]ast.Expr, sc *scopeFrame, name string, typ 
 // slot/type. It binds the declared type (vs.Type) when present so a local's
 // own field/element selector resolves, and returns the list of non-blank
 // names introduced (for the caller's lexical-shadow snapshot/restore).
+// declareValueSpecInScope classifies one var/const ValueSpec exactly like :=
+// (REAL declared/slot types) and DECLARES each name into the CURRENT scopeFrame
+// `sc`, so the binding is LIVE for every subsequent statement in the SAME list
+// and restored at the list's lexical boundary (not bypassing the frame). A
+// type-only spec (no Values) still records the declared type.
+func declareValueSpecInScope(vs *ast.ValueSpec, named map[string]ast.Expr, sc *scopeFrame, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	if ts, ok := vs.Type.(*ast.Ident); ok {
+		for _, nm := range vs.Names {
+			if nm.Name != "_" {
+				declareInScope(named, sc, nm.Name, &ast.Ident{Name: ts.Name})
+			}
+		}
+	}
+	ids := []*ast.Ident{}
+	for _, nm := range vs.Names {
+		ids = append(ids, nm)
+	}
+	for _, v := range vs.Values {
+		if exprReachesFuncType(v) {
+			return fmt.Errorf("variable %s initialised from a function-typed value", vs.Names[0].Name)
+		}
+	}
+	if len(vs.Values) == 0 {
+		return nil
+	}
+	if len(ids) == 1 && len(vs.Values) == 1 {
+		if ids[0].Name != "_" {
+			if err := classifyOneBinding(ids[0], vs.Values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+				return err
+			}
+			declareInScope(named, sc, ids[0].Name, named[ids[0].Name])
+		}
+		return nil
+	}
+	if err := checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if id.Name != "_" {
+			if bound, ok := named[id.Name]; ok {
+				declareInScope(named, sc, id.Name, bound)
+			}
+		}
+	}
+	return nil
+}
+
+// classifyDeclInScope classifies a var/const GenDecl (a DeclStmt) into the
+// CURRENT scopeFrame, so the declared names live to the end of the enclosing
+// statement list and are restored at its boundary (not leaked past a nested
+// shadow). TYPE-only GenDecls are still seam-checked by checkDecls elsewhere.
+func classifyDeclInScope(gd *ast.GenDecl, named map[string]ast.Expr, sc *scopeFrame, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	if gd.Tok != token.VAR && gd.Tok != token.CONST {
+		// TYPE/etc declarations carry no variable bindings here.
+		return nil
+	}
+	for _, sp := range gd.Specs {
+		vs, ok := sp.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		if err := declareValueSpecInScope(vs, named, sc, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func classifyValueSpec(vs *ast.ValueSpec, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) ([]string, error) {
 	// Record the declared type FIRST so a local declared with an explicit type
 	// keeps that ACTUAL type for a later selector/container proof.
@@ -2245,12 +2313,54 @@ func indexElementType(indexed *ast.IndexExpr, named map[string]ast.Expr, typeFie
 	return containerElementType(indexed.X, named, typeFields)
 }
 
+// indexIsMapCommaOK resolves the container of an index expression and reports
+// whether it is a MAP (the only comma-ok-capable index form). A slice/array/
+// pointer index yields a SINGLE result, so a 2-name bind against a non-map
+// index is NOT a valid comma-ok producer and must not be given two slots.
+func indexIsMapCommaOK(idx *ast.IndexExpr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) (ast.Expr, bool) {
+	container := unparen(idx.X)
+	var under ast.Expr
+	switch c := container.(type) {
+	case *ast.Ident:
+		u, ok := named[c.Name]
+		if !ok {
+			return nil, false
+		}
+		under = u
+	case *ast.SelectorExpr:
+		base, ok2 := c.X.(*ast.Ident)
+		if !ok2 || c.Sel == nil {
+			return nil, false
+		}
+		tn := declaredTypeName(base.Name, named)
+		if tn == "" {
+			return nil, false
+		}
+		flds, ok2 := typeFields[tn]
+		if !ok2 {
+			return nil, false
+		}
+		f, ok2 := flds[c.Sel.Name]
+		if !ok2 {
+			return nil, false
+		}
+		under = f.typ
+	default:
+		return nil, false
+	}
+	if mt, ok := under.(*ast.MapType); ok {
+		return mt.Value, true
+	}
+	return nil, false
+}
+
 // classifyNonCallBinds binds each name to the REAL retained type of a
-// supported non-call single RHS. For a comma-ok map index bound to exactly two
-// names (v, ok := m.records[key]) it binds name[0] to the container's element
-// type and name[1] to Ident{bool} — the actual producer arity and per-name
-// slot types. For a single name bound to any index form it binds the element
-// type. For any other non-call multi-name form it returns false so the caller
+// supported non-call single RHS. A 2-name comma-ok bind is VALID ONLY from a
+// resolvable MAP index (the only comma-ok index producer): name[0]=map
+// element, name[1]=Ident{bool}. A slice/array/pointer index yields ONE
+// result, so a 2-name bind against it is NOT a comma-ok and returns false
+// (fail closed). A 1-name bind keeps the real element type for any index
+// container. Any other non-call multi-name form returns false so the caller
 // fails closed honestly (no automatic new producer coverage).
 func classifyNonCallBinds(names []*ast.Ident, rhs ast.Expr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) bool {
 	idx, isIndex := unparen(rhs).(*ast.IndexExpr)
@@ -2262,8 +2372,15 @@ func classifyNonCallBinds(names []*ast.Ident, rhs ast.Expr, named map[string]ast
 		return false
 	}
 	if len(names) == 2 {
-		// comma-ok map index: exactly two slots (element type + the bool ok).
-		named[names[0].Name] = slotTypeIdent(elem)
+		// comma-ok is valid ONLY from a resolvable MAP index (the sole
+		// comma-ok-capable index producer). A slice/array/pointer index yields
+		// ONE result, so a 2-name bind against it is NOT a comma-ok — return
+		// false and fail closed rather than invent a second slot.
+		mapElem, isMap := indexIsMapCommaOK(idx, named, typeFields)
+		if !isMap {
+			return false
+		}
+		named[names[0].Name] = slotTypeIdent(mapElem)
 		named[names[1].Name] = &ast.Ident{Name: "bool"}
 		return true
 	}
@@ -2619,6 +2736,61 @@ func containerElementType(container ast.Expr, named map[string]ast.Expr, typeFie
 	return containerElemType(under)
 }
 
+// rangeElementType resolves a range-over expression's iterated element type
+// for a single-variable range, or its (key,value) types for a two-variable
+// range. It returns ok=false when the container shape is unresolvable so the
+// caller can fail closed honestly (no invented coverage).
+func rangeElementType(x ast.Expr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) (key ast.Expr, value ast.Expr, ok bool) {
+	var under ast.Expr
+	switch c := x.(type) {
+	case *ast.Ident:
+		u, found := named[c.Name]
+		if !found {
+			return nil, nil, false
+		}
+		under = u
+	case *ast.SelectorExpr:
+		base, ok2 := c.X.(*ast.Ident)
+		if !ok2 || c.Sel == nil {
+			return nil, nil, false
+		}
+		tn := declaredTypeName(base.Name, named)
+		if tn == "" {
+			return nil, nil, false
+		}
+		flds, found := typeFields[tn]
+		if !found {
+			return nil, nil, false
+		}
+		f, found := flds[c.Sel.Name]
+		if !found {
+			return nil, nil, false
+		}
+		under = f.typ
+	default:
+		return nil, nil, false
+	}
+	switch u := under.(type) {
+	case *ast.ArrayType:
+		if u.Len == nil {
+			// slice: index is int, element is Elt
+			return &ast.Ident{Name: "int"}, u.Elt, true
+		}
+		// fixed array: index is int, element is Elt
+		return &ast.Ident{Name: "int"}, u.Elt, true
+	case *ast.MapType:
+		return u.Key, u.Value, true
+	case *ast.StarExpr:
+		// pointer to array: index is int, element is the pointed-to array's Elt
+		if at, ok2 := u.X.(*ast.ArrayType); ok2 {
+			return &ast.Ident{Name: "int"}, at.Elt, true
+		}
+	case *ast.ChanType:
+		return nil, u.Value, true
+	}
+	return nil, nil, false
+}
+
 // exprsAllNonFunc reports whether every expression in list resolves
 // positively non-function in the REAL named-type context (no FuncType at any
 // depth, no resolution error). The named map is REQUIRED: a local named
@@ -2680,7 +2852,10 @@ func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFunc
 		// position; they cannot introduce or dispatch a function value.
 	case *ast.DeclStmt:
 		if gd, ok := st.Decl.(*ast.GenDecl); ok {
-			return checkDecls([]ast.Decl{gd}, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+			// Declare the var/const names into the CURRENT scopeFrame so they live
+			// to the end of the enclosing list (not bypassing the frame, which
+			// would leak a nested shadow).
+			return classifyDeclInScope(gd, named, sc, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		}
 	case *ast.AssignStmt:
 		if st.Tok == token.DEFINE {
@@ -2758,34 +2933,66 @@ func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFunc
 	case *ast.BlockStmt:
 		return checkStmtList(st.List, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	case *ast.IfStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-			return err
-		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-			return err
-		}
-		if st.Else != nil {
-			if err := checkStmt(st.Else, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+		// if-init: the init declaration must be LIVE through the body/else, so
+		// run init, body and else under ONE scope frame (popped after the whole
+		// if) instead of a private single-statement scope that pops early.
+		ifScope := pushScope()
+		defer popScope(named, ifScope)
+		if st.Init != nil {
+			if err := checkStmtSc(st.Init, named, ifScope, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 				return err
 			}
 		}
+		if err := checkStmtSc(st.Body, named, ifScope, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+			return err
+		}
+		if st.Else != nil {
+			return checkStmtSc(st.Else, named, ifScope, fileFuncs, filePkgs, methods, typeFields, funcResults)
+		}
+		return nil
 	case *ast.ForStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+		// for-init: the init declaration must be LIVE through the body, so run
+		// init and body under ONE scope frame (pushed here, popped after the
+		// body) instead of a private single-statement scope that pops early.
+		loopScope := pushScope()
+		defer popScope(named, loopScope)
+		if st.Init != nil {
+			if err := checkStmtSc(st.Init, named, loopScope, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+				return err
+			}
+		}
+		if err := checkStmtSc(st.Body, named, loopScope, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err
 		}
-		if err := checkBranchStmtInitAssign(st.Post, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-			return err
+		if st.Post != nil {
+			if err := checkStmtSc(st.Post, named, loopScope, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+				return err
+			}
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-			return err
-		}
+		return nil
 	case *ast.RangeStmt:
 		if exprReachesFuncType(st.X) {
 			return fmt.Errorf("ranged-over expression is function-typed")
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-			return err
+		// Range key/value: bind the iteration variables for the body scope. A
+		// `:=` range declares new names (live through the body, restored after);
+		// an `=` range re-uses existing names (assignment, no new declaration).
+		if st.Tok == token.DEFINE {
+			rkey, rvalue, rok := rangeElementType(st.X, named, typeFields)
+			if !rok {
+				return fmt.Errorf("range-over expression has an unresolvable element type - fail closed")
+			}
+			bodyScope := pushScope()
+			defer popScope(named, bodyScope)
+			if id, ok := st.Key.(*ast.Ident); ok && id.Name != "_" && rkey != nil {
+				declareInScope(named, bodyScope, id.Name, rkey)
+			}
+			if id, ok := st.Value.(*ast.Ident); ok && id.Name != "_" && rvalue != nil {
+				declareInScope(named, bodyScope, id.Name, rvalue)
+			}
+			return checkStmtSc(st.Body, named, bodyScope, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		}
+		return checkStmt(st.Body, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	case *ast.SwitchStmt:
 		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 			return err

@@ -395,8 +395,29 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 			prod = append(prod, n)
 		}
 	}
-	if len(prod) != 2 {
-		t.Fatalf("G-scope: production files = %v, want exactly kdf.go + storekdf.go", prod)
+	// G-scope (guard delta D-1): the production file set is EXACTLY the
+	// accepted five. Unknown, missing and extra files all fail closed — this
+	// is set equality, never a "contains" check.
+	wantProd := map[string]bool{
+		"kdf.go": true, "storekdf.go": true,
+		"protect_token.go": true, "protect_session.go": true, "protect_admission.go": true,
+	}
+	gotProd := make(map[string]bool, len(prod))
+	for _, n := range prod {
+		gotProd[n] = true
+	}
+	if len(gotProd) != len(wantProd) {
+		t.Fatalf("G-scope: production file count = %d (%v), want exactly %d", len(gotProd), prod, len(wantProd))
+	}
+	for n := range wantProd {
+		if !gotProd[n] {
+			t.Fatalf("G-scope: production file %s is missing; set = %v", n, prod)
+		}
+	}
+	for n := range gotProd {
+		if !wantProd[n] {
+			t.Fatalf("G-scope: unexpected production file %s; set = %v", n, prod)
+		}
 	}
 	exportedMethods := 0
 	for _, name := range prod {
@@ -458,8 +479,8 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 			}
 		}
 	}
-	if exportedMethods != 2 {
-		t.Fatalf("G-1: accepted Error methods = %d, want exactly 2 (saltSourceError + bridgeError)", exportedMethods)
+	if exportedMethods != 22 {
+		t.Fatalf("G-1: accepted Error methods = %d, want exactly 22 (2 accepted + 20 new primitives)", exportedMethods)
 	}
 	// G-3: import direction, per production file, from ACTUAL AST IMPORT
 	// DECLARATIONS (finding F1 correction): raw text search for
@@ -485,9 +506,9 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 			if !hasStore {
 				t.Fatal("G-3: bridge import set lacks internal/store")
 			}
-		case "kdf.go":
+		case "kdf.go", "protect_token.go", "protect_session.go", "protect_admission.go":
 			if hasStore {
-				t.Fatal("G-3: the primitive file imports internal/store — forbidden")
+				t.Fatalf("G-3: %s imports internal/store — forbidden", name)
 			}
 		default:
 			if hasStore {
@@ -530,12 +551,62 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	if storeProdFiles == 0 {
 		t.Fatal("G-3: no store production files found — coverage lost")
 	}
-	// G-5: bridge-local SQL/db bans.
+	// G-5: bridge-local SQL/db bans. The twelve literals, the whole-file
+	// scope and the fail-closed t.Fatalf are unchanged; the ONLY change
+	// (E3 G-5 prime) is the scan surface: the comment-masked copy of the
+	// bridge source, produced by commentMask (which masks comments to 0x00,
+	// preserving newlines and byte length) instead of the raw bytes. String
+	// literals remain scanned, so banned material inside a string literal
+	// still fails. The frozen stripComments helper in kdf_test.go is not
+	// reused; the production bytes are untouched.
 	bridgeSrc := string(mustRead(t, "storekdf.go"))
+	bridgeMasked, merr := commentMask(bridgeSrc)
+	if merr != nil {
+		t.Fatalf("G-5: comment mask of storekdf.go failed closed: %v", merr)
+	}
+	if len(bridgeMasked) != len(bridgeSrc) {
+		t.Fatalf("G-5: comment mask changed the byte length of storekdf.go: %d vs %d", len(bridgeMasked), len(bridgeSrc))
+	}
 	for _, ban := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA ",
 		"db.Query", "db.Exec", "BeginTx", ".DB(", "fmt.Sprintf", "sql.Open", "sql.DB"} {
-		if strings.Contains(bridgeSrc, ban) {
+		if strings.Contains(bridgeMasked, ban) {
 			t.Fatalf("G-5: bridge contains forbidden %q", ban)
+		}
+	}
+	// G-5/D-6 for the three new primitive files: the same twelve literals
+	// over the same comment-masked surface, fail-closed.
+	for _, name := range []string{"protect_token.go", "protect_session.go", "protect_admission.go"} {
+		masked, perr := commentMask(string(mustRead(t, name)))
+		if perr != nil {
+			t.Fatalf("G-5: comment mask of %s failed closed: %v", name, perr)
+		}
+		for _, ban := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA ",
+			"db.Query", "db.Exec", "BeginTx", ".DB(", "fmt.Sprintf", "sql.Open", "sql.DB"} {
+			if strings.Contains(masked, ban) {
+				t.Fatalf("G-5: %s contains forbidden %q", name, ban)
+			}
+		}
+	}
+	// G-6/D-6: the three new primitive files are limited to the exact
+	// accepted stdlib import set; anything else — unknown, extra or
+	// undecodable — fails closed through the same decoded-import helper.
+	allowedPrimitiveImports := map[string]bool{
+		"crypto/rand": true, "crypto/sha256": true, "encoding/base64": true,
+		"sync": true, "time": true,
+	}
+	for _, name := range []string{"protect_token.go", "protect_session.go", "protect_admission.go"} {
+		pf, perr := parser.ParseFile(fset, name, mustRead(t, name), parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("G-6 parse %s: %v", name, perr)
+		}
+		pimports, pierr := fileImports(pf)
+		if pierr != nil {
+			t.Fatalf("G-6 %s: %v", name, pierr)
+		}
+		for path := range pimports {
+			if !allowedPrimitiveImports[path] {
+				t.Fatalf("G-6/D-6: %s imports %s outside the accepted stdlib-only set", name, path)
+			}
 		}
 	}
 	// G-6: the bridge's exact accepted signatures and single call sites.
@@ -812,6 +883,109 @@ func fileImports(f *ast.File) (map[string]bool, error) {
 	return imports, nil
 }
 
+// commentMask returns a byte-for-byte same-length copy of src in which
+// every comment's span is replaced by 0x00, except '\n' which is preserved
+// (so line structure, byte offsets and every string literal survive).
+// Spans come from the parser's own comment list over a FRESH dedicated
+// FileSet holding exactly the parsed file, following the accepted E3 /
+// OWNER / mask-precedence algorithm:
+//
+//   - start is int(c.Slash) - f.Base(), where f is the unique file of the
+//     fresh FileSet (located via token.FileIterate, never fset.File(fset.Base()),
+//     never a caller-added file, never a size/base heuristic); c.Slash must
+//     be a valid position and must fall inside f.
+//   - the end is derived from the ORIGINAL bytes: a line comment ends at
+//     the first '\n' at or after start+2 (or EOF, newline excluded); a
+//     block comment ends at the first "*/" at or after start+2, inclusive.
+//   - every failure (unowned or out-of-range position, missing room, an
+//     unrecognised opener, an unterminated block comment) fails closed.
+//
+// No bytes are removed, so masking can never create a new literal match.
+// The frozen whole-line stripComments helper in kdf_test.go is deliberately
+// NOT reused.
+func commentMask(src string) (string, error) {
+	fset := token.NewFileSet()
+	pf, err := parser.ParseFile(fset, "masked.go", src, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return "", fmt.Errorf("commentMask: parse failed closed: %w", err)
+	}
+	var owned *token.File
+	count := 0
+	fset.Iterate(func(f *token.File) bool {
+		count++
+		owned = f
+		return true
+	})
+	if count != 1 || owned == nil {
+		return "", fmt.Errorf("commentMask: fresh FileSet holds %d files, want exactly the one parsed file", count)
+	}
+	if owned.Size() != len(src) {
+		return "", fmt.Errorf("commentMask: owning file size %d != source length %d", owned.Size(), len(src))
+	}
+	out := []byte(src)
+	mask := func(start, end int) error {
+		if start < 0 || end <= start || end > len(out) {
+			return fmt.Errorf("commentMask: span [%d,%d) outside source of length %d", start, end, len(out))
+		}
+		for i := start; i < end; i++ {
+			if out[i] != '\n' {
+				out[i] = 0x00
+			}
+		}
+		return nil
+	}
+	for _, group := range pf.Comments {
+		for _, c := range group.List {
+			// token.NoPos is position 0, and a REAL comment at byte offset 0
+			// has c.Slash == f.Base()+1 (positions are one-based), so NoPos
+			// can never name a genuine comment start. Reject it before the
+			// base subtraction.
+			if c.Slash == token.NoPos {
+				return "", fmt.Errorf("commentMask: comment at NoPos fails closed")
+			}
+			offset := int(c.Slash) - owned.Base()
+			if offset < 0 || offset >= owned.Size() {
+				return "", fmt.Errorf("commentMask: comment offset %d outside owning file of size %d", offset, owned.Size())
+			}
+			start := offset
+			if start > len(out)-2 {
+				// Evaluated so an empty or 1-byte source cannot underflow.
+				return "", fmt.Errorf("commentMask: no room for an opener at offset %d of %d", start, len(out))
+			}
+			switch {
+			case string(out[start:start+2]) == "//":
+				end := len(out)
+				for i := start + 2; i < len(out); i++ {
+					if out[i] == '\n' {
+						end = i
+						break
+					}
+				}
+				if err := mask(start, end); err != nil {
+					return "", err
+				}
+			case string(out[start:start+2]) == "/*":
+				end := -1
+				for i := start + 2; i+1 < len(out); i++ {
+					if out[i] == '*' && out[i+1] == '/' {
+						end = i + 2
+						break
+					}
+				}
+				if end < 0 {
+					return "", fmt.Errorf("commentMask: unterminated block comment at offset %d", start)
+				}
+				if err := mask(start, end); err != nil {
+					return "", err
+				}
+			default:
+				return "", fmt.Errorf("commentMask: unrecognised comment opener at offset %d", start)
+			}
+		}
+	}
+	return string(out), nil
+}
+
 func mustRead(t *testing.T, name string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(name)
@@ -832,11 +1006,26 @@ func hasValueReceiver(fd *ast.FuncDecl, typeName string) bool {
 	return fd.Recv != nil && len(fd.Recv.List) == 1 && bareIdent(fd.Recv.List[0].Type) == typeName
 }
 
+// ownErrorType is the closed per-file own-type table (guard delta D-3).
+// Every production file of the accepted five has its own list; for any file
+// NOT in the table it returns a sentinel that is not, and can never equal,
+// any declared error type in the package, so the receiver comparison above
+// fails and the guard FAILS CLOSED. It never silently falls back to a real
+// name such as bridgeError.
 func ownErrorType(file string) string {
-	if file == "kdf.go" {
+	switch file {
+	case "kdf.go":
 		return "saltSourceError"
+	case "storekdf.go":
+		return "bridgeError"
+	case "protect_token.go":
+		return "errBootstrapToken"
+	case "protect_session.go":
+		return "errSession"
+	case "protect_admission.go":
+		return "errAdmission"
 	}
-	return "bridgeError"
+	return "ownErrorTypeFailClosedNotADeclaredErrorType"
 }
 
 func exactlyOneStringResult(results *ast.FieldList) bool {

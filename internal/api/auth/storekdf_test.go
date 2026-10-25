@@ -1457,9 +1457,9 @@ func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) e
 // namedEdge is a named-type descent edge: the named type plus whether the
 // reference to it passed through indirection (pointer, slice, map, channel,
 // func, or interface) on THIS step. The indirection flag is what makes a
-// recursive type finite in Go: a cycle reached through a pointer has finite
-// size, while a direct by-value cycle (struct{ x T }) is infinitely sized
-// and ill-formed.
+// recursive type finite in Go: a cycle segment that passes through an
+// indirected edge has finite size, while a cycle segment with only by-value
+// edges is infinitely sized and ill-formed.
 type namedEdge struct {
 	under       ast.Expr
 	indirection bool
@@ -1500,7 +1500,15 @@ func checkNestedFieldListEdges(e ast.Expr, named map[string]ast.Expr, what strin
 	case *ast.StarExpr:
 		return nestedWithIndirection(t.X, named, what, active)
 	case *ast.ArrayType:
-		return nestedWithIndirection(t.Elt, named, what, active)
+		// A slice (Len == nil) is indirection, so a cycle through it is finite.
+		// A fixed-size array (Len != nil) is BY VALUE: struct{ x [1]T } embeds T
+		// directly, so a cycle through a fixed array has no indirection and is
+		// infinitely sized. Scan elements in both cases, but mark only slices
+		// as indirected.
+		if t.Len == nil {
+			return nestedWithIndirection(t.Elt, named, what, active)
+		}
+		return checkNestedFieldListEdges(t.Elt, named, what, active)
 	case *ast.ChanType:
 		return nestedWithIndirection(t.Value, named, what, active)
 	case *ast.MapType:
@@ -1533,16 +1541,24 @@ func nestedWithIndirection(e ast.Expr, named map[string]ast.Expr, what string, a
 
 // enterNamed resolves and descends into a named type, applying the cycle
 // rule. indirection records whether the reference to this name passed
-// through indirection on this step.
+// through indirection on this step. A re-entered name closes a cycle: the
+// cycle is LEGAL iff the ACTUAL CYCLE SEGMENT — every edge traversed from
+// the first occurrence of the re-entered name around the loop back to it —
+// passes through at least one indirected edge, which is exactly Go's size
+// rule (the cycle then has finite size). The segment indirection is tracked
+// in the active entry (namedEdge.indirection) and threaded around the loop,
+// so indirection on an UNRELATED earlier path never masks a by-value cycle;
+// only the edges that actually form the repeated-name loop are decisive.
 func enterNamed(name string, indirection bool, named map[string]ast.Expr, what string, active map[string]namedEdge) error {
-	if _, onPath := active[name]; onPath {
+	if entry, onPath := active[name]; onPath {
 		// The cycle closes on THIS reference. It is legal exactly when the
-		// cycle passes through indirection on this closing edge (finite in
-		// Go); a direct by-value re-entry has no indirection and fails closed.
-		if indirection {
+		// segment from the original occurrence back to it passed through
+		// indirection (finite in Go); a by-value-only segment is infinitely
+		// sized and fails closed.
+		if entry.indirection || indirection {
 			return nil
 		}
-		return fmt.Errorf("named type %s re-entered by value on the same descent path — cyclic fail closed", name)
+		return fmt.Errorf("named type %s re-entered through a by-value-only cycle segment — cyclic fail closed", name)
 	}
 	under, ok := named[name]
 	if !ok {
@@ -1552,7 +1568,28 @@ func enterNamed(name string, indirection bool, named map[string]ast.Expr, what s
 	}
 	active[name] = namedEdge{under: under, indirection: indirection}
 	defer delete(active, name)
+	// The cycle segment may continue THROUGH this node: propagate whether
+	// indirection has been seen anywhere on the path FROM THE FIRST
+	// occurrence, so a later re-entry of an OUTER name can consult it.
+	propagateSegmentIndirection(active, indirection)
 	return checkNestedFieldListEdges(under, named, what, active)
+}
+
+// propagateSegmentIndirection marks every active entry so that a cycle
+// segment passing through this node is known to contain indirection. It is
+// applied when descending THROUGH a named type: each active ancestor's
+// segment flag is OR-ed with whether the current reference was indirected,
+// so that when a name re-enters, its stored segment flag reflects the whole
+// loop back to its first occurrence, not just the closing edge.
+func propagateSegmentIndirection(active map[string]namedEdge, indirection bool) {
+	if !indirection {
+		return
+	}
+	for name, edge := range active {
+		if !edge.indirection {
+			active[name] = namedEdge{under: edge.under, indirection: true}
+		}
+	}
 }
 
 // checkFieldListEdges is the field-list walker that threads the shared
@@ -1698,6 +1735,99 @@ func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 	return nil
 }
 
+// checkPairwiseBindingClassifies applies declaration-time function-value
+// classification to EVERY unambiguous pairwise name/value in a multi-name
+// or multi-value := / ValueSpec declaration, so a named function or method
+// value bound in any pairwise position is rejected even when unused. A
+// single RHS applied to several names (x, y = f()) is classified once for
+// that RHS; each name still receives its own classification.
+func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool) error {
+	for i, id := range names {
+		if id.Name == "_" {
+			continue
+		}
+		var rhs ast.Expr
+		switch {
+		case len(values) == 1:
+			rhs = values[0]
+		case i < len(values):
+			rhs = values[i]
+		default:
+			// More names than values and not a single-RHS form: a genuine
+			// multi-value mismatch is outside the closed set, fail closed.
+			return fmt.Errorf("declaration %s has no unambiguous right-hand value — fail closed", id.Name)
+		}
+		if rhs == nil {
+			continue
+		}
+		kind := bindingValueKind(rhs, fileFuncs, filePkgs, methods)
+		if kind == "func" {
+			return fmt.Errorf("variable %s is bound to a function or method value — fail closed", id.Name)
+		}
+		if kind == "unknown" {
+			return fmt.Errorf("variable %s right-hand value kind is unresolvable — fail closed", id.Name)
+		}
+		// kind == "value": a plain non-function result; no binding recorded
+		// here (the 1/1 classifyBindingRHS path records ordinary values).
+	}
+	return nil
+}
+
+// bindingValueKind classifies a short-binding right-hand side as 'value',
+// 'func', or 'unknown', so multi-name := and ValueSpec declarations can be
+// checked pairwise without rejecting the accepted ordinary comma-ok/call
+// results. A bare Ident that is a this-file function, a selector that names
+// a package member (which may be a package function) or a method, and any
+// unresolvable selector are 'func' or 'unknown' — never accepted as an
+// ordinary value. A closed non-func package value or a provably-field
+// selector is a 'value'. A call or any other producer is 'value' when it is
+// plainly a non-function result (comma-ok second results, constructors),
+// because these files carry no function-typed call results.
+func bindingValueKind(rhs ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool) string {
+	r := rhs
+	for {
+		if p, ok := r.(*ast.ParenExpr); ok {
+			r = p.X
+			continue
+		}
+		break
+	}
+	switch v := r.(type) {
+	case *ast.Ident:
+		if fileFuncs[v.Name] {
+			return "func"
+		}
+		return "value"
+	case *ast.SelectorExpr:
+		if v.Sel == nil {
+			return "unknown"
+		}
+		base, baseIsIdent := v.X.(*ast.Ident)
+		if !baseIsIdent {
+			return "unknown"
+		}
+		if filePkgs[base.Name] {
+			// Package member: only the closed non-func set proves a value;
+			// pkg.Function is a function value, anything else is unknown.
+			if closedNonFuncIdents[base.Name+"."+v.Sel.Name] {
+				return "value"
+			}
+			return "unknown"
+		}
+		// Value receiver: a method is a function value; a provably-field
+		// selector (Sel not in any local method set) is an ordinary value.
+		if methods[v.Sel.Name] {
+			return "func"
+		}
+		return "value"
+	default:
+		// Calls, conversions, composite literals, index expressions, etc.:
+		// these files carry no function-typed call results, and comma-ok
+		// second values are ordinary booleans/errors — accepted as values.
+		return "value"
+	}
+}
+
 // checkStmt fails on function-typed variables (explicit type or inferred
 // from a function literal), assignment or return of a function-typed
 // expression, function literals appearing as values, and any call or
@@ -1737,13 +1867,24 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		// the shared classifyBindingRHS helper, so := and var/const ValueSpec
 		// initialisers classify a function value identically (parens, bare
 		// identifiers, selectors, aliases), rejecting a bound function/method
-		// at the declaration even when it is never called.
+		// at the declaration even when it is never called. Multi-name forms
+		// are classified pairwise below so no position escapes the rule.
 		if st.Tok == token.DEFINE {
 			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
 					if err := classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods); err != nil {
 						return err
 					}
+				}
+			} else {
+				ids := []*ast.Ident{}
+				for _, lhs := range st.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						ids = append(ids, id)
+					}
+				}
+				if err := checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods); err != nil {
+					return err
 				}
 			}
 		}
@@ -2072,7 +2213,8 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 					// method value is rejected here, even when the variable is never
 					// called. exprReachesFuncType alone only catches literal
 					// FuncType/FuncLit initialisers, so non-literal function values
-					// are classified by name/kind below.
+					// are classified by name/kind below. Multi-name forms are
+					// classified pairwise so no position escapes the rule.
 					for i, v := range vs.Values {
 						if exprReachesFuncType(v) {
 							names := "?"
@@ -2081,14 +2223,21 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 							}
 							return fmt.Errorf("variable %s initialised from a function-typed value", names)
 						}
-						// Only a single-name/single-value spec carries an unambiguous
-						// binding; anything else stays an opaque value (call-checked).
+						_ = i
 						if len(vs.Names) == 1 && len(vs.Values) == 1 {
 							id := vs.Names[0]
 							if id.Name != "_" {
 								if err := classifyBindingRHS(id, vs.Values[i], named, fileFuncs, filePkgs, methods); err != nil {
 									return err
 								}
+							}
+						} else {
+							ids := []*ast.Ident{}
+							for _, nm := range vs.Names {
+								ids = append(ids, nm)
+							}
+							if err := checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods); err != nil {
+								return err
 							}
 						}
 					}

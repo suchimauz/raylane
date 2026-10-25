@@ -23,11 +23,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -471,7 +473,10 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 		if perr != nil {
 			t.Fatalf("G-3 parse %s: %v", name, perr)
 		}
-		imports := fileImports(pf)
+		imports, ierr := fileImports(pf)
+		if ierr != nil {
+			t.Fatalf("G-3 %s: %v", name, ierr)
+		}
 		hasStore := imports["github.com/suchimauz/raylane/internal/store"]
 		switch name {
 		case "storekdf.go":
@@ -512,7 +517,11 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 		if sperr != nil {
 			t.Fatalf("G-3 parse store/%s: %v", n, sperr)
 		}
-		if fileImports(sf)[authPath] {
+		simports, sierr := fileImports(sf)
+		if sierr != nil {
+			t.Fatalf("G-3 store/%s: %v", n, sierr)
+		}
+		if simports[authPath] {
 			t.Fatalf("G-3: internal/store/%s imports %s — dependency cycle", n, authPath)
 		}
 	}
@@ -556,8 +565,14 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	if berr != nil {
 		t.Fatalf("G-6 parse bridge: %v", berr)
 	}
-	for _, imp := range bridgeFile.Imports {
-		path := strings.Trim(imp.Path.Value, "\"")
+	// Same decoded-import helper (one trustworthy implementation for all
+	// consumers): a backtick-spelled crypto/rand or x/crypto import cannot
+	// evade this check either, and a decode failure fails closed.
+	bridgeImports, bierr := fileImports(bridgeFile)
+	if bierr != nil {
+		t.Fatalf("G-6 bridge imports: %v", bierr)
+	}
+	for path := range bridgeImports {
 		if path == "crypto/rand" || strings.HasPrefix(path, "golang.org/x/crypto") {
 			t.Fatalf("G-6: bridge imports KDF/seam dependency %s", path)
 		}
@@ -605,7 +620,9 @@ func TestT008StoreKDFBridgeErrorShapeAndCategories(t *testing.T) {
 	}
 	// EXACTLY THREE distinct fixed message literals exist in the bridge —
 	// a fourth (e.g. a separate default string) is a contract divergence.
-	msgs := strings.Count(s, `return "auth: `)
+	// Counted over comment-stripped code (accepted stripComments helper), so
+	// explanatory comments quoting the contract never affect the count.
+	msgs := strings.Count(stripComments(s), `return "auth: `)
 	if msgs != 3 {
 		t.Fatalf("error-contract: bridge has %d fixed messages, want exactly 3", msgs)
 	}
@@ -642,6 +659,84 @@ func TestT008StoreKDFBridgeErrorShapeAndCategories(t *testing.T) {
 	} {
 		if got := (bridgeError{kind: tc.kind}).Error(); got != tc.want {
 			t.Fatalf("error-contract unit: kind %d -> %q, want %q", int(tc.kind), got, tc.want)
+		}
+	}
+}
+
+// TestT008StoreKDFImportLiteralsDecodeFailClosed is the F1 second-stage
+// SOURCE-ONLY control over the guard helper itself (fileImports), using the
+// REAL decision path — synthetic parsed sources, no production hooks/API/DB.
+// It proves: (1) an ordinary double-quoted forbidden import registers;
+// (2) a VALID raw/backtick spelling of the SAME forbidden module path decodes
+// to the identical path and registers too (the exact F1 evasion closed);
+// (3) an escape-ordinary spelling of the same path registers; (4) an UNDECODABLE
+// literal (bare unquoted token — strconv.Unquote fails) FAILS CLOSED: error
+// non-nil AND nil map, i.e. the import is never skipped, silently dropped or
+// reinterpreted from raw text; (5) an approved COMMENT that merely names the
+// forbidden path registers nothing (comment-insensitivity preserved). A
+// decode-failure consumer aborts by the same contract: every guard consumer
+// t.Fatalf-s on a non-nil error from fileImports (G-3 auth files, G-3 store
+// no-cycle, G-6 bridge seam) — the same trustworthy helper, no second checker.
+func TestT008StoreKDFImportLiteralsDecodeFailClosed(t *testing.T) {
+	fset := token.NewFileSet()
+	const forbidden = "github.com/suchimauz/raylane/internal/store"
+	cases := []struct {
+		name       string
+		src        string
+		wantImport bool
+		wantErr    bool
+	}{
+		{
+			name:       "ordinary quoted forbidden import registers",
+			src:        "package x\n\nimport \"github.com/suchimauz/raylane/internal/store\"\n\nfunc f() {}\n",
+			wantImport: true,
+		},
+		{
+			name:       "raw backtick forbidden import decodes to same path",
+			src:        "package x\n\nimport `" + forbidden + "`\n\nfunc f() {}\n",
+			wantImport: true,
+		},
+		{
+			name:       "escaped ordinary spelling decodes to same path",
+			src:        "package x\n\nimport \"github.com/suchimauz/raylane/internal/\\u0073tore\"\n\nfunc f() {}\n",
+			wantImport: true,
+		},
+		{
+			name:    "undecodable literal fails closed",
+			src:     "package x\n\nimport " + forbidden + "\n\nfunc f() {}\n",
+			wantErr: true,
+		},
+		{
+			name:       "comment naming the path imports nothing",
+			src:        "package x\n\n// boundary note: github.com/suchimauz/raylane/internal/store one-way\n\nfunc f() {}\n",
+			wantImport: false,
+		},
+	}
+	for _, tc := range cases {
+		f, perr := parser.ParseFile(fset, "probe.go", tc.src, parser.SkipObjectResolution)
+		if perr != nil {
+			// An undecodable-at-parse-stage spelling that the Go parser itself
+			// rejects cannot exist as a legal import either; a parse failure
+			// for the fail-closed case would also be acceptable, but the
+			// helper's own failure path is what this test pins when the
+			// parser accepted the file.
+			if !tc.wantErr {
+				t.Fatalf("F1 control %q must be parseable: %v", tc.name, perr)
+			}
+			continue
+		}
+		got, err := fileImports(f)
+		if tc.wantErr {
+			if err == nil || got != nil {
+				t.Fatalf("F1 control %q: must FAIL CLOSED (nil map + error), got map=%v err=%v", tc.name, got, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("F1 control %q: valid file must decode: %v", tc.name, err)
+		}
+		if got[forbidden] != tc.wantImport {
+			t.Fatalf("F1 control %q: decoded import set %v, want membership %v", tc.name, got, tc.wantImport)
 		}
 	}
 }
@@ -688,15 +783,31 @@ func mustParse(t *testing.T, fset *token.FileSet, name, src string) *ast.File {
 	return f
 }
 
-// fileImports returns the module paths of f's actual import declarations.
-// Comments never appear here, so an approved comment naming a path does not
-// register as an import (F1); a real import spec always registers.
-func fileImports(f *ast.File) map[string]bool {
+// fileImports returns the DECODED module paths of f's actual import
+// declarations. Comments never appear here, so an approved comment naming a
+// path does not register as an import; a real import spec always registers.
+//
+// F1 correction: ImportSpec.Path.Value is the ENCODED Go string literal
+// exactly as written — a legal backtick (raw-string) import still carries its
+// backticks, and trimming only double quotes would leave such a path unequal
+// to the decoded module path and let a forbidden import evade the exact map
+// lookup. Every value is therefore decoded with strconv.Unquote, the COMPLETE
+// Go string-literal decoder (ordinary double-quoted forms with escapes AND
+// raw backtick forms decode; anything else fails). On any decoding error the
+// guard FAILS CLOSED: the import is never skipped, never silently dropped,
+// never reinterpreted from raw text — the error propagates and aborts the
+// whole check (nil map plus error). All guard comparisons use these decoded
+// EXACT module paths; there is no raw substring or text fallback.
+func fileImports(f *ast.File) (map[string]bool, error) {
 	imports := make(map[string]bool)
 	for _, spec := range f.Imports {
-		imports[strings.Trim(spec.Path.Value, "\"")] = true
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			return nil, fmt.Errorf("G-3/G-6 fail-closed: undecodable import literal %s in file %s: %w", spec.Path.Value, f.Name.Name, err)
+		}
+		imports[path] = true
 	}
-	return imports
+	return imports, nil
 }
 
 func mustRead(t *testing.T, name string) []byte {

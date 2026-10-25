@@ -421,9 +421,38 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	}
 	exportedMethods := 0
 	for _, name := range prod {
-		f, err := parser.ParseFile(fset, name, mustRead(t, name), parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, name, mustRead(t, name), parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("G-1 parse %s: %v", name, err)
+		}
+		// SEC-3 / G-5': the twelve banned literals are scanned over the
+		// comment-masked copy of EVERY production file, fail-closed on any
+		// masking error, with the byte-length invariance asserted. String
+		// literals remain scanned; the frozen stripComments helper is not
+		// reused here.
+		prodSrc := string(mustRead(t, name))
+		prodMasked, pmerr := commentMask(prodSrc)
+		if pmerr != nil {
+			t.Fatalf("G-5': comment mask of %s failed closed: %v", name, pmerr)
+		}
+		if len(prodMasked) != len(prodSrc) {
+			t.Fatalf("G-5': comment mask changed the byte length of %s: %d vs %d", name, len(prodMasked), len(prodSrc))
+		}
+		for _, ban := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA ",
+			"db.Query", "db.Exec", "BeginTx", ".DB(", "fmt.Sprintf", "sql.Open", "sql.DB"} {
+			if strings.Contains(prodMasked, ban) {
+				t.Fatalf("G-5': %s contains forbidden %q", name, ban)
+			}
+		}
+		// D-6b/SEC-2: function-typed SEAM ban (fields, parameters, variables,
+		// nested wrappers, named/aliased function types) over the WHOLE file
+		// — declarations and bodies — for the three new protection primitive
+		// files. Ordinary function/method declaration headers are NOT seams
+		// and stay allowed. Fail closed when a named type cannot be resolved.
+		if name == "protect_token.go" || name == "protect_session.go" || name == "protect_admission.go" {
+			if verr := assertNoFunctionSeams(f); verr != nil {
+				t.Fatalf("G-2/D-6b: %s: %v", name, verr)
+			}
 		}
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
@@ -436,7 +465,7 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 				}
 				if decl.Name.Name != "Error" ||
 					len(decl.Recv.List) != 1 ||
-					bareIdent(decl.Recv.List[0].Type) != ownErrorType(name) ||
+					!ownErrorMember(name, bareIdent(decl.Recv.List[0].Type)) ||
 					len(decl.Type.Params.List) != 0 ||
 					!exactlyOneStringResult(decl.Type.Results) {
 					t.Fatalf("G-1: %s has exported method outside the exact Error contract", name)
@@ -919,10 +948,22 @@ func commentMask(src string) (string, error) {
 	if count != 1 || owned == nil {
 		return "", fmt.Errorf("commentMask: fresh FileSet holds %d files, want exactly the one parsed file", count)
 	}
+	// SEC-3 mandatory omission 1: the fresh FileSet must still be at its
+	// base — no caller-added file may have advanced it (checked BEFORE any
+	// use of positions).
+	if fset.Base() > 0 {
+		return "", fmt.Errorf("commentMask: fresh FileSet base %d > 0", fset.Base())
+	}
+	// SEC-3 mandatory omission 2: the parser-created file must live INSIDE
+	// this FileSet's address range (checked BEFORE any base subtraction).
+	if owned.Base() <= 0 || owned.Base() <= fset.Base() {
+		return "", fmt.Errorf("commentMask: owning file base %d not above FileSet base %d", owned.Base(), fset.Base())
+	}
 	if owned.Size() != len(src) {
 		return "", fmt.Errorf("commentMask: owning file size %d != source length %d", owned.Size(), len(src))
 	}
 	out := []byte(src)
+	prevEnd := 0
 	mask := func(start, end int) error {
 		if start < 0 || end <= start || end > len(out) {
 			return fmt.Errorf("commentMask: span [%d,%d) outside source of length %d", start, end, len(out))
@@ -932,6 +973,7 @@ func commentMask(src string) (string, error) {
 				out[i] = 0x00
 			}
 		}
+		prevEnd = end
 		return nil
 	}
 	for _, group := range pf.Comments {
@@ -943,9 +985,19 @@ func commentMask(src string) (string, error) {
 			if c.Slash == token.NoPos {
 				return "", fmt.Errorf("commentMask: comment at NoPos fails closed")
 			}
+			if int(c.Slash) <= 0 {
+				return "", fmt.Errorf("commentMask: comment position %d is not a valid one-based position", int(c.Slash))
+			}
 			offset := int(c.Slash) - owned.Base()
 			if offset < 0 || offset >= owned.Size() {
 				return "", fmt.Errorf("commentMask: comment offset %d outside owning file of size %d", offset, owned.Size())
+			}
+			// Spans arrive in source order and are disjoint half-open
+			// intervals: each comment opener starts at or after the END of
+			// the previously masked span (first opener at offset 0 is
+			// legal). Anything else fails closed BEFORE slicing.
+			if offset < prevEnd {
+				return "", fmt.Errorf("commentMask: comment offset %d precedes previous span end %d", offset, prevEnd)
 			}
 			start := offset
 			if start > len(out)-2 {
@@ -964,6 +1016,17 @@ func commentMask(src string) (string, error) {
 				if err := mask(start, end); err != nil {
 					return "", err
 				}
+				// Agreement for a line comment: Text = span minus the
+				// two-byte opener, modulo folded CR (an internal CR, or
+				// the CR of a CRLF ending the line — that CR sits one
+				// byte past the raw end).
+				agreeEnd := end
+				if end < len(src) && src[end] == '\n' && end > start && src[end-1] == '\r' {
+					agreeEnd = end + 1
+				}
+				if err := agreeSpan("line", start, end, 2, src[start:agreeEnd], c.Text); err != nil {
+					return "", err
+				}
 			case string(out[start:start+2]) == "/*":
 				end := -1
 				for i := start + 2; i+1 < len(out); i++ {
@@ -978,12 +1041,62 @@ func commentMask(src string) (string, error) {
 				if err := mask(start, end); err != nil {
 					return "", err
 				}
+				// Agreement for a block comment: Text = span minus the
+				// two-byte opener and the two-byte closer ("*/" has no
+				// CR to fold), modulo CRs inside the span.
+				if err := agreeSpan("block", start, end, 4, src[start:end], c.Text); err != nil {
+					return "", err
+				}
 			default:
 				return "", fmt.Errorf("commentMask: unrecognised comment opener at offset %d", start)
+			}
+			// Full-mask confirmation: every non-LF byte of the RAW span
+			// (validated half-open [start,end) only) is 0x00 after mask().
+			for i := start + 2; i < end; i++ {
+				if out[i] != '\n' && out[i] != 0x00 {
+					return "", fmt.Errorf("commentMask: raw span [%d,%d) was not fully masked", start, end)
+				}
 			}
 		}
 	}
 	return string(out), nil
+}
+
+
+// agreeSpan is the SEC-3 mandatory raw-span/normalized-comment agreement.
+// The caller passes the ALREADY VALIDATED raw span bytes (the half-open
+// [start,end) slice of the source, plus, for a line comment ending in a
+// verified CRLF, the one folded CR past the end) and the structural
+// overhead — 2 for "//" openers, 4 for "/*" ... "*/". The parser folds
+// ONLY CR bytes away, so the required bound is
+// 0 <= len(span)-overhead-len(c.Text) <= countCR(spanBytes). This is a
+// sanity constraint on span derivation, NOT a content or authenticity
+// oracle.
+func agreeSpan(kind string, start, end, overhead int, spanBytes string, text string) error {
+	cr := countCR(spanBytes)
+	// The trailing LF of a CRLF line comment is inside spanBytes but not
+	// inside the raw span [start,end); do not count it as foldable.
+	if kind == "line" && len(spanBytes) > end-start && spanBytes[len(spanBytes)-1] == '\n' {
+		cr -= 1
+	}
+	d := (end - start) - overhead - len(text)
+	if d < 0 || d > cr {
+		return fmt.Errorf("commentMask: %s span [%d,%d) and comment text length %d disagree (delta %d, CR %d)", kind, start, end, len(text), d, cr)
+	}
+	return nil
+}
+
+// countCR counts '\r' bytes in s. It is called ONLY with an already
+// validated raw span of the source (SEC-3 agreement check), never with
+// unchecked offsets.
+func countCR(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\r' {
+			n++
+		}
+	}
+	return n
 }
 
 func mustRead(t *testing.T, name string) []byte {
@@ -1006,27 +1119,512 @@ func hasValueReceiver(fd *ast.FuncDecl, typeName string) bool {
 	return fd.Recv != nil && len(fd.Recv.List) == 1 && bareIdent(fd.Recv.List[0].Type) == typeName
 }
 
-// ownErrorType is the closed per-file own-type table (guard delta D-3).
-// Every production file of the accepted five has its own list; for any file
-// NOT in the table it returns a sentinel that is not, and can never equal,
-// any declared error type in the package, so the receiver comparison above
-// fails and the guard FAILS CLOSED. It never silently falls back to a real
-// name such as bridgeError.
-func ownErrorType(file string) string {
-	switch file {
-	case "kdf.go":
-		return "saltSourceError"
-	case "storekdf.go":
-		return "bridgeError"
-	case "protect_token.go":
-		return "errBootstrapToken"
-	case "protect_session.go":
-		return "errSession"
-	case "protect_admission.go":
-		return "errAdmission"
-	}
-	return "ownErrorTypeFailClosedNotADeclaredErrorType"
+// ownErrorMembers is the CLOSED per-file membership table (guard delta
+// D-3, SEC-1 correction): the exact owned error receiver names of each of
+// the accepted five production files — 1/1/7/5/8 = 20 names total. The
+// receiver test above is exact MEMBERSHIP in this closed per-file set,
+// never a prefix or substring comparison: a receiver merely sharing a
+// prefix (errSessionFoo in protect_session.go, errAdmissionFoo in
+// protect_admission.go), a name owned by a DIFFERENT file (cross-file
+// near-miss), and a near-name differing in case or spelling all fail.
+//
+// FAIL-CLOSED FOR UNKNOWN FILES: a file absent from this table uses the
+// impossible sentinel name below, which is not and can never be equal to
+// any declared error type in the package, so any Error method in an
+// unknown/unlisted production file fails the guard. The table never
+// silently defaults to a real name such as bridgeError.
+var ownErrorMembers = map[string][]string{
+	"kdf.go": {"saltSourceError"},
+	"storekdf.go": {"bridgeError"},
+	"protect_token.go": {
+		"errBootstrapTokenClosed",
+		"errBootstrapTokenUnknown",
+		"errBootstrapTokenLength",
+		"errBootstrapTokenMismatch",
+		"errBootstrapTokenExpired",
+		"errBootstrapTokenConfig",
+		"errBootstrapTokenCapacity",
+	},
+	"protect_session.go": {
+		"errSessionConfig",
+		"errSessionRandom",
+		"errSessionCapacity",
+		"errSessionUnknown",
+		"errSessionExpired",
+	},
+	"protect_admission.go": {
+		"errAdmissionConfig",
+		"errAdmissionPeerKey",
+		"errAdmissionPeerLimit",
+		"errAdmissionPeerCapacity",
+		"errAdmissionGlobalSaturated",
+		"errAdmissionPermitReleased",
+		"errAdmissionPermitNil",
+		"errAdmissionPermitForeign",
+	},
 }
+
+// ownErrorTypeFailClosed is the impossible sentinel named by the D-3 table
+// documentation: no declared type may carry this name (asserted below).
+const ownErrorTypeFailClosed = "ownErrorTypeFailClosedNotADeclaredErrorType"
+
+// ownErrorMember reports whether recv is EXACTLY a member of the closed
+// owned-error-name list of production file file. Unknown files match only
+// the impossible sentinel, so they fail closed for every real receiver.
+func ownErrorMember(file, recv string) bool {
+	if names, ok := ownErrorMembers[file]; ok {
+		for _, n := range names {
+			if n == recv {
+				return true
+			}
+		}
+		return false
+	}
+	return recv == ownErrorTypeFailClosed
+}
+
+// functionSeamFileSet is the closed set of the three NEW protection
+// production files to which the D-6b function-seam ban applies.
+var functionSeamFileSet = map[string]bool{
+	"protect_token.go": true, "protect_session.go": true, "protect_admission.go": true,
+}
+
+// closedNonFuncIdents are package-qualified builtin and cross-file types
+// that legitimately appear unqualified-in-this-file in the three new
+// primitives and whose underlying type is FIXED by their definition
+// (builtin or the accepted two frozen files), never a local alias to a
+// function type. Anything outside this closed list fails closed.
+var closedNonFuncIdents = map[string]bool{
+	"sync.Mutex": true, // struct type of the accepted sync import
+	"time.Time":  true, // struct type of the accepted time import
+	"time.Duration": true, // named numeric type (int64 underlying), never a func type
+}
+
+// seamUnderlying resolves e through parens, pointers, arrays, element and
+// key/value positions of maps, and channel values. A *ast.FuncType reached
+// at ANY depth is a seam; an unresolved or cyclic named-type reference
+// fails CLOSED (never treated as safe). seen guards named-type cycles.
+func seamUnderlying(e ast.Expr, named map[string]ast.Expr, seen map[string]bool) (bool, error) {
+	switch t := e.(type) {
+	case *ast.FuncType:
+		return true, nil
+	case *ast.ParenExpr:
+		return seamUnderlying(t.X, named, seen)
+	case *ast.StarExpr:
+		return seamUnderlying(t.X, named, seen)
+	case *ast.ArrayType:
+		return seamUnderlying(t.Elt, named, seen)
+	case *ast.MapType:
+		if k, err := seamUnderlying(t.Key, named, seen); err != nil || k {
+			return k, err
+		}
+		return seamUnderlying(t.Value, named, seen)
+	case *ast.ChanType:
+		return seamUnderlying(t.Value, named, seen)
+	case *ast.Ident:
+		if t.Name == ownErrorTypeFailClosed {
+			return false, fmt.Errorf("named type %s must never exist", t.Name)
+		}
+		if isBuiltinTypeName(t.Name) {
+			return false, nil
+		}
+		under, declared := named[t.Name]
+		if !declared {
+			// A bare type name with no file-level declaration in this file
+			// cannot be resolved by this scanner: fail closed, never safe.
+			return false, fmt.Errorf("named type %s is not declared in this file — fail closed", t.Name)
+		}
+		if seen[t.Name] {
+			return false, fmt.Errorf("cyclic named type %s — fail closed", t.Name)
+		}
+		seen[t.Name] = true
+		return seamUnderlying(under, named, seen)
+	case *ast.SelectorExpr:
+		// A qualified type from another package cannot name a function type
+		// of THIS package; only the closed list is accepted, everything
+		// else fails closed.
+		if id, ok := t.X.(*ast.Ident); ok {
+			if sel, ok2 := t.Sel.(*ast.Ident); ok2 && closedNonFuncIdents[id.Name+"."+sel.Name] {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("qualified type outside the closed resolvable set — fail closed")
+	case *ast.InterfaceType:
+		return false, nil
+	case *ast.StructType:
+		return false, nil
+	default:
+		return false, nil
+	}
+}
+
+func isBuiltinTypeName(n string) bool {
+	switch n {
+	case "bool", "byte", "complex64", "complex128", "error", "float32",
+		"float64", "int", "int8", "int16", "int32", "int64", "rune",
+		"string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+		"any", "comparable":
+		return true
+	}
+	return false
+}
+
+// localTypeDecl carries a file-level named type's LAST underlying
+// expression plus whether ANY declaration of it is a direct alias (no
+// StructType/InterfaceType shape). Go lawfully allows extending a local
+// named type across declarations; the last word fixes the underlying
+// type, while alias-ness (which could hide a func type) is sticky.
+type localTypeDecl struct {
+	underlying ast.Expr
+	alias      bool
+}
+
+// localNamedTypes collects every file-level named type declaration.
+func localNamedTypes(f *ast.File) map[string]*localTypeDecl {
+	out := map[string]*localTypeDecl{}
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, s := range gd.Specs {
+			ts, ok := s.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			switch ts.Type.(type) {
+			case *ast.StructType, *ast.InterfaceType:
+				if prev, seen := out[ts.Name.Name]; seen {
+					prev.underlying = ts.Type
+					continue
+				}
+				out[ts.Name.Name] = &localTypeDecl{underlying: ts.Type}
+			default:
+				if prev, seen := out[ts.Name.Name]; seen {
+					prev.underlying = ts.Type
+					prev.alias = true
+					continue
+				}
+				out[ts.Name.Name] = &localTypeDecl{underlying: ts.Type, alias: true}
+			}
+		}
+	}
+	return out
+}
+
+// namedTypeUnderlying maps each file-level type declaration name to its
+// underlying expression (last-declaration-wins). Kept for symmetry with
+// the alias-aware table above; resolution uses localNamedTypes.
+func namedTypeUnderlying(f *ast.File) map[string]ast.Expr {
+	out := map[string]ast.Expr{}
+	for n, d := range localNamedTypes(f) {
+		out[n] = d.underlying
+	}
+	return out
+}
+
+// checkSeamExpr fails when e is, or resolves to, a function-typed seam.
+func checkSeamExpr(e ast.Expr, named map[string]ast.Expr, what string) error {
+	if e == nil {
+		return nil
+	}
+	seam, err := seamUnderlying(e, named, map[string]bool{})
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	if seam {
+		return fmt.Errorf("%s is a function-typed seam", what)
+	}
+	return nil
+}
+
+// exprReachesFuncType reports whether ANY node at any nesting depth of the
+// expression tree is an *ast.FuncType (direct literal, field/element
+// position of a composite literal, conversion or call target, etc.).
+// Purely syntactic: no name resolution, so it cannot false-negative on a
+// nested inline func type.
+func exprReachesFuncType(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncType); ok {
+			found = true
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
+}
+
+// checkFieldList fails on a function-typed field/parameter element,
+// including every named wrapper.
+func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) error {
+	if fl == nil {
+		return nil
+	}
+	for _, fld := range fl.List {
+		if err := checkSeamExpr(fld.Type, named, what); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkStmt fails on function-typed variables (explicit type or inferred
+// from a function literal), assignment or return of a function-typed
+// expression, function literals appearing as values, and any call or
+// conversion whose target or nested expression is function-typed.
+func checkStmt(s ast.Stmt, named map[string]ast.Expr) error {
+	switch st := s.(type) {
+	case *ast.DeclStmt:
+		if gd, ok := st.Decl.(*ast.GenDecl); ok {
+			return checkDecls([]ast.Decl{gd}, named)
+		}
+	case *ast.AssignStmt:
+		if st.Tok == token.DEFINE {
+			for i, lhs := range st.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name == "_" {
+					continue
+				}
+				if i < len(st.Rhs) && exprReachesFuncType(st.Rhs[i]) {
+					return fmt.Errorf("inferred variable %s receives a function-typed value", id.Name)
+				}
+			}
+		}
+		for _, rhs := range st.Rhs {
+			if exprReachesFuncType(rhs) {
+				return fmt.Errorf("assignment of a function-typed expression")
+			}
+		}
+		for _, lhs := range st.Lhs {
+			if exprReachesFuncType(lhs) {
+				return fmt.Errorf("assignment into a function-typed expression")
+			}
+		}
+	case *ast.ReturnStmt:
+		for _, r := range st.Results {
+			if exprReachesFuncType(r) {
+				return fmt.Errorf("function-typed value returned")
+			}
+		}
+	case *ast.BlockStmt:
+		for _, inner := range st.List {
+			if err := checkStmt(inner, named); err != nil {
+				return err
+			}
+		}
+	case *ast.IfStmt:
+		if err := checkBranchStmtInitAssign(st.Init, named); err != nil {
+			return err
+		}
+		if err := checkStmt(st.Body, named); err != nil {
+			return err
+		}
+		if st.Else != nil {
+			if err := checkStmt(st.Else, named); err != nil {
+				return err
+			}
+		}
+	case *ast.ForStmt:
+		if err := checkBranchStmtInitAssign(st.Init, named); err != nil {
+			return err
+		}
+		if err := checkBranchStmtInitAssign(st.Post, named); err != nil {
+			return err
+		}
+		if err := checkStmt(st.Body, named); err != nil {
+			return err
+		}
+	case *ast.RangeStmt:
+		if exprReachesFuncType(st.X) {
+			return fmt.Errorf("ranged-over expression is function-typed")
+		}
+		if err := checkStmt(st.Body, named); err != nil {
+			return err
+		}
+	case *ast.SwitchStmt:
+		if err := checkBranchStmtInitAssign(st.Init, named); err != nil {
+			return err
+		}
+		if st.Body != nil {
+			for _, cse := range st.Body.List {
+				cc, ok := cse.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, e := range cc.List {
+					if exprReachesFuncType(e) {
+						return fmt.Errorf("switch case expression is function-typed")
+					}
+				}
+				for _, inner := range cc.Body {
+					if err := checkStmt(inner, named); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	case *ast.ExprStmt:
+		if exprReachesFuncType(st.X) {
+			return fmt.Errorf("expression statement carries a function-typed value")
+		}
+	}
+	return nil
+}
+
+func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr) error {
+	if s == nil {
+		return nil
+	}
+	return checkStmt(s, named)
+}
+
+// checkDecls enforces the D-6b/SEC-2 seam ban over whole declarations and
+// bodies for the three new protection files. Declaration HEADERS of
+// ordinary functions and methods are EXCEPTED (every FuncDecl.Type is an
+// ast.FuncType; that is not a seam) — but their parameter and result
+// FIELD types are still seam-checked, because a function-typed PARAMETER
+// is a forbidden seam. Struct fields, named/aliased function types,
+// variables (explicit or inferred), literals, nested wrappers and every
+// body statement are covered.
+func checkDecls(decls []ast.Decl, named map[string]ast.Expr) error {
+	for _, d := range decls {
+		switch decl := d.(type) {
+		case *ast.GenDecl:
+			switch decl.Tok {
+			case token.TYPE:
+				for _, sp := range decl.Specs {
+					ts, ok := sp.(*ast.TypeSpec)
+					if !ok {
+						continue
+					}
+					if err := checkSeamExpr(ts.Type, named, "named type "+ts.Name.Name); err != nil {
+						return err
+					}
+					if st, isStruct := ts.Type.(*ast.StructType); isStruct {
+						if err := checkFieldList(st.Fields, named, "struct field in "+ts.Name.Name); err != nil {
+							return err
+						}
+					}
+					if it, isIface := ts.Type.(*ast.InterfaceType); isIface {
+						if err := checkFieldList(it.Methods, named, "interface method field in "+ts.Name.Name); err != nil {
+							return err
+						}
+					}
+				}
+			case token.VAR, token.CONST:
+				for _, sp := range decl.Specs {
+					vs, ok := sp.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for _, nm := range vs.Names {
+						if err := checkSeamExpr(vs.Type, named, "declared variable "+nm.Name); err != nil {
+							return err
+						}
+					}
+					for _, v := range vs.Values {
+						if exprReachesFuncType(v) {
+							names := "?"
+							if len(vs.Names) > 0 {
+								names = vs.Names[0].Name
+							}
+							return fmt.Errorf("variable %s initialised from a function-typed value", names)
+						}
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			if decl.Type == nil {
+				continue
+			}
+			// Header EXCEPTED for receiver/params/results shapes of the
+			// declaration itself, but a function-typed FIELD TYPE inside
+			// them is a forbidden parameter seam.
+			if err := checkFieldList(decl.Type.Params, named, "parameter of "+decl.Name.Name); err != nil {
+				return err
+			}
+			if err := checkFieldList(decl.Type.Results, named, "result of "+decl.Name.Name); err != nil {
+				return err
+			}
+			if decl.Body != nil {
+				for _, s := range decl.Body.List {
+					if err := checkStmt(s, named); err != nil {
+						return fmt.Errorf("in %s: %w", decl.Name.Name, err)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// assertNoFunctionSeams enforces D-6b/SEC-2 over the ORIGINAL parsed AST
+// of one of the three NEW protection production files. Unknown files are
+// rejected outright (fail closed); ordinary function/method declaration
+// headers pass; every forbidden category — direct field, nested field,
+// parameter, explicit or inferred function-typed variable, function
+// literal value, named/aliased function type, nested pointer/array/map/
+// chan wrapper — fails.
+func assertNoFunctionSeams(f *ast.File) error {
+	if !functionSeamFileSet[f.Name.Name] {
+		return fmt.Errorf("assertNoFunctionSeams: %s is outside the closed three-file seam scope", f.Name.Name)
+	}
+	local := localNamedTypes(f)
+	if _, leaked := local[ownErrorTypeFailClosed]; leaked {
+		return fmt.Errorf("named type %s must never exist", ownErrorTypeFailClosed)
+	}
+	// Every struct/shape type DECLARATION in these files must have an
+	// exhaustively closed underlying shape — exactly a struct or an
+	// interface. An alias to anything else (int, string, a qualified type,
+	// a parenthesized or wrapped type) could hide a function type behind
+	// an unresolvable name, so it is refused outright: this file set uses
+	// NO local aliases, and a file that needs one must go back through
+	// the contract, not sneak one in. A cyclic alias chain therefore also
+	// fails closed here, before traversal.
+	for name, d := range local {
+		if d.alias {
+			return fmt.Errorf("named type %s is a local alias — outside the closed shape set (struct/interface only), fail closed", name)
+		}
+	}
+	named := namedTypeUnderlying(f)
+	// Local named types used as fields/params/vars resolve through named;
+	// package-qualified non-func types resolve through closedNonFuncIdents.
+	// Cross-file LOCAL package types are not visible from one parsed file,
+	// so their bare names are resolvable ONLY via this closed set.
+	for n := range siblingPackageTypeNames {
+		if _, declared := named[n]; !declared {
+			if named == nil {
+				return fmt.Errorf("internal invariant: named map missing")
+			}
+			// Register the sibling type as a struct-shaped placeholder so
+			// bare cross-file references resolve as non-func shapes; the
+			// placeholder is only consulted by Ident resolution and is
+			// never reachable by alias resolution above.
+			named[n] = siblingStructShape()
+		}
+	}
+	return checkDecls(f.Decls, named)
+}
+
+// siblingPackageTypeNames is the closed set of package-local type names
+// declared in OTHER production files of package auth that the three new
+// primitives may legitimately reference by bare name. Every member's
+// accepted underlying shape is a struct (never a func type); the set is
+// fixed by the contract, and adding a member is a contract change.
+var siblingPackageTypeNames = map[string]bool{
+	// (current accepted primitives reference no sibling types by bare
+	// name; the set stays closed and empty — a future reference must be
+	// added here through the contract review, never silently resolved)
+}
+
+// siblingStructShape returns the AST shape used ONLY to resolve closed
+// sibling package types as non-func structs.
+func siblingStructShape() ast.Expr { return &ast.StructType{Fields: &ast.FieldList{}} }
 
 func exactlyOneStringResult(results *ast.FieldList) bool {
 	if results == nil || len(results.List) != 1 || len(results.List[0].Names) > 1 {

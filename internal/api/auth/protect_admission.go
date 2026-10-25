@@ -99,6 +99,25 @@ type admissionPeerBucket struct {
 	lastRefill time.Time
 }
 
+// admissionOwnerID is the Chief-authorized PRIVATE identity wrapper of an
+// admission limiter. Shape: pointer to the owning limiter PLUS a private
+// comparable value field naming that same limiter; the struct is a
+// non-error type with ZERO methods, so it adds nothing to the accepted
+// error catalogue (20 new error types / 22 Error methods unchanged).
+// IMPORTANT LIMITS OF THIS IDENTITY: it is NOT an independent cryptographic
+// secret, and it is NOT a second independent identity channel. It is
+// redundant by construction — derived once from the very pointer it
+// accompanies — and adds NO independent unpredictability or strength
+// beyond that pointer. Its accepted guarantee (P1) is: distinct LIVE
+// nonzero-sized limiter allocations never share an identity, and an
+// identity is stable for the limiter's lifetime; references from permits
+// and identity values retain the owner reachable. NO claim is made about
+// eternal address non-reuse after garbage collection, and no GC/runtime
+// behaviour is observed or asserted here.
+type admissionOwnerID struct {
+	limiter *admissionLimiter
+}
+
 // admissionLimiter buckets caller-derived opaque peer keys and caps global
 // concurrent verifications. maxPeers bounds the COUNT of distinct keys,
 // not a byte budget (the byte-budget question is open gate G-3/G-8).
@@ -110,17 +129,31 @@ type admissionLimiter struct {
 	interval  time.Duration
 	buckets   map[[sha256.Size]byte]*admissionPeerBucket
 	active    int
+	// ownerID is this limiter's identity, assigned exactly once from the
+	// freshly allocated limiter right after allocation. ownerID is NOT an
+	// independent cryptographic secret, and ownerID is NOT a second
+	// independent identity channel: redundant by construction, no added
+	// strength (see admissionOwnerID for the full accepted limits).
+	ownerID admissionOwnerID
 }
 
 // admissionPermit is an opaque, single-use ownership token for ONE
 // acquired global verification slot. It is unexported, has no exported
-// fields, can only be created by beginVerification, and carries an
-// unforgeable owner binding: a pointer to the owning limiter, assigned only
-// by beginVerification. The pointer cannot be forged from outside the
-// package; there is no package-level identity state (globals are forbidden
-// by the accepted contract).
+// fields, can only be created by beginVerification, and carries the
+// accepted owner binding: a pointer to the owning limiter PLUS a copy of
+// that limiter's private admissionOwnerID value, both stamped only by
+// beginVerification. Neither component is a cryptographic secret and the
+// pair is not a second independent identity channel (see admissionOwnerID);
+// the binding cannot be constructed from outside the package, and there is
+// no package-level identity state (globals are forbidden by the accepted
+// contract).
 type admissionPermit struct {
-	owner    *admissionLimiter
+	owner *admissionLimiter
+	// ownerID is the permit's copy of the issuing limiter's private
+	// identity value. ownerID is NOT an independent cryptographic secret
+	// and NOT a second independent identity channel; redundant with owner
+	// by construction (see admissionOwnerID).
+	ownerID  admissionOwnerID
 	released bool
 }
 
@@ -156,13 +189,18 @@ func newAdmissionLimiter(burst, refillEvery, maxPeers, maxActive int) (*admissio
 	if !ok {
 		return nil, errAdmissionConfig{}
 	}
-	return &admissionLimiter{
+	l := &admissionLimiter{
 		burst:     burst,
 		maxPeers:  maxPeers,
 		maxActive: maxActive,
 		interval:  interval,
 		buckets:   make(map[[sha256.Size]byte]*admissionPeerBucket),
-	}, nil
+	}
+	// Assign the identity ONCE, from this freshly allocated limiter. The
+	// wrapper is redundant by construction: NOT an independent
+	// cryptographic secret, NOT a second independent identity channel.
+	l.ownerID = admissionOwnerID{limiter: l}
+	return l, nil
 }
 
 // allowPeer consumes one unit from the bucket of peerKey. peerKey is an
@@ -193,7 +231,7 @@ func (l *admissionLimiter) allowPeer(peerKey string, now time.Time) error {
 		elapsed := now.Sub(b.lastRefill)
 		full := int64(elapsed / l.interval)
 		if full > 0 {
-			if full >= int64(l.burst-int64(b.tokens)) {
+			if full >= int64(l.burst)-int64(b.tokens) {
 				b.tokens = l.burst
 			} else {
 				b.tokens += int(full)
@@ -217,7 +255,11 @@ func (l *admissionLimiter) allowPeer(peerKey string, now time.Time) error {
 // slots. On success it returns a NON-NIL owner-bound permit and a nil
 // error; on refusal it returns a NIL permit and errAdmissionGlobalSaturated
 // (fail-fast, no queue). The permit owns exactly one active slot and is
-// bound to THIS limiter by an unforgeable owner pointer.
+// bound to THIS limiter by the accepted owner shape: the limiter pointer
+// plus the limiter's private ownerID value, copied from the owner at issue
+// time. Neither component is a cryptographic secret; the pair is the
+// accepted pointer-plus-private-ID shape, forgeable only from inside the
+// package.
 func (l *admissionLimiter) beginVerification() (*admissionPermit, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -225,31 +267,32 @@ func (l *admissionLimiter) beginVerification() (*admissionPermit, error) {
 		return nil, errAdmissionGlobalSaturated{}
 	}
 	l.active++
-	return &admissionPermit{owner: l}, nil
+	return &admissionPermit{owner: l, ownerID: l.ownerID}, nil
 }
 
 // release ends the slot owned by p. OWNER CHECK (exact, before any
-// mutation): under the releasing limiter's own lock, p must be non-nil and
-// carry THIS limiter's identity (pointer plus owner id) plus a live
-// acquisition id. A foreign permit returns errAdmissionPermitForeign and
-// NOTHING changes — not this limiter's counter, not the foreign limiter's
-// counter, not the permit's state — so the rightful owner can still
-// release it exactly once. A nil or never-acquired permit returns
-// errAdmissionPermitNil. A second release of the same live permit returns
-// errAdmissionPermitReleased. Only the single successful release
-// decrements the active counter, which therefore equals the number of
-// outstanding correctly-owned permits at all times.
+// mutation): p must be non-nil (checked BEFORE any lock or dereference);
+// then, under THIS limiter's own lock, p must carry THIS limiter's
+// identity — p.owner must equal l AND p.ownerID must equal l.ownerID —
+// compared BEFORE ANY mutation. A foreign permit returns
+// errAdmissionPermitForeign and NOTHING changes — not this limiter's
+// counter, not the foreign limiter's counter, not the permit's state — so
+// the rightful owner can still release it exactly once. A nil permit
+// returns errAdmissionPermitNil. A second release of the same live permit
+// returns errAdmissionPermitReleased. Only the single successful release
+// sets released and decrements the active counter, which therefore equals
+// the number of outstanding correctly-owned permits at all times.
 func (l *admissionLimiter) release(p *admissionPermit) error {
 	if p == nil {
 		return errAdmissionPermitNil{}
 	}
-	// Permits are created ONLY by beginVerification, so p.owner is always a
-	// real limiter; the releasing limiter's own lock is the lock that
-	// guards the counter being decremented, and the owner check happens
-	// before any mutation.
+	// Permits are created ONLY by beginVerification, which stamps the
+	// owner pointer and a copy of the owner's ownerID. The releasing
+	// limiter's own lock guards the counter being decremented, and both
+	// identity comparisons happen before any mutation.
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if p.owner != l {
+	if p.owner != l || p.ownerID != l.ownerID {
 		return errAdmissionPermitForeign{}
 	}
 	if p.released {

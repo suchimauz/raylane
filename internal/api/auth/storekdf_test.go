@@ -1635,11 +1635,26 @@ func enterNamed(name string, indirection bool, named map[string]ast.Expr, what s
 // descent from that occurrence down to the current node has crossed an
 // indirected edge. It is called at EACH indirection — a pointer, slice, map
 // or channel element — so that when a name re-enters, ap.loopSeen[name]
-// reflects whether the ACTUAL LOOP back to it contains an indirection. It
-// only mutates loopSeen for names currently on the path, so a sibling branch
-// that already returned is unaffected, and each enterNamed restores its own
-// loopSeen slot exactly on exit.
+// reflects whether the ACTUAL LOOP back to it contains an indirection.
+//
+// The write is SCOPED to this descent step: the entire loopSeen map is
+// snapshotted before the write and restored after the callee returns, so a
+// sibling field's indirection is fully undone when that sibling completes
+// and can never leak into a later sibling's cycle decision. Only the
+// indirections on the CURRENT path from a name's own occurrence survive.
 func markLoopIndirection(ap *activePath) {
+	prev := make(map[string]bool, len(ap.loopSeen))
+	for k, v := range ap.loopSeen {
+		prev[k] = v
+	}
+	defer func() {
+		for k := range ap.loopSeen {
+			delete(ap.loopSeen, k)
+		}
+		for k, v := range prev {
+			ap.loopSeen[k] = v
+		}
+	}()
 	for name := range ap.entries {
 		ap.loopSeen[name] = true
 	}
@@ -1666,10 +1681,11 @@ func checkFieldListEdges(fl *ast.FieldList, named map[string]ast.Expr, what stri
 
 // checkFieldListEdgesIndirected is the field-list walker for a struct or
 // interface reached through an indirection (a pointer/slice/map/chan
-// element). Before scanning each field it records that the path from every
-// active named occurrence to here has passed through indirection, so a loop
-// back to any of them is finite; the fields themselves are scanned exactly
-// as in the by-value walker.
+// element). The indirection that reaches THIS struct was already recorded on
+// the loop state by the caller (nestedWithIndirection / descendWithIndirection),
+// which snapshots and restores that state so a sibling field's indirection
+// cannot leak here; this walker only scans the fields themselves, exactly as
+// in the by-value walker. It deliberately makes NO markLoopIndirection call.
 func checkFieldListEdgesIndirected(fl *ast.FieldList, named map[string]ast.Expr, what string, ap *activePath) error {
 	if fl == nil {
 		return nil
@@ -2100,7 +2116,7 @@ func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[str
 			if typeIsNonFunc(id.Name, named) {
 				return "value"
 			}
-			if fileFuncs[id.Name] && funcResultsAllNonFunc(id.Name, funcResults) {
+			if fileFuncs[id.Name] && funcResultsAllNonFunc(id.Name, named, funcResults) {
 				return "value"
 			}
 			return "unknown"
@@ -2110,7 +2126,7 @@ func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[str
 		// An index into a container (the comma-ok map lookup m.records[key],
 		// slice/array element) is a value ONLY on positive element-kind proof:
 		// the container's element type resolves non-function.
-		if containerElementNonFunc(v.X, named) {
+		if containerElementNonFunc(v.X, named, typeFields) {
 			return "value"
 		}
 		return "unknown"
@@ -2172,39 +2188,63 @@ func typeIsNonFunc(name string, named map[string]ast.Expr) bool {
 // result field types; if f is not declared, declares no results, or ANY
 // result resolves to a function type, there is no positive proof and the
 // call is not accepted on callee membership alone.
-func funcResultsAllNonFunc(name string, funcResults map[string][]ast.Expr) bool {
+func funcResultsAllNonFunc(name string, named map[string]ast.Expr, funcResults map[string][]ast.Expr) bool {
 	results, ok := funcResults[name]
 	if !ok {
 		return false
 	}
-	return exprsAllNonFunc(results)
+	return exprsAllNonFunc(results, named)
 }
 
 // containerElementNonFunc is the C4 positive element-kind proof for an index
-// expression container[key]: it resolves the container's element type (a
-// map value, slice/array element, or pointer element) and requires it to
-// resolve positively non-function. The comma-ok map lookup m.records[key] is
-// accepted exactly when the map's value type (sessionRecord, a struct of
-// time.Time fields) is non-function.
-func containerElementNonFunc(container ast.Expr, named map[string]ast.Expr) bool {
+// expression container[key]: it resolves the container's element type and
+// requires it to resolve positively non-function. The container may be a
+// bare value of container type (ident) OR a selector recv.field (the live
+// comma-ok forms m.records[key] and l.buckets[key]), where the receiver's
+// ACTUAL type's OWN field gives the container type. The comma-ok map lookup
+// is accepted exactly when the map's value type resolves non-function.
+func containerElementNonFunc(container ast.Expr, named map[string]ast.Expr, typeFields map[string]map[string]recvField) bool {
+	var under ast.Expr
 	switch c := container.(type) {
 	case *ast.Ident:
-		under, ok := named[c.Name]
+		u, ok := named[c.Name]
 		if !ok {
 			return false
 		}
-		elem := containerElemType(under)
-		if elem == nil {
+		under = u
+	case *ast.SelectorExpr:
+		// recv.field: resolve the receiver's ACTUAL type, then read that
+		// type's OWN declared field's type — the container (e.g. m.records,
+		// whose field type is map[[sha256.Size]byte]sessionRecord).
+		base, ok := c.X.(*ast.Ident)
+		if !ok || c.Sel == nil {
 			return false
 		}
-		reaches, err := seamUnderlying(elem, named, map[string]bool{})
-		if err != nil {
+		tn := declaredTypeName(base.Name, named)
+		if tn == "" {
 			return false
 		}
-		return !reaches
+		flds, ok := typeFields[tn]
+		if !ok {
+			return false
+		}
+		f, ok := flds[c.Sel.Name]
+		if !ok {
+			return false
+		}
+		under = f.typ
 	default:
 		return false
 	}
+	elem := containerElemType(under)
+	if elem == nil {
+		return false
+	}
+	reaches, err := seamUnderlying(elem, named, map[string]bool{})
+	if err != nil {
+		return false
+	}
+	return !reaches
 }
 
 // containerElemType returns the element type of a container underlying type:
@@ -2224,10 +2264,13 @@ func containerElemType(under ast.Expr) ast.Expr {
 }
 
 // exprsAllNonFunc reports whether every expression in list resolves
-// positively non-function (no FuncType at any depth, no resolution error).
-func exprsAllNonFunc(list []ast.Expr) bool {
+// positively non-function in the REAL named-type context (no FuncType at any
+// depth, no resolution error). The named map is REQUIRED: a local named
+// result type (e.g. sessionRecord) must resolve through the actual declared
+// types, never an empty table.
+func exprsAllNonFunc(list []ast.Expr, named map[string]ast.Expr) bool {
 	for _, e := range list {
-		reaches, err := seamUnderlying(e, map[string]ast.Expr{}, map[string]bool{})
+		reaches, err := seamUnderlying(e, named, map[string]bool{})
 		if err != nil {
 			return false
 		}
@@ -2573,6 +2616,19 @@ func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs 
 	return checkStmt(s, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 }
 
+// receiverTypeOf returns an AST Ident naming the receiver's named type for
+// a method's receiver field, unwrapping one pointer level (a *T receiver has
+// type T). It is used to REGISTER the receiver's type binding for selector
+// resolution, so receiverHasNonFuncField / containerElementNonFunc can prove
+// the receiver's OWN field/element type. It is distinct from
+// receiverTypeName, which resolves the type NAME for the method table.
+func receiverTypeOf(e ast.Expr) string {
+	if star, ok := e.(*ast.StarExpr); ok {
+		return bareIdent(star.X)
+	}
+	return bareIdent(e)
+}
+
 // checkDecls enforces the D-6b/SEC-2 seam ban over whole declarations and
 // bodies for the three new protection files. Declaration HEADERS of
 // ordinary functions and methods are EXCEPTED (every FuncDecl.Type is an
@@ -2666,11 +2722,57 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 			if err := checkFieldList(decl.Type.Results, named, "result of "+decl.Name.Name); err != nil {
 				return err
 			}
+			// Register the receiver's and parameters' ACTUAL type bindings for
+			// the duration of this body, so a selector on the receiver (m, l)
+			// or a parameter resolves to its declared type and the per-receiver
+			// field/element proof can run. Each name's previous binding (if any)
+			// is snapshotted and restored on exit, so a same-named name in
+			// another function is not shadowed and the file-level type table is
+			// never corrupted.
+			prev := map[string]ast.Expr{}
+			had := map[string]bool{}
+			bound := map[string]bool{}
+			bind := func(nm string, typ ast.Expr) {
+				if !bound[nm] {
+					bound[nm] = true
+					if old, existed := named[nm]; existed {
+						prev[nm] = old
+						had[nm] = true
+					} else {
+						had[nm] = false
+					}
+				}
+				named[nm] = typ
+			}
+			if decl.Recv != nil && len(decl.Recv.List) == 1 {
+				if rt := receiverTypeOf(decl.Recv.List[0].Type); rt != "" {
+					if rn := decl.Recv.List[0].Names; len(rn) == 1 && rn[0] != nil {
+						bind(rn[0].Name, &ast.Ident{Name: rt})
+					}
+				}
+			}
+			if decl.Type.Params != nil {
+				for _, fld := range decl.Type.Params.List {
+					if id, ok := fld.Type.(*ast.Ident); ok {
+						for _, nm := range fld.Names {
+							bind(nm.Name, id)
+						}
+					}
+				}
+			}
 			if decl.Body != nil {
 				for _, s := range decl.Body.List {
 					if err := checkStmt(s, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
 						return fmt.Errorf("in %s: %w", decl.Name.Name, err)
 					}
+				}
+			}
+			// Restore every binding this function introduced.
+			for nm := range bound {
+				if had[nm] {
+					named[nm] = prev[nm]
+				} else {
+					delete(named, nm)
 				}
 			}
 		}

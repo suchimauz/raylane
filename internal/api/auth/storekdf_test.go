@@ -1495,11 +1495,23 @@ func checkNestedFieldListSeen(e ast.Expr, named map[string]ast.Expr, what string
 		// A named wrapper type is validated by the declaration walk; here we
 		// only recurse if the name resolves to an anonymous struct/interface
 		// in this file, guarding the descent path against self-reference.
+		//
+		// POLARITY: a name re-entered ON THE SAME DESCENT PATH means the type
+		// expands through itself without terminating (struct T { x *T } reached
+		// again from inside T's own fields) — an ill-formed, infinitely-sized
+		// type that must FAIL CLOSED, not succeed. A name already visited on a
+		// DIFFERENT, completed branch is ordinary noncyclic reuse of a finite
+		// named type (struct A { x B }; struct B { y *B } where B is re-entered
+		// only after A's branch finished) and is NOT an error — it is a genuine
+		// recursive Go type. The seen set is per active path: entries are added
+		// on the way down and must be removed on the way back up so a later
+		// sibling branch can reuse the name.
 		if seen[t.Name] {
-			return nil
+			return fmt.Errorf("named type %s re-entered on the same descent path — cyclic fail closed", t.Name)
 		}
 		if under, ok := named[t.Name]; ok {
 			seen[t.Name] = true
+			defer delete(seen, t.Name)
 			return checkNestedFieldListSeen(under, named, what, seen)
 		}
 		return nil
@@ -1528,11 +1540,56 @@ func checkFieldListNested(fl *ast.FieldList, named map[string]ast.Expr, what str
 	return nil
 }
 
+// receiverMethodSets maps each local named type to the set of method names
+// declared ON THAT TYPE by this file's own FuncDecls (value or pointer
+// receiver). It lets the selector-binding rule distinguish a method value
+// recv.Method (a function-typed dispatch seam) from an ordinary struct
+// FIELD recv.Field: a selector whose name is NOT a method of the receiver's
+// named type is provably a field, never a method value. Built once per file
+// from the parsed AST; it reflects exactly the methods declared in this file
+// and nothing else.
+func receiverMethodSets(decls []ast.Decl) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, d := range decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Recv == nil || len(fd.Recv.List) != 1 || fd.Name == nil {
+			continue
+		}
+		recv := bareIdent(fd.Recv.List[0].Type)
+		if recv == "" {
+			continue
+		}
+		if out[recv] == nil {
+			out[recv] = map[string]bool{}
+		}
+		out[recv][fd.Name.Name] = true
+	}
+	return out
+}
+
+// mergedRecvMethods unions every receiver's method set into one name set.
+// A short-variable selector `v := base.Sel` is classified by base: a
+// PACKAGE base (filePkgs) is pkg.Member, never a method; any other Ident
+// base is a value receiver. For a value receiver the selector is a method
+// value exactly when Sel is a declared method of SOME local type — recv is
+// only ever one type, but a name bound from an opaque source cannot be
+// narrowed further, so unioning is the conservative over-approximation. A
+// Sel absent from every method set is provably an ordinary field.
+func mergedRecvMethods(recvMethods map[string]map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, set := range recvMethods {
+		for m := range set {
+			out[m] = true
+		}
+	}
+	return out
+}
+
 // checkStmt fails on function-typed variables (explicit type or inferred
 // from a function literal), assignment or return of a function-typed
 // expression, function literals appearing as values, and any call or
 // conversion whose target or nested expression is function-typed.
-func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool) error {
+func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool) error {
 	switch st := s.(type) {
 	case *ast.BadStmt:
 		return fmt.Errorf("parser produced a malformed statement — fail closed")
@@ -1543,7 +1600,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		// position; they cannot introduce or dispatch a function value.
 	case *ast.DeclStmt:
 		if gd, ok := st.Decl.(*ast.GenDecl); ok {
-			return checkDecls([]ast.Decl{gd}, named, fileFuncs, filePkgs)
+			return checkDecls([]ast.Decl{gd}, named, fileFuncs, filePkgs, methods)
 		}
 	case *ast.AssignStmt:
 		if st.Tok == token.DEFINE {
@@ -1610,11 +1667,6 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						if v.Sel == nil {
 							return fmt.Errorf("assignment target %s receives a malformed selector value — fail closed", id.Name)
 						}
-						// Distinguish a bound METHOD value from a package-qualified
-						// constant/value. A method value `v := recv.Method` has a
-						// VALUE receiver and is a function-typed dispatch seam — reject
-						// at the declaration even when never called. A
-						// package-qualified constant (`v := pkg.Const`) has a package
 						// A SelectorExpr RHS names either pkg.Member or recv.Member.
 						// The two are distinguished by the BASE, never by the mere
 						// presence of a dot: pkg.Function is a function VALUE (a seam),
@@ -1635,13 +1687,15 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 							}
 							return fmt.Errorf("variable %s is bound to package member %s.%s — fail closed", id.Name, base.Name, v.Sel.Name)
 						case baseIsIdent:
-							// Value receiver: recv.Sel. A method value recv.Method is a
-							// function-typed dispatch seam, rejected even if never called.
-							// The scanner does not model per-receiver method sets, so it
-							// cannot prove a bare recv.Sel is a field rather than a method;
-							// that proof needs receiver-type method tables this closed file
-							// set does not build. Fail closed on it.
-							return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
+							// Value receiver recv.Sel. It is a function-typed dispatch seam
+							// exactly when Sel is a method declared on a local named type
+							// (methods table) — a bound method value — and an ordinary field
+							// otherwise. A field is accepted by recording the binding; a
+							// bound method is rejected even if never called.
+							if methods[v.Sel.Name] {
+								return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
+							}
+							named[id.Name] = &ast.Ident{Name: v.Sel.Name}
 						default:
 							// Selector on an unresolvable base (parenthesised receiver,
 							// index, call result): cannot prove it is not a function
@@ -1667,41 +1721,41 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		}
 	case *ast.BlockStmt:
 		for _, inner := range st.List {
-			if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
+			if err := checkStmt(inner, named, fileFuncs, filePkgs, methods); err != nil {
 				return err
 			}
 		}
 	case *ast.IfStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
 		if st.Else != nil {
-			if err := checkStmt(st.Else, named, fileFuncs, filePkgs); err != nil {
+			if err := checkStmt(st.Else, named, fileFuncs, filePkgs, methods); err != nil {
 				return err
 			}
 		}
 	case *ast.ForStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
-		if err := checkBranchStmtInitAssign(st.Post, named, fileFuncs, filePkgs); err != nil {
+		if err := checkBranchStmtInitAssign(st.Post, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
 	case *ast.RangeStmt:
 		if exprReachesFuncType(st.X) {
 			return fmt.Errorf("ranged-over expression is function-typed")
 		}
-		if err := checkStmt(st.Body, named, fileFuncs, filePkgs); err != nil {
+		if err := checkStmt(st.Body, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
 	case *ast.SwitchStmt:
-		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs); err != nil {
+		if err := checkBranchStmtInitAssign(st.Init, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
 		if st.Body != nil {
@@ -1716,7 +1770,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods); err != nil {
 						return err
 					}
 				}
@@ -1741,7 +1795,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 			}
 		}
 	case *ast.LabeledStmt:
-		if err := checkStmt(st.Stmt, named, fileFuncs, filePkgs); err != nil {
+		if err := checkStmt(st.Stmt, named, fileFuncs, filePkgs, methods); err != nil {
 			return err
 		}
 	case *ast.GoStmt:
@@ -1768,12 +1822,12 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 					return fmt.Errorf("select body holds a non-communication clause — fail closed")
 				}
 				if cc.Comm != nil {
-					if err := checkStmt(cc.Comm, named, fileFuncs, filePkgs); err != nil {
+					if err := checkStmt(cc.Comm, named, fileFuncs, filePkgs, methods); err != nil {
 						return err
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods); err != nil {
 						return err
 					}
 				}
@@ -1781,7 +1835,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		}
 	case *ast.TypeSwitchStmt:
 		if st.Assign != nil {
-			if err := checkStmt(st.Assign, named, fileFuncs, filePkgs); err != nil {
+			if err := checkStmt(st.Assign, named, fileFuncs, filePkgs, methods); err != nil {
 				return err
 			}
 		}
@@ -1797,7 +1851,7 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 					}
 				}
 				for _, inner := range cc.Body {
-					if err := checkStmt(inner, named, fileFuncs, filePkgs); err != nil {
+					if err := checkStmt(inner, named, fileFuncs, filePkgs, methods); err != nil {
 						return err
 					}
 				}
@@ -1922,11 +1976,11 @@ func checkFuncCallSite(call *ast.CallExpr, named map[string]ast.Expr, fileFuncs 
 	return nil
 }
 
-func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool) error {
+func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool) error {
 	if s == nil {
 		return nil
 	}
-	return checkStmt(s, named, fileFuncs, filePkgs)
+	return checkStmt(s, named, fileFuncs, filePkgs, methods)
 }
 
 // checkDecls enforces the D-6b/SEC-2 seam ban over whole declarations and
@@ -1937,7 +1991,7 @@ func checkBranchStmtInitAssign(s ast.Stmt, named map[string]ast.Expr, fileFuncs 
 // is a forbidden seam. Struct fields, named/aliased function types,
 // variables (explicit or inferred), literals, nested wrappers and every
 // body statement are covered.
-func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool) error {
+func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool) error {
 	for _, d := range decls {
 		switch decl := d.(type) {
 		case *ast.GenDecl:
@@ -1999,7 +2053,7 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 			}
 			if decl.Body != nil {
 				for _, s := range decl.Body.List {
-					if err := checkStmt(s, named, fileFuncs, filePkgs); err != nil {
+					if err := checkStmt(s, named, fileFuncs, filePkgs, methods); err != nil {
 						return fmt.Errorf("in %s: %w", decl.Name.Name, err)
 					}
 				}
@@ -2075,7 +2129,13 @@ func assertNoFunctionSeams(fileName string, f *ast.File) error {
 		}
 	}
 	filePkgs := filePackageNames(f)
-	return checkDecls(f.Decls, named, fileFuncs, filePkgs)
+	// methods is the union of every method name declared on a local named
+	// type by this file. It lets the short-variable selector rule tell a
+	// bound method value (a function-typed seam) from an ordinary struct
+	// field: a recv.Sel whose Sel is NOT any local type's method is provably
+	// a field, never a method value.
+	methods := mergedRecvMethods(receiverMethodSets(f.Decls))
+	return checkDecls(f.Decls, named, fileFuncs, filePkgs, methods)
 }
 
 // siblingPackageTypeNames is the closed set of package-local type names

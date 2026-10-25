@@ -1,6 +1,7 @@
 package auth
 
-// Test-only helpers, all unexported (the package exports nothing).
+// Test-only helpers, all unexported (the package exposes no exported
+// package-level authentication API).
 // The production code imports only crypto/rand, crypto/subtle and
 // golang.org/x/crypto/argon2; nothing here mutates production state.
 
@@ -36,46 +37,98 @@ func kdfProductionSource(t *testing.T) (string, error) {
 	return string(b), err
 }
 
-// receiverTypeName reduces a method receiver type expression (T or *T) to
-// its identifier.
-func receiverTypeName(e ast.Expr) string {
-	if star, ok := e.(*ast.StarExpr); ok {
-		e = star.X
-	}
-	if id, ok := e.(*ast.Ident); ok {
-		return id.Name
-	}
-	return ""
-}
-
-// astExportedPresent reports whether a parsed file declares ANY exported
-// package-level func/type/const/var (methods included) — used ONLY to
-// self-check the K-12 scanner above.
-func astExportedPresent(f *ast.File) bool {
+// kdfSurfaceViolation implements the ONE shared surface scanner/policy used
+// for the real kdf.go AND for every self-probe below, so the probes exercise
+// the production allowlist itself — not a simpler stand-in predicate.
+//
+// Policy (the accepted contract, nothing broader):
+//   - package-level exported func/type/const/var: FORBIDDEN (every kind).
+//   - exported methods: FORBIDDEN, except EXACTLY ONE occurrence of the
+//     required standard-error method, which is allowed only when ALL hold:
+//     name Error; receiver present, single, NON-POINTER *value* receiver of
+//     the unexported type saltSourceError (a *saltSourceError pointer
+//     receiver is NOT normalized or accepted); zero parameters; exactly ONE
+//     result, of type string. Any deviation is a violation.
+//   - more or fewer than exactly one such allowed method: violation.
+//
+// Returns the first violation description, or "" if the file conforms.
+func kdfSurfaceViolation(f *ast.File) string {
+	allowed := 0
 	for _, d := range f.Decls {
 		switch decl := d.(type) {
 		case *ast.FuncDecl:
-			if ast.IsExported(decl.Name.Name) {
-				return true
+			name := decl.Name.Name
+			if !ast.IsExported(name) {
+				continue
 			}
+			if decl.Recv == nil {
+				return "exported package-level func: " + name
+			}
+			// The ONE explicitly allowed exported declaration, checked in
+			// its exact accepted shape — no pointer normalization, exact
+			// result-signature check.
+			if name == "Error" &&
+				len(decl.Recv.List) == 1 &&
+				isIdentType(decl.Recv.List[0].Type, "saltSourceError") &&
+				len(decl.Type.Params.List) == 0 &&
+				hasExactlyOneStringResult(decl.Type.Results) {
+				allowed++
+				continue
+			}
+			return "exported method outside the accepted exact Error contract: " + name
 		case *ast.GenDecl:
+			var kind string
+			switch decl.Tok {
+			case token.TYPE:
+				kind = "type"
+			case token.CONST:
+				kind = "const"
+			case token.VAR:
+				kind = "var"
+			default:
+				continue
+			}
 			for _, spec := range decl.Specs {
 				switch sp := spec.(type) {
 				case *ast.TypeSpec:
 					if ast.IsExported(sp.Name.Name) {
-						return true
+						return "exported package-level " + kind + ": " + sp.Name.Name
 					}
 				case *ast.ValueSpec:
 					for _, n := range sp.Names {
 						if ast.IsExported(n.Name) {
-							return true
+							return "exported package-level " + kind + ": " + n.Name
 						}
 					}
 				}
 			}
 		}
 	}
-	return false
+	if allowed != 1 {
+		return "accepted saltSourceError.Error() string method occurrences = %d, want exactly 1"
+	}
+	return ""
+}
+
+// isIdentType reports whether e is EXACTLY the bare identifier name (a *T
+// pointer expression deliberately does NOT match).
+func isIdentType(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// hasExactlyOneStringResult reports whether results is exactly one field
+// carrying exactly one name of type `string`.
+func hasExactlyOneStringResult(results *ast.FieldList) bool {
+	if results == nil || len(results.List) != 1 {
+		return false
+	}
+	f := results.List[0]
+	if len(f.Names) > 1 {
+		return false
+	}
+	id, ok := f.Type.(*ast.Ident)
+	return ok && id.Name == "string"
 }
 
 // stripComments removes whole-line comments so surface scans see only real
@@ -466,73 +519,40 @@ func TestT008KDFNoHooksNoExportedAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("K-12: parse production source: %v", err)
 	}
-	allowedMethods := 0
-	for _, d := range f.Decls {
-		switch decl := d.(type) {
-		case *ast.FuncDecl:
-			name := decl.Name.Name
-			if !ast.IsExported(name) {
-				continue
-			}
-			// The ONE explicitly allowed exported NAME, and only in its
-			// exact accepted shape: method Error() on the UNEXPORTED
-			// saltSourceError receiver, value receiver, zero parameters.
-			if name == "Error" && decl.Recv != nil && len(decl.Recv.List) == 1 &&
-				len(decl.Type.Params.List) == 0 && receiverTypeName(decl.Recv.List[0].Type) == "saltSourceError" {
-				allowedMethods++
-				continue
-			}
-			t.Fatalf("K-12: exported declaration (method or unexpected): %s", name)
-		case *ast.GenDecl:
-			var kind string
-			switch decl.Tok {
-			case token.TYPE:
-				kind = "type"
-			case token.CONST:
-				kind = "const"
-			case token.VAR:
-				kind = "var"
-			default:
-				continue
-			}
-			for _, spec := range decl.Specs {
-				var name string
-				switch sp := spec.(type) {
-				case *ast.TypeSpec:
-					name = sp.Name.Name
-				case *ast.ValueSpec:
-					for _, n := range sp.Names {
-						if ast.IsExported(n.Name) {
-							t.Fatalf("K-12: exported package-level %s: %s", kind, n.Name)
-						}
-					}
-					continue
-				}
-				if ast.IsExported(name) {
-					t.Fatalf("K-12: exported package-level %s: %s", kind, name)
-				}
-			}
-		}
+	// One shared policy for production and every probe below.
+	if v := kdfSurfaceViolation(f); v != "" {
+		t.Fatalf("K-12: %s", v)
 	}
-	if allowedMethods != 1 {
-		t.Fatalf("K-12: required saltSourceError.Error method occurrences = %d, want exactly 1", allowedMethods)
-	}
-	// Self-check of the scanner itself: the same AST walk DOES flag a
-	// hypothetical exported const / exported func, so the "no exported
-	// package-level API" claim is enforced, not decorative.
-	for _, probe := range []struct {
-		src  string
-		want string
+	// Substantive self-probes through the SAME kdfSurfaceViolation policy:
+	// it must ACCEPT the exact accepted declaration and REJECT every
+	// near-miss and every forbidden export kind.
+	const accept = "package auth\n\ntype saltSourceError struct{}\n\nfunc (saltSourceError) Error() string { return \"x\" }\n"
+	probes := []struct {
+		name       string
+		src        string
+		wantAccept bool
 	}{
-		{"package auth\nconst Answer = 42\n", "exported package-level const: Answer"},
-		{"package auth\nfunc Leak() {}\n", "exported declaration"},
-	} {
-		pf, perr := parser.ParseFile(fset, "probe.go", probe.src, parser.SkipObjectResolution)
+		{"exact accepted Error() string", accept, true},
+		{"pointer receiver rejected", "package auth\n\ntype saltSourceError struct{}\n\nfunc (*saltSourceError) Error() string { return \"x\" }\n", false},
+		{"wrong result rejected", strings.ReplaceAll(accept, "Error() string", "Error() []byte"), false},
+		{"missing result rejected", strings.ReplaceAll(accept, "Error() string { return \"x\" }", "Error() { }"), false},
+		{"second exported method rejected", accept + "\nfunc (saltSourceError) Leak() {}\n", false},
+		{"exported constant rejected", accept + "\nconst Answer = 42\n", false},
+		{"exported function rejected", accept + "\nfunc Leak() {}\n", false},
+		{"exported type rejected", accept + "\ntype Public struct{}\n", false},
+		{"zero accepted methods rejected", "package auth\n\nfunc f() {}\n", false},
+	}
+	for _, p := range probes {
+		pf, perr := parser.ParseFile(fset, "probe.go", p.src, parser.SkipObjectResolution)
 		if perr != nil {
-			t.Fatalf("K-12 probe parse: %v", perr)
+			t.Fatalf("K-12 probe %q parse: %v", p.name, perr)
 		}
-		if !astExportedPresent(pf) {
-			t.Fatalf("K-12 scanner self-check failed: %s not detected", probe.want)
+		v := kdfSurfaceViolation(pf)
+		if p.wantAccept && v != "" {
+			t.Fatalf("K-12 probe %q: shared policy must ACCEPT it, got violation: %s", p.name, v)
+		}
+		if !p.wantAccept && v == "" {
+			t.Fatalf("K-12 probe %q: shared policy must REJECT it, accepted", p.name)
 		}
 	}
 	for _, line := range strings.Split(stripComments(src), "\n") {

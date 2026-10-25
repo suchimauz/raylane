@@ -1442,18 +1442,64 @@ func checkFieldList(fl *ast.FieldList, named map[string]ast.Expr, what string) e
 		// SEC-2 closure: nested anonymous struct/interface field types must
 		// not bypass the ban by hiding behind an "otherwise safe" outer
 		// field — descend into every nested field position at any depth.
-		if st, ok := fld.Type.(*ast.StructType); ok {
-			if err := checkFieldList(st.Fields, named, what+" nested struct field"); err != nil {
-				return err
-			}
-		}
-		if it, ok := fld.Type.(*ast.InterfaceType); ok {
-			if err := checkFieldList(it.Methods, named, what+" nested interface field"); err != nil {
-				return err
-			}
+		// An anonymous struct/interface may itself be wrapped by pointer,
+		// array, map key/value or channel element, or hidden behind a
+		// parenthesised alias: unwrap those layers so the inner fields are
+		// still scanned (struct{ x *struct{ hook func() } } must not
+		// terminate safe). seamUnderlying already rejects a func() anywhere
+		// under the field type; here we only need to find the struct/interface
+		// body to recurse into its own fields.
+		if err := checkNestedFieldList(fld.Type, named, what+" nested field"); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// checkNestedFieldList recurses into the fields of an anonymous struct or
+// the methods of an anonymous interface that is the (possibly wrapped)
+// type of an enclosing field. Pointer, array, map key/value, channel
+// element and parenthesised layers around the struct/interface are
+// unwrapped so the inner fields are still scanned; any other expression
+// form contributes no nested field list and is left to the seamUnderlying
+// rejection in checkFieldList. Named (Ident) references are resolved
+// through named[] so `type w struct{ hook func() }; struct{ x w }` is
+// caught via the declaration walk, not terminated here; unresolved or
+// cyclic named types fail closed inside seamUnderlying, not here.
+func checkNestedFieldList(e ast.Expr, named map[string]ast.Expr, what string) error {
+	switch t := e.(type) {
+	case *ast.StructType:
+		return checkFieldList(t.Fields, named, what+" struct")
+	case *ast.InterfaceType:
+		return checkFieldList(t.Methods, named, what+" interface")
+	case *ast.ParenExpr:
+		return checkNestedFieldList(t.X, named, what)
+	case *ast.StarExpr:
+		return checkNestedFieldList(t.X, named, what)
+	case *ast.ArrayType:
+		return checkNestedFieldList(t.Elt, named, what)
+	case *ast.ChanType:
+		return checkNestedFieldList(t.Value, named, what)
+	case *ast.MapType:
+		// A map key is comparable and cannot be a struct holding a func, but
+		// scanning both key and value keeps the rule uniform and fail closed.
+		if err := checkNestedFieldList(t.Key, named, what); err != nil {
+			return err
+		}
+		return checkNestedFieldList(t.Value, named, what)
+	case *ast.Ident:
+		// A named wrapper type is validated by the declaration walk; here we
+		// only recurse if the name resolves to an anonymous struct/interface
+		// in this file. Unresolved or cyclic names are NOT unwrapped here —
+		// seamUnderlying in the enclosing checkSeamExpr already fails closed
+		// on them, so returning nil cannot mask a function-typed seam.
+		if under, ok := named[t.Name]; ok {
+			return checkNestedFieldList(under, named, what)
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 // checkStmt fails on function-typed variables (explicit type or inferred
@@ -1511,12 +1557,24 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
 					switch v := st.Rhs[0].(type) {
 					case *ast.Ident:
+						// SEC-2 closure: a short `v := name` binding a declared
+						// function of this file is a function-typed value, hence a
+						// dispatch seam, even if it is never called — reject at the
+						// declaration, not only on a later call. A bare name that is
+						// NOT a this-file function (package-level value, builtin) is
+						// not a function value and stays recorded for call checks.
+						if fileFuncs[v.Name] {
+							return fmt.Errorf("variable %s is bound to function %s — fail closed", id.Name, v.Name)
+						}
 						named[id.Name] = &ast.Ident{Name: v.Name}
 					case *ast.SelectorExpr:
 						if v.Sel == nil {
 							return fmt.Errorf("assignment target %s receives a malformed selector value — fail closed", id.Name)
 						}
-						named[id.Name] = &ast.Ident{Name: v.Sel.Name}
+						// SEC-2 closure: a method value `v := recv.Method` is a
+						// function-typed bound method — a dispatch seam — even when
+						// never called; reject at the declaration.
+						return fmt.Errorf("variable %s is bound to method %s — fail closed", id.Name, v.Sel.Name)
 					default:
 						named[id.Name] = localKindValue
 					}

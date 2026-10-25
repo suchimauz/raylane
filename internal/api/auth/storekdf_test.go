@@ -113,7 +113,7 @@ func TestT008StoreKDFAbsentVerifierCategory(t *testing.T) {
 	if be.kind != bridgeErrNoVerifier {
 		t.Fatalf("N-3: wrong category %v", be.kind)
 	}
-	if err.Error() != "auth: admin verifier unavailable" {
+	if err.Error() != "auth: no usable admin verifier" {
 		t.Fatalf("N-3: unexpected error text: %q", err.Error())
 	}
 	if errors.Unwrap(err) != nil {
@@ -144,7 +144,7 @@ func TestT008StoreKDFReadFailureStorageCategory(t *testing.T) {
 	if be.kind != bridgeErrStorage {
 		t.Fatalf("N-4: unexpected category %v", be.kind)
 	}
-	if err.Error() != "auth: admin verifier storage operation failed" {
+	if err.Error() != "auth: storage unavailable" {
 		t.Fatalf("N-4: unexpected error text: %q", err.Error())
 	}
 }
@@ -457,22 +457,67 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	if exportedMethods != 2 {
 		t.Fatalf("G-1: accepted Error methods = %d, want exactly 2 (saltSourceError + bridgeError)", exportedMethods)
 	}
-	// G-3: import direction, per production file.
+	// G-3: import direction, per production file, from ACTUAL AST IMPORT
+	// DECLARATIONS (finding F1 correction): raw text search for
+	// "internal/store" necessarily matches the APPROVED header prose in
+	// kdf.go that names the one-way boundary, so it cannot detect imports.
+	// fileImports(f) returns the module paths of the file's real import
+	// specs — a comment mentioning an import path never appears in it, and a
+	// real import declaration always does. This is the same parsed *ast.File
+	// set the rest of G-1..G-6 uses; no second checker, no count/substring
+	// tautology.
 	for _, name := range prod {
-		hasStore := strings.Contains(string(mustRead(t, name)), `internal/store`)
-		if name == "storekdf.go" && !hasStore {
-			t.Fatal("G-3: bridge must import internal/store")
+		pf, perr := parser.ParseFile(fset, name, mustRead(t, name), parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("G-3 parse %s: %v", name, perr)
 		}
-		if name == "kdf.go" && hasStore {
-			t.Fatal("G-3: the primitive file must not import internal/store")
+		imports := fileImports(pf)
+		hasStore := imports["github.com/suchimauz/raylane/internal/store"]
+		switch name {
+		case "storekdf.go":
+			if !hasStore {
+				t.Fatal("G-3: bridge import set lacks internal/store")
+			}
+		case "kdf.go":
+			if hasStore {
+				t.Fatal("G-3: the primitive file imports internal/store — forbidden")
+			}
+		default:
+			if hasStore {
+				t.Fatalf("G-3: unexpected production file %s imports internal/store", name)
+			}
 		}
 	}
-	storeSrc, err := os.ReadFile(filepath.Join("..", "..", "store", "auth.go"))
-	if err != nil {
-		t.Fatalf("G-3 read store/auth.go: %v", err)
+	// G-3 no-cycle: parse EVERY production file of internal/store and reject
+	// an auth import in its actual import set (a doc comment naming the
+	// package would not, and must not, trip this). The path constant is
+	// assembled so this test file's own source cannot match itself.
+	storeProd, serr := os.ReadDir(filepath.Join("..", "..", "store"))
+	if serr != nil {
+		t.Fatalf("G-3 read store dir: %v", serr)
 	}
-	if strings.Contains(string(storeSrc), "internal/api/auth") {
-		t.Fatal("G-3: internal/store imports internal/api/auth — dependency cycle")
+	authPath := "github.com/suchimauz/raylane/internal/" + "api/" + "auth"
+	storeProdFiles := 0
+	for _, e := range storeProd {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		storeProdFiles++
+		src, rerr := os.ReadFile(filepath.Join("..", "..", "store", n))
+		if rerr != nil {
+			t.Fatalf("G-3 read store/%s: %v", n, rerr)
+		}
+		sf, sperr := parser.ParseFile(fset, n, src, parser.SkipObjectResolution)
+		if sperr != nil {
+			t.Fatalf("G-3 parse store/%s: %v", n, sperr)
+		}
+		if fileImports(sf)[authPath] {
+			t.Fatalf("G-3: internal/store/%s imports %s — dependency cycle", n, authPath)
+		}
+	}
+	if storeProdFiles == 0 {
+		t.Fatal("G-3: no store production files found — coverage lost")
 	}
 	// G-5: bridge-local SQL/db bans.
 	bridgeSrc := string(mustRead(t, "storekdf.go"))
@@ -532,17 +577,24 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 
 // TestT008StoreKDFBridgeErrorShapeAndCategories is the source-side error
 // contract row: bridgeError is a CONCRETE struct storing only its category
-// (no cause field, no wrapping, no text formatting), and every produced
-// message is one of the accepted fixed non-sensitive constants. Behaviour of
-// these categories under real flows is rows N-3/N-4/N-6; this row pins the
-// shape at the text level.
+// (no cause field, no wrapping, no text formatting), and the produced
+// messages are EXACTLY the THREE accepted fixed non-sensitive constants of
+// the D2 contract (finding F2 correction): no-verifier
+// "auth: no usable admin verifier", storage "auth: storage unavailable", and
+// creation AND default/unknown kind sharing
+// "auth: verifier creation failed". There is NO fourth message. The default
+// arm is required by the contract itself: bridgeErrCreation and any
+// unknown/zero kind share it, asserted at the honest unit layer below
+// (synthetic in-test kind values are a test-only observation device; the
+// production bridgeError gains no exported surface, seam or API). Behaviour
+// of these categories under real flows is rows N-3/N-4/N-6; this row pins
+// the shape at the text level.
 func TestT008StoreKDFBridgeErrorShapeAndCategories(t *testing.T) {
 	s := string(mustRead(t, "storekdf.go"))
 	for _, want := range []string{
-		`return "auth: admin verifier unavailable"`,
-		`return "auth: admin verifier storage operation failed"`,
-		`return "auth: admin verifier creation failed"`,
-		`return "auth: admin verifier bridge failure"`,
+		`return "auth: no usable admin verifier"`,
+		`return "auth: storage unavailable"`,
+		`return "auth: verifier creation failed"`,
 		"type bridgeError struct{ kind bridgeErrorKind }",
 		"type bridgeErrorKind int",
 		"bridgeErrNoVerifier bridgeErrorKind = iota + 1",
@@ -551,9 +603,45 @@ func TestT008StoreKDFBridgeErrorShapeAndCategories(t *testing.T) {
 			t.Fatalf("error-contract source shape missing: %s", want)
 		}
 	}
+	// EXACTLY THREE distinct fixed message literals exist in the bridge —
+	// a fourth (e.g. a separate default string) is a contract divergence.
+	msgs := strings.Count(s, `return "auth: `)
+	if msgs != 3 {
+		t.Fatalf("error-contract: bridge has %d fixed messages, want exactly 3", msgs)
+	}
+	// The old deviant wording must not silently return.
+	for _, gone := range []string{
+		`"auth: admin verifier unavailable"`,
+		`"auth: admin verifier storage operation failed"`,
+		`"auth: admin verifier creation failed"`,
+		`"auth: admin verifier bridge failure"`,
+	} {
+		if strings.Contains(s, gone) {
+			t.Fatalf("error-contract: superseded deviant message present: %s", gone)
+		}
+	}
 	for _, ban := range []string{"fmt.Errorf", "errors.New", "errors.Unwrap", "errors.As", "struct{ kind bridgeErrorKind; err error }", "error\n"} {
 		if strings.Contains(s, ban) {
 			t.Fatalf("error-contract: bridge text suggests cause/text coupling: %q", ban)
+		}
+	}
+	// Honest UNIT-layer control over all four kinds, including the
+	// default/unknown arm: three ordinary kinds plus a synthetic unknown
+	// value must yield exactly the three accepted messages, creation sharing
+	// the default one, with no fourth string observable. Synthetic kinds are
+	// in-test values only; nothing in production can construct them.
+	for _, tc := range []struct {
+		kind bridgeErrorKind
+		want string
+	}{
+		{bridgeErrNoVerifier, "auth: no usable admin verifier"},
+		{bridgeErrStorage, "auth: storage unavailable"},
+		{bridgeErrCreation, "auth: verifier creation failed"},
+		{bridgeErrorKind(99), "auth: verifier creation failed"},
+		{bridgeErrorKind(0), "auth: verifier creation failed"},
+	} {
+		if got := (bridgeError{kind: tc.kind}).Error(); got != tc.want {
+			t.Fatalf("error-contract unit: kind %d -> %q, want %q", int(tc.kind), got, tc.want)
 		}
 	}
 }
@@ -598,6 +686,17 @@ func mustParse(t *testing.T, fset *token.FileSet, name, src string) *ast.File {
 		t.Fatalf("parse %s: %v", name, err)
 	}
 	return f
+}
+
+// fileImports returns the module paths of f's actual import declarations.
+// Comments never appear here, so an approved comment naming a path does not
+// register as an import (F1); a real import spec always registers.
+func fileImports(f *ast.File) map[string]bool {
+	imports := make(map[string]bool)
+	for _, spec := range f.Imports {
+		imports[strings.Trim(spec.Path.Value, "\"")] = true
+	}
+	return imports
 }
 
 func mustRead(t *testing.T, name string) []byte {

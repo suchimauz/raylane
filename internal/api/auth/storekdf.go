@@ -54,8 +54,12 @@ const (
 // bridgeError is the CONCRETE (non-interface) error type of the bridge. A
 // value of it can never be a nil interface: failure errors are NON-NIL BY
 // CONSTRUCTION, constructed fresh at each failure return site — no sentinel,
-// no global, no interface-typed error exists anywhere in this package. It
-// stores ONLY its category: no wrapped cause, no store error text, no
+// no global, and NO PACKAGE-LEVEL interface-typed error variable or sentinel
+// exists in this package — the accepted qualification: ordinary error return
+// signatures and local variables RECEIVING an error remain valid and required;
+// what is banned is a package-level error-typed variable. Fresh concrete-value
+// construction at every return site and zero package-level vars are unchanged.
+// The type stores ONLY its category: no wrapped cause, no store error text, no
 // password, salt, key or record data. Error() below is the REQUIRED standard
 // error interface method: capitalized by interface necessity, value receiver
 // of this unexported type, no parameters, exactly one builtin string result;
@@ -69,13 +73,15 @@ func (e bridgeError) Error() string {
 	// parameters, exactly one builtin string result (len(Params.List)==0).
 	switch e.kind {
 	case bridgeErrNoVerifier:
-		return "auth: admin verifier unavailable"
+		return "auth: no usable admin verifier"
 	case bridgeErrStorage:
-		return "auth: admin verifier storage operation failed"
-	case bridgeErrCreation:
-		return "auth: admin verifier creation failed"
+		return "auth: storage unavailable"
+	default:
+		// Accepted D2 contract: EXACTLY THREE possible messages. bridgeErrCreation
+		// and any unknown/zero kind share this one message — there is NO fourth
+		// default string.
+		return "auth: verifier creation failed"
 	}
-	return "auth: admin verifier bridge failure"
 }
 
 // storeVerifierInput converts the typed value returned by the K1-guarded

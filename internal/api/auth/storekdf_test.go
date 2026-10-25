@@ -1543,7 +1543,6 @@ func checkNestedFieldListEdges(e ast.Expr, named map[string]ast.Expr, what strin
 // them is known to contain it. Composite (non-Ident) elements pass the
 // indirection down so a struct literal behind a pointer is marked indirect.
 func nestedWithIndirection(e ast.Expr, named map[string]ast.Expr, what string, ap *activePath) error {
-	markLoopIndirection(ap)
 	if id, ok := e.(*ast.Ident); ok {
 		return enterNamed(id.Name, true, named, what, ap)
 	}
@@ -1631,21 +1630,43 @@ func enterNamed(name string, indirection bool, named map[string]ast.Expr, what s
 	return checkNestedFieldListEdges(under, named, what, ap)
 }
 
-// markLoopIndirection records, for every active named occurrence, that the
-// descent from that occurrence down to the current node has crossed an
-// indirected edge. It is called at EACH indirection — a pointer, slice, map
-// or channel element — so that when a name re-enters, ap.loopSeen[name]
-// reflects whether the ACTUAL LOOP back to it contains an indirection.
-//
-// The write is SCOPED to this descent step: the entire loopSeen map is
-// snapshotted before the write and restored after the callee returns, so a
-// sibling field's indirection is fully undone when that sibling completes
-// and can never leak into a later sibling's cycle decision. Only the
-// indirections on the CURRENT path from a name's own occurrence survive.
-func markLoopIndirection(ap *activePath) {
+// checkFieldListEdges is the field-list walker for a by-value (or top-level)
+// struct/interface: it applies the per-field seam check and the nested
+// descent, threading the shared activePath so a self-referential type is
+// entered once per path and the cycle decision uses the loop itself.
+// indirectStart reports whether a field's TYPE begins with an indirection:
+// a pointer, a slice, a map, a channel, or a bare named type entered
+// indirected. Such a field's whole subtree is an indirected branch.
+func indirectStart(e ast.Expr) bool {
+	switch t := e.(type) {
+	case *ast.StarExpr, *ast.MapType, *ast.ChanType:
+		return true
+	case *ast.ArrayType:
+		return t.Len == nil // slice = indirection; fixed array is by-value
+	case *ast.Ident:
+		// A bare named type is indirect-starting only if entered via an
+		// indirected edge. The caller passes whether this occurrence is
+		// indirected; here (field head) it is by-value, so false.
+		return false
+	default:
+		return false
+	}
+}
+
+// withLoopIndirection marks every active named occurrence as having seen an
+// indirection, runs branch, then restores the prior loopSeen — so the mark
+// LIVES THROUGH the whole branch (including any repeated-name check inside
+// it) but is fully undone when the branch returns. A sibling branch's
+// indirection can never leak into a later sibling's cycle decision, while a
+// pointer edge INSIDE a loop keeps its mark through the re-entry. This is
+// the caller-owned branch lifetime that replaces the self-restoring helper.
+func withLoopIndirection(ap *activePath, branch func() error) error {
 	prev := make(map[string]bool, len(ap.loopSeen))
 	for k, v := range ap.loopSeen {
 		prev[k] = v
+	}
+	for name := range ap.entries {
+		ap.loopSeen[name] = true
 	}
 	defer func() {
 		for k := range ap.loopSeen {
@@ -1655,15 +1676,9 @@ func markLoopIndirection(ap *activePath) {
 			ap.loopSeen[k] = v
 		}
 	}()
-	for name := range ap.entries {
-		ap.loopSeen[name] = true
-	}
+	return branch()
 }
 
-// checkFieldListEdges is the field-list walker for a by-value (or top-level)
-// struct/interface: it applies the per-field seam check and the nested
-// descent, threading the shared activePath so a self-referential type is
-// entered once per path and the cycle decision uses the loop itself.
 func checkFieldListEdges(fl *ast.FieldList, named map[string]ast.Expr, what string, ap *activePath) error {
 	if fl == nil {
 		return nil
@@ -1671,6 +1686,18 @@ func checkFieldListEdges(fl *ast.FieldList, named map[string]ast.Expr, what stri
 	for _, fld := range fl.List {
 		if err := checkSeamExpr(fld.Type, named, what); err != nil {
 			return err
+		}
+		// Own each indirect-starting field as a branch: mark the indirection,
+		// scan the whole field subtree, then restore — so the mark lives for
+		// the branch's repeated-name checks but a sibling field's indirection
+		// is undone when that sibling returns.
+		if indirectStart(fld.Type) {
+			if err := withLoopIndirection(ap, func() error {
+				return checkNestedFieldListEdges(fld.Type, named, what+" nested field", ap)
+			}); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := checkNestedFieldListEdges(fld.Type, named, what+" nested field", ap); err != nil {
 			return err
@@ -1681,11 +1708,12 @@ func checkFieldListEdges(fl *ast.FieldList, named map[string]ast.Expr, what stri
 
 // checkFieldListEdgesIndirected is the field-list walker for a struct or
 // interface reached through an indirection (a pointer/slice/map/chan
-// element). The indirection that reaches THIS struct was already recorded on
-// the loop state by the caller (nestedWithIndirection / descendWithIndirection),
-// which snapshots and restores that state so a sibling field's indirection
-// cannot leak here; this walker only scans the fields themselves, exactly as
-// in the by-value walker. It deliberately makes NO markLoopIndirection call.
+// element). The indirection that reached THIS struct is owned by the calling
+// branch (which marked and will restore it), so this walker does NOT mark;
+// it owns each of ITS OWN indirect-starting fields as a branch exactly as the
+// by-value walker does, so a repeated-name check inside one of those fields
+// sees the indirection while a sibling field's indirection is restored on
+// return.
 func checkFieldListEdgesIndirected(fl *ast.FieldList, named map[string]ast.Expr, what string, ap *activePath) error {
 	if fl == nil {
 		return nil
@@ -1693,6 +1721,14 @@ func checkFieldListEdgesIndirected(fl *ast.FieldList, named map[string]ast.Expr,
 	for _, fld := range fl.List {
 		if err := checkSeamExpr(fld.Type, named, what); err != nil {
 			return err
+		}
+		if indirectStart(fld.Type) {
+			if err := withLoopIndirection(ap, func() error {
+				return checkNestedFieldListEdges(fld.Type, named, what+" nested field", ap)
+			}); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := checkNestedFieldListEdges(fld.Type, named, what+" nested field", ap); err != nil {
 			return err
@@ -1970,6 +2006,52 @@ func classifyBindingRHS(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 	return nil
 }
 
+// snapshotNamed records the current binding (or absence) of each name in
+// `names` so the caller can restore them at block exit (lexical shadow). It
+// returns the previous bindings and a had-flag per name, plus the set of
+// names actually snapshotted.
+func snapshotNamed(named map[string]ast.Expr, names []string) (prev map[string]ast.Expr, had map[string]bool, touched map[string]bool) {
+	prev = map[string]ast.Expr{}
+	had = map[string]bool{}
+	touched = map[string]bool{}
+	for _, nm := range names {
+		if touched[nm] {
+			continue
+		}
+		touched[nm] = true
+		if old, ok := named[nm]; ok {
+			prev[nm] = old
+			had[nm] = true
+		} else {
+			had[nm] = false
+		}
+	}
+	return prev, had, touched
+}
+
+// restoreNamed undoes the bindings recorded by snapshotNamed, putting back
+// the prior binding (lexical shadow) or deleting a newly-introduced name.
+func restoreNamed(named map[string]ast.Expr, prev map[string]ast.Expr, had map[string]bool, touched map[string]bool) {
+	for nm := range touched {
+		if had[nm] {
+			named[nm] = prev[nm]
+		} else {
+			delete(named, nm)
+		}
+	}
+}
+
+// shortVarNames lists the non-blank identifier names bound by an := LHS.
+func shortVarNames(lhs []ast.Expr) []string {
+	out := []string{}
+	for _, l := range lhs {
+		if id, ok := l.(*ast.Ident); ok && id.Name != "_" {
+			out = append(out, id.Name)
+		}
+	}
+	return out
+}
+
 // checkPairwiseBindingClassifies applies declaration-time function-value
 // classification to EVERY unambiguous name/value in a multi-name or
 // multi-value := / ValueSpec declaration, so a named function or method
@@ -1997,9 +2079,17 @@ func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named
 		}
 		return nil
 	case len(values) == 1:
-		// One result tuple applied to several names: classify the single
-		// actual RHS once, and record a binding for each named variable so a
-		// later alias or call of any of them resolves to the same value.
+		// One result tuple applied to several names: prove the producer's EXACT
+		// result arity, require it to equal the number of bound names, and
+		// bind each name to its OWN slot's type (a fresh *ast.Ident of that
+		// slot type) so a later alias/selector/container proof reads the
+		// ACTUAL per-slot type, not a shared opaque value marker.
+		if ce, ok := unparen(values[0]).(*ast.CallExpr); ok {
+			if err := classifyCallTuple(names, ce, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
+				return err
+			}
+			return nil
+		}
 		kind := bindingValueKind(values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		if kind == "func" {
 			return fmt.Errorf("declaration binds a function or method value — fail closed")
@@ -2027,6 +2117,11 @@ func classifyOneBinding(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 	if rhs == nil {
 		return nil
 	}
+	// A direct call f(...) bound to ONE name: prove the producer returns
+	// exactly ONE non-function slot and bind the name to that slot's type.
+	if ce, ok := unparen(rhs).(*ast.CallExpr); ok {
+		return classifyCallSlots1(id, ce, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+	}
 	kind := bindingValueKind(rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	if kind == "func" {
 		return fmt.Errorf("variable %s is bound to a function or method value — fail closed", id.Name)
@@ -2037,6 +2132,102 @@ func classifyOneBinding(id *ast.Ident, rhs ast.Expr, named map[string]ast.Expr, 
 	// kind == "value": a plain non-function result. Record the binding so a
 	// later alias or call of this name resolves to an ordinary value.
 	named[id.Name] = localKindValue
+	return nil
+}
+
+// unparen strips any enclosing parentheses from an expression.
+func unparen(e ast.Expr) ast.Expr {
+	r := e
+	for {
+		if p, ok := r.(*ast.ParenExpr); ok {
+			r = p.X
+			continue
+		}
+		return r
+	}
+}
+
+// callResultSlots resolves a direct-call callee's exact result-slot types.
+// Only a bare *ast.Ident callee that is a declared function/method resolves;
+// a zero-result callee yields ZERO slots. It returns nil when the callee is
+// not a resolvable function (selector calls, conversions) so the caller can
+// fall back to ordinary kind classification.
+func callResultSlots(fun ast.Expr, fileFuncs map[string]bool, funcResults map[string][]ast.Expr) ([]ast.Expr, bool) {
+	id, ok := unparen(fun).(*ast.Ident)
+	if !ok {
+		return nil, false
+	}
+	if !fileFuncs[id.Name] {
+		return nil, false
+	}
+	return funcResultSlots(id.Name, funcResults), true
+}
+
+// slotTypeIdent returns a *ast.Ident naming a slot's type when the slot is a
+// bare named/builtin type (so a later selector/container proof resolves the
+// name's ACTUAL type); otherwise it returns localKindValue (the opaque value
+// marker) so non-named slots keep their conservative value binding.
+func slotTypeIdent(slot ast.Expr) ast.Expr {
+	if id, ok := unparen(slot).(*ast.Ident); ok {
+		return &ast.Ident{Name: id.Name}
+	}
+	return localKindValue
+}
+
+// classifyCallSlots1 binds ONE name to a single-slot direct call's result
+// type. It requires the producer to return EXACTLY one slot and that slot to
+// resolve non-function; a zero-result or multi-slot producer for one name
+// fails closed (exact arity).
+func classifyCallSlots1(id *ast.Ident, ce *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	slots, ok := callResultSlots(ce.Fun, fileFuncs, funcResults)
+	if !ok {
+		// Not a resolvable direct function callee: classify by ordinary kind
+		// (selector/container proofs need the REAL maps).
+		k := bindingValueKind(ce, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+		if k == "func" {
+			return fmt.Errorf("variable %s is bound to a function or method value — fail closed", id.Name)
+		}
+		if k == "unknown" {
+			return fmt.Errorf("variable %s right-hand value kind is unresolvable — fail closed", id.Name)
+		}
+		named[id.Name] = localKindValue
+		return nil
+	}
+	if len(slots) != 1 {
+		return fmt.Errorf("variable %s: producer returns %d slots, expected exactly 1 — arity mismatch, fail closed", id.Name, len(slots))
+	}
+	if !exprsAllNonFunc(slots, named) {
+		return fmt.Errorf("variable %s: call result is function-typed — fail closed", id.Name)
+	}
+	named[id.Name] = slotTypeIdent(slots[0])
+	return nil
+}
+
+// classifyCallTuple binds several names to a single direct call's result
+// tuple. It requires the producer's EXACT slot count to equal the number of
+// bound names and every slot to resolve non-function, then binds each name to
+// a FRESH *ast.Ident of its OWN slot type. A zero-result or mismatched
+// producer fails closed (exact arity, no vacuous acceptance).
+func classifyCallTuple(names []*ast.Ident, ce *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	slots, ok := callResultSlots(ce.Fun, fileFuncs, funcResults)
+	if !ok {
+		return fmt.Errorf("declaration right-hand is not a resolvable direct call — fail closed")
+	}
+	if len(slots) != len(names) {
+		return fmt.Errorf("declaration: producer returns %d slots for %d names — arity mismatch, fail closed", len(slots), len(names))
+	}
+	if len(slots) == 0 {
+		return fmt.Errorf("declaration: producer returns zero results — fail closed")
+	}
+	if !exprsAllNonFunc(slots, named) {
+		return fmt.Errorf("declaration: a call result slot is function-typed — fail closed")
+	}
+	for i, id := range names {
+		if id.Name == "_" {
+			continue
+		}
+		named[id.Name] = slotTypeIdent(slots[i])
+	}
 	return nil
 }
 
@@ -2188,12 +2379,39 @@ func typeIsNonFunc(name string, named map[string]ast.Expr) bool {
 // result field types; if f is not declared, declares no results, or ANY
 // result resolves to a function type, there is no positive proof and the
 // call is not accepted on callee membership alone.
-func funcResultsAllNonFunc(name string, named map[string]ast.Expr, funcResults map[string][]ast.Expr) bool {
-	results, ok := funcResults[name]
+// funcResultSlots resolves a function/method's result field-list to the
+// exact []ast.Expr of its result-slot types (unwrapping parens). A function
+// with NO result list yields ZERO slots — never a vacuous "all non-func".
+// This is the C4 producer-arity evidence: a call bound to N names must
+// produce exactly N non-function result slots.
+func funcResultSlots(name string, funcResults map[string][]ast.Expr) []ast.Expr {
+	slots, ok := funcResults[name]
 	if !ok {
+		return nil
+	}
+	out := make([]ast.Expr, 0, len(slots))
+	for _, s := range slots {
+		r := s
+		for {
+			if p, ok := r.(*ast.ParenExpr); ok {
+				r = p.X
+				continue
+			}
+			break
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func funcResultsAllNonFunc(name string, named map[string]ast.Expr, funcResults map[string][]ast.Expr) bool {
+	slots := funcResultSlots(name, funcResults)
+	if len(slots) == 0 {
+		// A zero-result producer gives no positive value evidence; never
+		// accepted as a non-function value (no vacuous truth).
 		return false
 	}
-	return exprsAllNonFunc(results, named)
+	return exprsAllNonFunc(slots, named)
 }
 
 // containerElementNonFunc is the C4 positive element-kind proof for an index
@@ -2322,12 +2540,19 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 		// identifiers, selectors, aliases), rejecting a bound function/method
 		// at the declaration even when it is never called. Multi-name forms
 		// are classified pairwise below so no position escapes the rule.
+		// C3 lexical scope: every name a := introduces is recorded with its
+		// actual (typed) binding, then restored to its previous binding at the
+		// end of this := (so a later statement in the same block sees the
+		// binding, but an outer same-spelled name is not corrupted once this
+		// scope unwinds). The classification still rejects a bound
+		// function/method at the declaration even when never called.
 		if st.Tok == token.DEFINE {
+			names := shortVarNames(st.Lhs)
+			prevB, hadB, touched := snapshotNamed(named, names)
+			var classifyErr error
 			if len(st.Lhs) == 1 && len(st.Rhs) == 1 {
 				if id, ok := st.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
-					if err := classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-						return err
-					}
+					classifyErr = classifyBindingRHS(id, st.Rhs[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 				}
 			} else {
 				ids := []*ast.Ident{}
@@ -2336,9 +2561,13 @@ func checkStmt(s ast.Stmt, named map[string]ast.Expr, fileFuncs map[string]bool,
 						ids = append(ids, id)
 					}
 				}
-				if err := checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-					return err
-				}
+				classifyErr = checkPairwiseBindingClassifies(ids, st.Rhs, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+			}
+			// Lexical shadow restore: undo this :='s bindings so an outer
+			// same-spelled name is not corrupted once this scope unwinds.
+			restoreNamed(named, prevB, hadB, touched)
+			if classifyErr != nil {
+				return classifyErr
 			}
 		}
 		for _, lhs := range st.Lhs {
@@ -2681,30 +2910,60 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 					// FuncType/FuncLit initialisers, so non-literal function values
 					// are classified by name/kind below. Multi-name forms are
 					// classified pairwise so no position escapes the rule.
-					for i, v := range vs.Values {
-						if exprReachesFuncType(v) {
-							names := "?"
-							if len(vs.Names) > 0 {
-								names = vs.Names[0].Name
+					// Declaration-time function-value classification identical to :=
+					// (classifyBindingRHS) ... and C3 lexical scope: each ValueSpec name
+					// is recorded with its ACTUAL declared type (typed binding) and the
+					// previous binding restored at the end of the spec, so locals/aliases
+					// keep their declared type and an outer same-spelled name is not
+					// corrupted. Any initialiser that binds a function/method value is
+					// rejected even when the variable is never called.
+					{
+						vsNames := []string{}
+						for _, nm := range vs.Names {
+							if nm.Name != "_" {
+								vsNames = append(vsNames, nm.Name)
 							}
-							return fmt.Errorf("variable %s initialised from a function-typed value", names)
 						}
-						_ = i
-						if len(vs.Names) == 1 && len(vs.Values) == 1 {
-							id := vs.Names[0]
-							if id.Name != "_" {
-								if err := classifyBindingRHS(id, vs.Values[i], named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-									return err
+						prevB, hadB, touched := snapshotNamed(named, vsNames)
+						var classifyErr error
+						for _, v := range vs.Values {
+							if exprReachesFuncType(v) {
+								names := "?"
+								if len(vs.Names) > 0 {
+									names = vs.Names[0].Name
+								}
+								classifyErr = fmt.Errorf("variable %s initialised from a function-typed value", names)
+								break
+							}
+						}
+						if classifyErr == nil {
+							// Record each name's ACTUAL declared type FIRST (typed binding)
+							// so a later selector on the local resolves its OWN field.
+							if ts, ok := vs.Type.(*ast.Ident); ok {
+								for _, nm := range vs.Names {
+									if nm.Name != "_" {
+										named[nm.Name] = &ast.Ident{Name: ts.Name}
+									}
 								}
 							}
-						} else {
-							ids := []*ast.Ident{}
-							for _, nm := range vs.Names {
-								ids = append(ids, nm)
+							if len(vs.Values) == 1 && len(vs.Names) == 1 {
+								id := vs.Names[0]
+								if id.Name != "_" {
+									classifyErr = classifyBindingRHS(id, vs.Values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
+								}
+							} else if len(vs.Values) > 0 {
+								ids := []*ast.Ident{}
+								for _, nm := range vs.Names {
+									ids = append(ids, nm)
+								}
+								classifyErr = checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 							}
-							if err := checkPairwiseBindingClassifies(ids, vs.Values, named, fileFuncs, filePkgs, methods, typeFields, funcResults); err != nil {
-								return err
-							}
+						}
+						// Lexical shadow restore: undo this spec's bindings so an outer
+						// same-spelled name is not corrupted once this spec's scope unwinds.
+						restoreNamed(named, prevB, hadB, touched)
+						if classifyErr != nil {
+							return classifyErr
 						}
 					}
 				}

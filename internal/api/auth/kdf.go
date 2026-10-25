@@ -1,14 +1,19 @@
 // Package auth holds the private admin-verifier KDF primitive (format V1).
 //
 // This package exposes NO exported package-level authentication API: every
-// package-level func, type, const and var is unexported; the only exported
-// NAME anywhere in the package is the standard error interface method
-// Error() on the unexported saltSourceError receiver, required verbatim by
-// the error interface. The package is the in-memory boundary between the
-// decoded verifier fields and the maintained Argon2id implementation. The
-// storage-boundary guard in internal/store (the accepted K1 guard) is a
-// separate, authoritative gate; this primitive does not replace, weaken or
-// duplicate it, and this package does not import internal/store.
+// package-level func, type, const and var is unexported. The ONLY exported
+// names anywhere in the package are the standard error interface methods
+// Error() on the unexported concrete error types saltSourceError and
+// bridgeError, each with a value (non-pointer) receiver of its own
+// unexported type, no parameters and exactly one builtin string result,
+// required verbatim by the error interface. The package is the in-memory
+// boundary between the decoded verifier fields and the maintained Argon2id
+// implementation. The storage-boundary guard in internal/store (the accepted
+// K1 guard) is a separate, authoritative gate; this primitive does not
+// replace, weaken or duplicate it. The primitive file kdf.go does not import
+// internal/store; the package's bridge file storekdf.go imports internal/store
+// one-way (internal/store does not import this package), to compose the
+// accepted typed store boundary with this private KDF.
 //
 // Honest boundary statement: the reader seam in newVerifierRecordWithReader
 // is a trusted SAME-PACKAGE source-construction boundary, not language-level

@@ -845,7 +845,39 @@ async function testPhase() {
         await p.keyboard.press('Escape');
         await p.waitForTimeout(200);
         check('F7: Escape cancels (dialog closed, no DELETE)', (await p.$('[role=dialog]')) === null && deletes === 0, `deletes=${deletes}`);
-        check('F7: focus returned to Sign-out invoker', await p.evaluate(() => /sign out/i.test(document.activeElement?.textContent || '')));
+        // STRICT focus identity: the focused element must BE the Sign-out
+        // invoker BUTTON — not <body>, and not merely an element whose page
+        // text happens to contain "Sign out" (the old /sign out/i.textContent
+        // oracle passed on <body>, whose textContent is the whole page). This
+        // is the corrected oracle for the F7 focus-return remainder.
+        const invokerFocus = await p.evaluate(() => {
+          const a = document.activeElement;
+          return {
+            isSignoutButton: a?.tagName === 'BUTTON' && a?.textContent?.trim() === 'Sign out',
+            isBody: a === document.body,
+            tag: a?.tagName,
+          };
+        });
+        check('F7: focus returned to Sign-out invoker (strict BUTTON identity, not body)',
+          invokerFocus.isSignoutButton && !invokerFocus.isBody, JSON.stringify(invokerFocus));
+        // After cancel, the NEXT native Tab continues keyboard interaction
+        // from the invoker region (not dumped to the page-top skip link).
+        await p.keyboard.press('Tab');
+        const nextTab = await p.evaluate(() => ({
+          tag: document.activeElement?.tagName,
+          isBody: document.activeElement === document.body,
+        }));
+        check('F7: next Tab after cancel stays out of body', !nextTab.isBody, JSON.stringify(nextTab));
+        // Re-open and cancel again to prove STABLE focus return across repeats.
+        await p.click('header button:has-text("Sign out")');
+        await p.waitForSelector('[role=dialog]', { timeout: 8000 });
+        await p.keyboard.press('Escape');
+        await p.waitForTimeout(200);
+        const againFocus = await p.evaluate(() => {
+          const a = document.activeElement;
+          return a?.tagName === 'BUTTON' && a?.textContent?.trim() === 'Sign out' && a !== document.body;
+        });
+        check('F7: repeated cancel still returns focus to invoker', againFocus === true);
         check('F7: RAM preserved after Escape', (await p.inputValue('#test-child-text')) === 'modal-work');
         // Discard and sign out: exactly one DELETE, returns to gate.
         await p.click('header button:has-text("Sign out")');

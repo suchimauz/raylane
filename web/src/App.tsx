@@ -134,6 +134,32 @@ export function App() {
   // The invoker that opened the dirty sign-out dialog, to restore focus on
   // cancel/close (APG: return focus to the invoking element).
   const signOutInvokerRef = useRef<HTMLButtonElement | null>(null);
+  // Tracks whether the dirty dialog was open, so the focus-restore effect
+  // below only runs after a real open→close transition — never on the initial
+  // mount (when confirmSignOut is already false and focus must not be stolen).
+  const confirmWasOpenRef = useRef(false);
+
+  // Restore keyboard focus to the Sign-out invoker AFTER the dirty dialog has
+  // closed and the background is no longer inert. The previous code called
+  // invoker.focus() synchronously inside onStay — while the native modal was
+  // still open — so the browser dropped the focus request and it fell to
+  // <body> (F7 remainder). By reacting to confirmSignOut becoming false we
+  // run after unmount, when the invoker is focusable again. After a real
+  // sign-out the header unmounts and the ref is null, so this is a safe no-op
+  // (never focuses a removed/hidden invoker).
+  useEffect(() => {
+    if (confirmSignOut) {
+      confirmWasOpenRef.current = true;
+      return;
+    }
+    // Only restore after the dialog was actually open then closed.
+    if (!confirmWasOpenRef.current) return;
+    confirmWasOpenRef.current = false;
+    const invoker = signOutInvokerRef.current;
+    if (invoker && document.contains(invoker)) {
+      invoker.focus();
+    }
+  }, [confirmSignOut]);
 
   const refresh = useCallback(
     async (into: AuthView | 'auto' = 'auto') => {
@@ -340,8 +366,10 @@ export function App() {
       {confirmSignOut && (
         <DirtySignOutDialog
           onStay={() => {
+            // Only close here. Focus is restored to the invoker by the
+            // confirmSignOut effect AFTER the dialog unmounts (see above),
+            // when the background is no longer inert.
             setConfirmSignOut(false);
-            signOutInvokerRef.current?.focus();
           }}
           onDiscardSignOut={() => void doSignOut()}
         />

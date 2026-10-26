@@ -221,5 +221,6 @@ type Dispatch struct {
 	Kind     string     // "interface-method" | "func-recv-method" | "func-value-call" | "call-result"
 	Owner    types.Type // enclosing receiver/object type for provenance
 	File     string
-	Producer NamedRef // resolved producer of a func value when known
+	Producer NamedRef     // resolved producer of a func value when known
+	Selected types.Object // the EXACT resolved field/var object invoked (e.g. the *types.Var for s.now); nil if unknown
 }

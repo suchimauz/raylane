@@ -31,43 +31,57 @@ import (
 // Every exported callback exposure and every raw database/sql reach is a
 // violation. Discovery/parse/type/provenance errors fail closed.
 
-// clockOwnerNames are the four reviewed private clock owner type names. A
-// field is authorized as a clock only if its OWNER is one of these (in the
-// analyzed package) AND its type is func() time.Time.
-var clockOwnerNames = []string{"Server", "bootstrapIssuer", "loginLimiter", "sessionManager"}
+// clockFieldOwnerNames are the four private structs that carry an approved
+// constructor-injected wall clock. Only each struct's exact `now` field object
+// is authorized — never any other field on the same owner.
+var clockFieldOwnerNames = []string{"Server", "bootstrapIssuer", "loginLimiter", "sessionManager"}
+
+// boundaryPolicy decides acceptance from resolved provenance.
+type boundaryPolicy struct {
+	approvedClocks map[*types.Var]bool // exact resolved *.now field objects
+}
+
+func newBoundaryPolicy(self *types.Package) *boundaryPolicy {
+	return &boundaryPolicy{approvedClocks: resolveApprovedClocks(self)}
+}
+
+// resolveApprovedClocks resolves the EXACT `now` field object on each of the
+// four approved owner declarations and returns them as a set keyed by object
+// identity. Authorization compares the invoked field object to one of these
+// resolved objects; owner-has-a-clock, field-name, or signature alone never
+// authorizes.
+func resolveApprovedClocks(self *types.Package) map[*types.Var]bool {
+	set := map[*types.Var]bool{}
+	if self == nil {
+		return set
+	}
+	for _, ownerName := range clockFieldOwnerNames {
+		obj := self.Scope().Lookup(ownerName)
+		if obj == nil {
+			continue
+		}
+		named, ok := obj.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		st, ok := named.Underlying().(*types.Struct)
+		if !ok {
+			continue
+		}
+		// Resolve the exact `now` field object on this owner declaration.
+		for i := 0; i < st.NumFields(); i++ {
+			f := st.Field(i)
+			if f.Name() == "now" && isFuncReturningTime(f.Type()) {
+				set[f] = true
+			}
+		}
+	}
+	return set
+}
 
 // gateReleaseTypeName is the producer owner type name of the bounded
 // shared-KDF-gate release handle (the func value returned by loginLimiter.Allow).
 const gateReleaseTypeName = "loginLimiter"
-
-// boundaryPolicy decides acceptance from resolved provenance.
-type boundaryPolicy struct {
-	self *types.Package
-}
-
-func newBoundaryPolicy(self *types.Package) *boundaryPolicy {
-	return &boundaryPolicy{self: self}
-}
-
-// isSelfNamed reports whether t resolves (through pointer) to a named type
-// declared in the analyzed package with the given name. This is the OWNER
-// provenance: we match by the resolved object's declaring package (identity),
-// never by use-site spelling.
-func (pol *boundaryPolicy) isSelfNamed(t types.Type, name string) bool {
-	t = types.Unalias(t)
-	if p, ok := t.(*types.Pointer); ok {
-		t = types.Unalias(p.Elem())
-	}
-	named, ok := t.(*types.Named)
-	if !ok {
-		return false
-	}
-	obj := named.Obj()
-	if obj == nil || obj.Name() != name {
-		return false
-	}
-	return obj.Pkg() == pol.self
-}
 
 // Violation is a structured policy rejection with resolved provenance.
 type Violation struct {
@@ -129,54 +143,23 @@ func (pol *boundaryPolicy) acceptFuncValueCall(d seamcheck.Dispatch) bool {
 	return false
 }
 
-// isClockCall authorizes a private clock invocation: the OWNER of the invoked
-// field is one of the four reviewed structs AND the field's type is exactly
-// func() time.Time. A struct merely having a field spelled "now" with another
-// signature (e.g. func() int64) is rejected.
+// isClockCall authorizes a private clock invocation ONLY when the EXACT
+// invoked field object is one of the four resolved approved `.now` clock
+// fields. Owner-has-a-clock, field-name spelling, the enclosing type name, or
+// the signature alone are insufficient: an arbitrary `Server.evil
+// func() time.Time` or `Server.onEvent func() error` is a different field
+// object and is rejected. A missing/ambiguous selected identity fails closed.
 func (pol *boundaryPolicy) isClockCall(d seamcheck.Dispatch) bool {
-	if d.Owner == nil {
+	sel, ok := d.Selected.(*types.Var)
+	if !ok || sel == nil {
+		return false // fail closed: unknown selection is not an approved clock
+	}
+	// The selected field must be private (the clocks are unexported).
+	if sel.Exported() {
 		return false
 	}
-	if !pol.isClockOwner(d.Owner) {
-		return false
-	}
-	// The clock field type must be func() time.Time. Resolve the field's type
-	// from the owner struct; the invoked value d is the field access.
-	return pol.ownerHasTimeFuncField(d.Owner)
-}
-
-// isClockOwner reports whether the owner type is one of the four reviewed
-// private clock structs, matched by identity within the analyzed package.
-func (pol *boundaryPolicy) isClockOwner(owner types.Type) bool {
-	for _, name := range clockOwnerNames {
-		if pol.isSelfNamed(owner, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// ownerHasTimeFuncField reports whether the named struct type has a field of
-// type func() time.Time (the authorized clock signature), resolved via go/types.
-func (pol *boundaryPolicy) ownerHasTimeFuncField(owner types.Type) bool {
-	u := types.Unalias(owner)
-	if p, isPtr := u.(*types.Pointer); isPtr {
-		u = types.Unalias(p.Elem())
-	}
-	named, ok := u.(*types.Named)
-	if !ok {
-		return false
-	}
-	st, ok := named.Underlying().(*types.Struct)
-	if !ok {
-		return false
-	}
-	for i := 0; i < st.NumFields(); i++ {
-		if isFuncReturningTime(st.Field(i).Type()) {
-			return true
-		}
-	}
-	return false
+	// Compare object identity to the exact approved `.now` field objects.
+	return pol.approvedClocks[sel]
 }
 
 // isFuncReturningTime reports whether t is exactly func() time.Time.

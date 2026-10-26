@@ -401,7 +401,7 @@ func (a *Analysis) dispatchOf(call *ast.CallExpr) (Dispatch, bool) {
 		if obj, ok := info.Uses[fun]; ok {
 			if v, ok := obj.(*types.Var); ok {
 				if _, isFunc := v.Type().Underlying().(*types.Signature); isFunc {
-					return Dispatch{FuncName: fun.Name, Kind: "func-value-call", Producer: a.producerFor(obj)}, true
+					return Dispatch{FuncName: fun.Name, Kind: "func-value-call", Producer: a.producerFor(obj), Selected: v}, true
 				}
 			}
 		}
@@ -418,7 +418,7 @@ func (a *Analysis) dispatchOf(call *ast.CallExpr) (Dispatch, bool) {
 		if obj, ok := info.Uses[fun.Sel]; ok {
 			if v, ok := obj.(*types.Var); ok {
 				if _, isFunc := v.Type().Underlying().(*types.Signature); isFunc {
-					return Dispatch{FuncName: fun.Sel.Name, Kind: "func-value-call", Producer: a.producerFor(v), Owner: ownerOfSelector(info, fun)}, true
+					return Dispatch{FuncName: fun.Sel.Name, Kind: "func-value-call", Producer: a.producerFor(v), Owner: ownerOfSelector(info, fun), Selected: v}, true
 				}
 			}
 		}

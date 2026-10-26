@@ -26,17 +26,13 @@ import (
 //
 // hook is a test-only interception point executed inside a transaction after
 // the revision row is inserted and before the draft head moves. Production
-// leaves it nil; tests use it to cancel or fail mid-transaction and prove no
-// partial publication occurs (T006 point 4). SetOnlyForTests configures it.
+// leaves it nil; tests use it (via SetHookOnlyForTests, declared in
+// export_test.go) to cancel or fail mid-transaction and prove no partial
+// publication occurs (T006 point 4).
 type Store struct {
 	db   *sql.DB
 	hook func() error
 }
-
-// SetHookOnlyForTests installs a mid-transaction interception hook used by
-// tests to cancel or fail a write between revision insert and draft-head move.
-// It is not part of the product behaviour; production code never calls it.
-func (s *Store) SetHookOnlyForTests(hook func() error) { s.hook = hook }
 
 // Open creates (or opens) the SQLite database at path, applies connection
 // invariants to every pooled connection, runs versioned migrations, and
@@ -78,26 +74,3 @@ func openPool(path string) (*sql.DB, error) {
 
 // Close closes the underlying pool.
 func (s *Store) Close() error { return s.db.Close() }
-
-// DB exposes the pool for read-only inspection in tests. It is not part of
-// the product API surface; callers must not issue schema changes through it.
-func (s *Store) DB() *sql.DB { return s.db }
-
-// ConnectionInvariants reports the per-connection pragmas actually observed on
-// one live pool connection. Tests call it repeatedly to prove foreign_keys and
-// WAL hold on more than one connection, not just the first opened.
-func ConnectionInvariants(db *sql.DB) (foreignKeysOn, wal bool, err error) {
-	conn, err := db.Conn(context.Background())
-	if err != nil {
-		return false, false, err
-	}
-	defer conn.Close()
-	if err := conn.QueryRowContext(context.Background(), "PRAGMA foreign_keys").Scan(&foreignKeysOn); err != nil {
-		return false, false, err
-	}
-	var mode string
-	if err := conn.QueryRowContext(context.Background(), "PRAGMA journal_mode").Scan(&mode); err != nil {
-		return false, false, err
-	}
-	return foreignKeysOn, mode == "wal", nil
-}

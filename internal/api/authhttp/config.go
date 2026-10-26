@@ -18,7 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
+	"net/netip"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -75,10 +77,23 @@ type Config struct {
 
 // Validate reports whether every required field is present, well-formed and
 // SAFE. Beyond presence it rejects configurations that would weaken the
-// security posture: a wildcard/unspecified or non-loopback management listen
-// address, a non-HTTPS trusted origin, and an origin whose host/port does not
-// match the management listen address. Existence/ownership of the TLS/DB/
-// socket paths is verified at bind time, not here.
+// security posture. Existence/ownership of the TLS/DB/socket paths is
+// verified at bind time, not here.
+//
+// Bind policy (net/netip, no name resolution): ManagementListen must be a
+// NUMERIC IP literal plus a concrete port 1..65535 (an ephemeral :0 bind is
+// refused — the CSRF origin would not be knowable). The address must be
+// inside the reviewed private scope: loopback (127/8, ::1) or a private LAN
+// range (10/8, 172.16/12, 192.168/16, fc00::/7). Unspecified/wildcard,
+// link-local, multicast, shared-address (CGNAT), benchmarking, public
+// addresses, IPv4-mapped IPv6 literals and zoned literals are all refused.
+//
+// Origin policy: TrustedOrigin must be EXACTLY the canonical rendering
+// https://<bind-IP>[:port] of the configured bind — 443 written portless,
+// IPv6 bracketed and compressed, ports in canonical decimal. A hostname
+// origin, credentials, a path, query or fragment, leading zeros, or any
+// non-matching spelling is rejected, never rewritten: the CSRF comparison
+// must not be able to diverge from the address actually served.
 func (c Config) Validate() error {
 	if c.ManagementListen == "" {
 		return errors.New("authhttp: management listen address is required")
@@ -98,41 +113,157 @@ func (c Config) Validate() error {
 	if c.UnixSocketDir == "" {
 		return errors.New("authhttp: unix socket directory is required")
 	}
-	// Management listen must be a specific loopback address, never a wildcard
-	// (0.0.0.0 / ::) or a public interface: the management API must not be
-	// exposed beyond the local machine by an unsafe operator config.
-	listenHost, listenPort, err := net.SplitHostPort(c.ManagementListen)
+	bindAddr, bindPort, err := parseListen(c.ManagementListen)
 	if err != nil {
-		return fmt.Errorf("authhttp: management listen address %q is not host:port: %w", c.ManagementListen, err)
+		return err
 	}
-	listenIP := net.ParseIP(listenHost)
-	if listenIP == nil || !listenIP.IsLoopback() {
-		return fmt.Errorf("authhttp: management listen %q must be a loopback address (not wildcard or public)", c.ManagementListen)
+	if !allowedManagementAddr(bindAddr) {
+		return fmt.Errorf("authhttp: management listen %q must be a loopback or private-LAN IP literal (not wildcard, link-local, shared, benchmarking or public)", c.ManagementListen)
 	}
-	// Trusted origin must be HTTPS, and its port must match the management
-	// listen port (when the listen port is known — a non-zero port; an
-	// ephemeral :0 listener defers the real port to bind time). A mismatched
-	// port would make the CSRF origin check diverge from the served origin.
-	u, err := url.Parse(c.TrustedOrigin)
-	if err != nil {
-		return fmt.Errorf("authhttp: trusted origin %q is not a valid URL: %w", c.TrustedOrigin, err)
-	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("authhttp: trusted origin %q must use https", c.TrustedOrigin)
-	}
-	if u.Host == "" || u.Hostname() == "" {
-		return fmt.Errorf("authhttp: trusted origin %q has no host", c.TrustedOrigin)
-	}
-	if listenPort != "0" {
-		originPort := u.Port()
-		if originPort == "" {
-			originPort = "443" // default https port when omitted
+	// The origin must be the canonical rendering of the very bind above.
+	want := canonicalOrigin(bindAddr, bindPort)
+	if c.TrustedOrigin != want {
+		if _, _, oerr := parseTrustedOrigin(c.TrustedOrigin); oerr != nil {
+			return fmt.Errorf("authhttp: trusted origin %q: %w", c.TrustedOrigin, oerr)
 		}
-		if originPort != listenPort {
-			return fmt.Errorf("authhttp: trusted origin %q port does not match management listen %q", c.TrustedOrigin, c.ManagementListen)
-		}
+		return fmt.Errorf("authhttp: trusted origin %q must be exactly the management bind origin %q", c.TrustedOrigin, want)
 	}
 	return nil
+}
+
+// splitHostPort splits a listen string into host and port. It delegates to
+// net.SplitHostPort, which handles the bracketed IPv6 form; a host without a
+// port ("127.0.0.1", "::1") is an error, not a default.
+func splitHostPort(s string) (host, port string, err error) {
+	h, p, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", "", fmt.Errorf("authhttp: listen address %q is not host:port: %w", s, err)
+	}
+	return h, p, nil
+}
+
+// parseListen parses a management listen address into a numeric address and a
+// concrete port. A hostname (anything netip cannot parse as an IP literal), a
+// zoned or IPv4-mapped IPv6 literal, port 0 and a non-canonical port spelling
+// are all rejected.
+func parseListen(s string) (netip.Addr, uint16, error) {
+	host, portStr, err := splitHostPort(s)
+	if err != nil {
+		return netip.Addr{}, 0, err
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, 0, fmt.Errorf("authhttp: management listen %q host is not a numeric IP literal (hostnames are not resolved)", s)
+	}
+	if addr.Zone() != "" {
+		return netip.Addr{}, 0, fmt.Errorf("authhttp: management listen %q must not carry an IPv6 zone", s)
+	}
+	if addr.Is4In6() {
+		return netip.Addr{}, 0, fmt.Errorf("authhttp: management listen %q must use a plain IPv4 literal, not an IPv4-mapped IPv6 one", s)
+	}
+	port, err := parseCanonicalPort(portStr)
+	if err != nil {
+		return netip.Addr{}, 0, fmt.Errorf("authhttp: management listen %q: %w", s, err)
+	}
+	return addr, port, nil
+}
+
+// parseCanonicalPort parses a decimal port in 1..65535 written canonically:
+// leading zeros ("08443") are rejected so one address has exactly one
+// spelling, and port 0 (ephemeral) is rejected because the trusted origin
+// could then never be known.
+func parseCanonicalPort(s string) (uint16, error) {
+	p, err := strconv.ParseUint(s, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("port %q is not a decimal port in 1..65535", s)
+	}
+	if p == 0 {
+		return 0, errors.New("port 0 (ephemeral) is not allowed: the trusted origin would not be knowable")
+	}
+	if strconv.FormatUint(p, 10) != s {
+		return 0, fmt.Errorf("port %q is not canonical decimal (no leading zeros)", s)
+	}
+	return uint16(p), nil
+}
+
+// allowedManagementAddr reports whether addr is inside the reviewed private
+// scope for a management listener: loopback or a private LAN range. It is a
+// positive allowlist — anything else (unspecified/wildcard, link-local,
+// multicast, CGNAT/shared, benchmarking, every public address) is refused.
+func allowedManagementAddr(addr netip.Addr) bool {
+	return addr.IsLoopback() || addr.IsPrivate()
+}
+
+// canonicalOrigin renders the exact origin string a browser would show for a
+// listener bound to addr on port: https:// + IP literal, port 443 omitted,
+// IPv6 bracketed. This is the ONE accepted spelling.
+func canonicalOrigin(addr netip.Addr, port uint16) string {
+	host := addr.String()
+	if addr.Is6() {
+		host = "[" + host + "]"
+	}
+	if port == 443 {
+		return "https://" + host
+	}
+	return "https://" + host + ":" + strconv.Itoa(int(port))
+}
+
+// parseTrustedOrigin strictly parses an origin into a numeric address and
+// port, accepting only the exact shape https://<ip>[:port] (IPv6 bracketed,
+// port omitted meaning 443) and rejecting credentials, any path/query/
+// fragment character, hostnames, zones and IPv4-mapped literals. It explains
+// WHY a candidate origin is not acceptable instead of only that it differs.
+func parseTrustedOrigin(origin string) (netip.Addr, uint16, error) {
+	rest, ok := strings.CutPrefix(origin, "https://")
+	if !ok {
+		if strings.HasPrefix(origin, "http://") {
+			return netip.Addr{}, 0, errors.New("must use https, not http")
+		}
+		return netip.Addr{}, 0, errors.New("must start with https://")
+	}
+	if rest == "" {
+		return netip.Addr{}, 0, errors.New("has no host")
+	}
+	if strings.Contains(rest, "@") {
+		return netip.Addr{}, 0, errors.New("must not carry credentials (userinfo)")
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		return netip.Addr{}, 0, errors.New("must not carry a path, query or fragment")
+	}
+	hostStr, portStr := rest, "443"
+	if strings.HasPrefix(rest, "[") {
+		close := strings.Index(rest, "]")
+		if close < 0 {
+			return netip.Addr{}, 0, errors.New("IPv6 literal is missing its closing bracket")
+		}
+		hostStr = rest[1:close]
+		tail := rest[close+1:]
+		switch {
+		case tail == "":
+			// portless: 443
+		case strings.HasPrefix(tail, ":"):
+			portStr = tail[1:]
+		default:
+			return netip.Addr{}, 0, errors.New("has trailing characters after the IPv6 literal")
+		}
+	} else if i := strings.LastIndex(rest, ":"); i >= 0 {
+		hostStr, portStr = rest[:i], rest[i+1:]
+	}
+	addr, err := netip.ParseAddr(hostStr)
+	if err != nil {
+		return netip.Addr{}, 0, errors.New("host is not a numeric IP literal (hostnames are not accepted)")
+	}
+	if addr.Zone() != "" {
+		return netip.Addr{}, 0, errors.New("must not carry an IPv6 zone")
+	}
+	if addr.Is4In6() {
+		return netip.Addr{}, 0, errors.New("must use a plain IPv4 literal, not an IPv4-mapped IPv6 one")
+	}
+	port, err := parseCanonicalPort(portStr)
+	if err != nil {
+		return netip.Addr{}, 0, err
+	}
+	return addr, port, nil
 }
 
 // String returns a redacted description (never a secret) for logs.

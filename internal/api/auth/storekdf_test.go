@@ -1119,8 +1119,7 @@ func commentMask(src string) (string, error) {
 	return string(out), nil
 }
 
-
-	// agreeSpan is the SEC-3 mandatory raw-span/normalized-comment agreement.
+// agreeSpan is the SEC-3 mandatory raw-span/normalized-comment agreement.
 // F5 closure: ast.Comment.Text INCLUDES the "//" or "/*" … "*/" delimiters,
 // so the EXACT accepted formula subtracts NO structural overhead. The only
 // size loss is the parser folding CR bytes away. The caller passes the
@@ -1190,7 +1189,7 @@ func hasValueReceiver(fd *ast.FuncDecl, typeName string) bool {
 // unknown/unlisted production file fails the guard. The table never
 // silently defaults to a real name such as bridgeError.
 var ownErrorMembers = map[string][]string{
-	"kdf.go": {"saltSourceError"},
+	"kdf.go":      {"saltSourceError"},
 	"storekdf.go": {"bridgeError"},
 	"protect_token.go": {
 		"errBootstrapTokenClosed",
@@ -1251,8 +1250,8 @@ var functionSeamFileSet = map[string]bool{
 // (builtin or the accepted two frozen files), never a local alias to a
 // function type. Anything outside this closed list fails closed.
 var closedNonFuncIdents = map[string]bool{
-	"sync.Mutex": true, // struct type of the accepted sync import
-	"time.Time":  true, // struct type of the accepted time import
+	"sync.Mutex":    true, // struct type of the accepted sync import
+	"time.Time":     true, // struct type of the accepted time import
 	"time.Duration": true, // named numeric type (int64 underlying), never a func type
 }
 
@@ -1835,7 +1834,7 @@ func mergedRecvMethods(recvMethods map[string]map[string]bool) map[string]bool {
 // recvField records a single declared field of a local struct type: its
 // type expression (for non-function proof) and whether it is exported.
 type recvField struct {
-	typ     ast.Expr
+	typ      ast.Expr
 	exported bool
 }
 
@@ -2279,7 +2278,41 @@ func unparen(e ast.Expr) ast.Expr {
 // a zero-result callee yields ZERO slots. It returns nil when the callee is
 // not a resolvable function (selector calls, conversions) so the caller can
 // fall back to ordinary kind classification.
-func callResultSlots(fun ast.Expr, fileFuncs map[string]bool, funcResults map[string][]ast.Expr) ([]ast.Expr, bool) {
+// closedPackageCallResults is the closed set of imported-package functions
+// the three protection files legitimately call for a multi-result tuple,
+// mapped to their ACTUAL non-function result slot types. A package-qualified
+// call pkg.Fn(...) resolves a result tuple ONLY when pkg is genuinely
+// imported by this file (filePkgs) AND (pkg, Fn) is in this closed table with
+// a fixed non-function tuple. Anything else — an unlisted package function, a
+// method value, or a function-typed result — fails closed. Adding a member is
+// a contract change.
+var closedPackageCallResults = map[string]map[string][]string{
+	// crypto/rand: Read fills a slice and returns (bytesRead int, err error).
+	"rand": {"Read": {"int", "error"}},
+}
+
+// callResultSlots resolves a call target's ACTUAL result-slot types. It
+// accepts (a) a direct call of a function declared in this file (via
+// fileFuncs/funcResults) or (b) a package-qualified call pkg.Fn(...) where
+// pkg is genuinely imported and (pkg, Fn) is in the closed non-function
+// package-call table. A method value, an unlisted package function, or an
+// unresolvable target yields no slots (ok=false) so the caller fails closed.
+func callResultSlots(fun ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, funcResults map[string][]ast.Expr) ([]ast.Expr, bool) {
+	if sel, ok := unparen(fun).(*ast.SelectorExpr); ok {
+		base, ok2 := sel.X.(*ast.Ident)
+		if !ok2 || sel.Sel == nil || !filePkgs[base.Name] {
+			return nil, false
+		}
+		tup, ok3 := closedPackageCallResults[base.Name][sel.Sel.Name]
+		if !ok3 {
+			return nil, false
+		}
+		slots := make([]ast.Expr, 0, len(tup))
+		for _, tn := range tup {
+			slots = append(slots, &ast.Ident{Name: tn})
+		}
+		return slots, true
+	}
 	id, ok := unparen(fun).(*ast.Ident)
 	if !ok {
 		return nil, false
@@ -2396,7 +2429,7 @@ func classifyNonCallBinds(names []*ast.Ident, rhs ast.Expr, named map[string]ast
 // resolve non-function; a zero-result or multi-slot producer for one name
 // fails closed (exact arity).
 func classifyCallSlots1(id *ast.Ident, ce *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
-	slots, ok := callResultSlots(ce.Fun, fileFuncs, funcResults)
+	slots, ok := callResultSlots(ce.Fun, fileFuncs, filePkgs, funcResults)
 	if !ok {
 		// Not a resolvable direct function callee: classify by ordinary kind
 		// (selector/container proofs need the REAL maps).
@@ -2426,7 +2459,7 @@ func classifyCallSlots1(id *ast.Ident, ce *ast.CallExpr, named map[string]ast.Ex
 // a FRESH *ast.Ident of its OWN slot type. A zero-result or mismatched
 // producer fails closed (exact arity, no vacuous acceptance).
 func classifyCallTuple(names []*ast.Ident, ce *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
-	slots, ok := callResultSlots(ce.Fun, fileFuncs, funcResults)
+	slots, ok := callResultSlots(ce.Fun, fileFuncs, filePkgs, funcResults)
 	if !ok {
 		return fmt.Errorf("declaration right-hand is not a resolvable direct call — fail closed")
 	}
@@ -2530,10 +2563,17 @@ func bindingValueKind(rhs ast.Expr, named map[string]ast.Expr, fileFuncs map[str
 			return "unknown"
 		}
 		return "unknown"
-	case *ast.IndexExpr, *ast.IndexListExpr:
+	case *ast.IndexExpr:
 		// An index into a container (the comma-ok map lookup m.records[key],
 		// slice/array element) is a value ONLY on positive element-kind proof:
 		// the container's element type resolves non-function.
+		if containerElementNonFunc(v.X, named, typeFields) {
+			return "value"
+		}
+		return "unknown"
+	case *ast.IndexListExpr:
+		// A generic index instantiation T[...] is a value only when the
+		// instantiated container's element kind resolves non-function.
 		if containerElementNonFunc(v.X, named, typeFields) {
 			return "value"
 		}
@@ -2869,7 +2909,7 @@ func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFunc
 				}
 			}
 		}
-			for _, rhs := range st.Rhs {
+		for _, rhs := range st.Rhs {
 			if exprReachesFuncType(rhs) {
 				return fmt.Errorf("assignment of a function-typed expression")
 			}
@@ -2930,8 +2970,6 @@ func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFunc
 				return fmt.Errorf("function-typed value returned")
 			}
 		}
-	case *ast.BlockStmt:
-		return checkStmtList(st.List, named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 	case *ast.IfStmt:
 		// if-init: the init declaration must be LIVE through the body/else, so
 		// run init, body and else under ONE scope frame (popped after the whole
@@ -3022,7 +3060,7 @@ func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFunc
 		// value producer) fails closed; a direct call of a function
 		// declared in this file passes exactly as before.
 		if call, isCall := st.X.(*ast.CallExpr); isCall {
-			if err := checkCallTarget(call.Fun, named, fileFuncs, filePkgs, "expression statement"); err != nil {
+			if err := checkCallTarget(call.Fun, named, fileFuncs, filePkgs, typeFields, "expression statement"); err != nil {
 				return err
 			}
 			for _, a := range call.Args {
@@ -3036,11 +3074,11 @@ func checkStmtSc(s ast.Stmt, named map[string]ast.Expr, sc *scopeFrame, fileFunc
 			return err
 		}
 	case *ast.GoStmt:
-		if err := checkFuncCallSite(st.Call, named, fileFuncs, filePkgs, "go"); err != nil {
+		if err := checkFuncCallSite(st.Call, named, fileFuncs, filePkgs, typeFields, "go"); err != nil {
 			return err
 		}
 	case *ast.DeferStmt:
-		if err := checkFuncCallSite(st.Call, named, fileFuncs, filePkgs, "defer"); err != nil {
+		if err := checkFuncCallSite(st.Call, named, fileFuncs, filePkgs, typeFields, "defer"); err != nil {
 			return err
 		}
 	case *ast.IncDecStmt:
@@ -3114,7 +3152,7 @@ var localKindValue = &ast.CallExpr{}
 // selector name, or to an opaque value (call result, paren), or resolved
 // from the enclosing package file set to anything but a FuncDecl, fails
 // closed. Call argument expressions are literal-scanned too.
-func checkCallTarget(fn ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, what string) error {
+func checkCallTarget(fn ast.Expr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, typeFields map[string]map[string]recvField, what string) error {
 	if fn == nil {
 		return fmt.Errorf("%s call position is empty — fail closed", what)
 	}
@@ -3164,12 +3202,67 @@ func checkCallTarget(fn ast.Expr, named map[string]ast.Expr, fileFuncs map[strin
 		if ok && t.Sel != nil && filePkgs[base.Name] && closedCallSelectors[t.Sel.Name] {
 			return nil
 		}
+		// DIRECT method call on a resolved non-function RECEIVER FIELD:
+		// recv.Field.Method() parses as SelectorExpr{X: SelectorExpr{X: recv,
+		// Sel: Field}, Sel: Method}. When the inner recv.Field resolves to a
+		// struct whose field Field is a NON-FUNCTION named/qualified type that
+		// itself declares Method (e.g. l.mu.Lock() where mu sync.Mutex and
+		// sync.Mutex declares Lock), the call is an ordinary method call on a
+		// concrete non-function value — NOT a function-typed dispatch seam.
+		// This is positive resolution through the field-type method tables, so
+		// a function-typed field, a shadowed/unresolvable base, or a Method
+		// not declared on the resolved field type still fails closed.
+		if inner, isInner := t.X.(*ast.SelectorExpr); isInner && t.Sel != nil {
+			if recvBase, recvOk := inner.X.(*ast.Ident); recvOk && inner.Sel != nil {
+				if methodOnNonFuncField(recvBase.Name, inner.Sel.Name, t.Sel.Name, named, typeFields) {
+					return nil
+				}
+			}
+		}
+		// DIRECT receiver method call on a resolved non-function field:
+		// when the base is a local value (receiver/variable) whose declared
+		// type is a struct with a field named Sel of NON-FUNCTION type (e.g.
+		// l.someField used as a value), accept. (Kept for the direct-field case.)
+		if ok && t.Sel != nil && receiverHasNonFuncField(base.Name, t.Sel.Name, named, typeFields) {
+			return nil
+		}
 		return fmt.Errorf("%s call target %v is outside the closed qualified-call set — fail closed", what, t)
 	default:
 		// Call of a parenthesized expression, index, type conversion or
 		// any other form: not a direct declared-function call — fail closed.
 		return fmt.Errorf("%s call target %T is not a direct function call — fail closed", what, fn)
 	}
+}
+
+// methodOnNonFuncField proves a recv.Field.Method() call is an ordinary
+// method call on a concrete NON-FUNCTION field value (not a function-typed
+// dispatch seam). It resolves the receiver base to its named struct type,
+// looks up the field Field, and accepts ONLY when (a) that field's type is
+// positively non-function, and (b) Method is a member of the closed selector
+// call set — the accepted non-func method surface (sync.Mutex Lock/Unlock,
+// time.Time methods). A function-typed field, a shadowed/unresolvable base,
+// or a Method outside the closed set yields no proof (returns false) so the
+// caller fails closed.
+func methodOnNonFuncField(recvBase, field, method string, named map[string]ast.Expr, typeFields map[string]map[string]recvField) bool {
+	tn := declaredTypeName(recvBase, named)
+	if tn == "" {
+		return false
+	}
+	flds, ok := typeFields[tn]
+	if !ok {
+		return false
+	}
+	f, ok := flds[field]
+	if !ok {
+		return false
+	}
+	// The field's type must resolve positively non-function.
+	reaches, err := seamUnderlying(f.typ, named, map[string]bool{})
+	if err != nil || reaches {
+		return false
+	}
+	// Method must be on the closed accepted non-func method surface.
+	return closedCallSelectors[method]
 }
 
 // isGoBuiltinName recognises the predeclared callable functions.
@@ -3194,11 +3287,11 @@ var closedCallSelectors = map[string]bool{
 
 // checkFuncCallSite covers the go/defer call positions through the same
 // conservative call-target rule, and checks call arguments.
-func checkFuncCallSite(call *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, what string) error {
+func checkFuncCallSite(call *ast.CallExpr, named map[string]ast.Expr, fileFuncs map[string]bool, filePkgs map[string]bool, typeFields map[string]map[string]recvField, what string) error {
 	if call == nil {
 		return fmt.Errorf("%s statement without a call — fail closed", what)
 	}
-	if err := checkCallTarget(call.Fun, named, fileFuncs, filePkgs, what); err != nil {
+	if err := checkCallTarget(call.Fun, named, fileFuncs, filePkgs, typeFields, what); err != nil {
 		return err
 	}
 	for _, a := range call.Args {
@@ -3335,6 +3428,16 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 					if id, ok := fld.Type.(*ast.Ident); ok {
 						for _, nm := range fld.Names {
 							bind(nm.Name, id)
+						}
+					}
+					// Pointer-typed parameter m *T: bind m to the pointee named
+					// type T so a selector on m (m.mu.Lock()) resolves through
+					// T's field table exactly like a value receiver.
+					if star, ok := fld.Type.(*ast.StarExpr); ok {
+						if id, ok2 := star.X.(*ast.Ident); ok2 {
+							for _, nm := range fld.Names {
+								bind(nm.Name, id)
+							}
 						}
 					}
 				}

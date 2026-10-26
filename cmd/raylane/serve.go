@@ -1,0 +1,455 @@
+package main
+
+// The runnable control plane: `raylane serve` and `raylane bootstrap`.
+//
+// `serve` runs two listeners: the LAN management API over HTTPS (TLS is
+// mandatory — no insecure fallback) and the owner-only local control socket
+// (a Unix socket, directory 0700, socket 0600) which is the ONLY place the
+// one-time bootstrap routes exist. `bootstrap` drives the local socket as a
+// client: it requests a token and submits it, reading the admin username and
+// password only from named environment variables — never from argv, where
+// they would be visible in the process table. The one-time token is RAM-only
+// in the serving process and is invalid after a restart.
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/suchimauz/raylane/internal/api/authhttp"
+	"github.com/suchimauz/raylane/internal/store"
+)
+
+// dispatchCommands routes the runnable subcommands. ok is false when args do
+// not name one of them, so main falls through to the scaffold flag handling
+// (which keeps --version/--config behaviour and exit codes intact).
+func dispatchCommands(args []string, stdout, stderr io.Writer, getenv func(string) string) (code int, ok bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	switch args[0] {
+	case "serve":
+		return runServe(args[1:], stdout, stderr), true
+	case "bootstrap":
+		return runBootstrap(args[1:], stdout, stderr, getenv), true
+	}
+	return 0, false
+}
+
+func runServe(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		db        = fs.String("db", "", "path to the SQLite state database (required)")
+		listen    = fs.String("listen", "", "LAN HTTPS listen host:port (required)")
+		origin    = fs.String("origin", "", "exact trusted management origin, e.g. https://host:port (required)")
+		socketDir = fs.String("socket-dir", "", "owner-only directory for the local control socket (required)")
+		tlsDir    = fs.String("tls-dir", "", "directory for generated TLS material (with --tls-generate-self-signed)")
+		tlsCert   = fs.String("tls-cert", "", "TLS certificate PEM; must pair with --tls-key")
+		tlsKey    = fs.String("tls-key", "", "TLS private key PEM; must pair with --tls-cert")
+		tlsAuto   = fs.Bool("tls-generate-self-signed", false, "create the TLS material if absent (development aid)")
+		tlsFor    = fs.String("tls-generate-for", "localhost", "DNS names for the generated certificate, comma-separated")
+	)
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "Usage:\n  raylane serve --db <path> --listen <host:port> --origin <https://host:port> --socket-dir <dir> [--tls-cert <pem> --tls-key <pem> | --tls-generate-self-signed --tls-dir <dir>]\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "raylane serve: unsupported argument %q\n", fs.Arg(0))
+		fs.Usage()
+		return 2
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		fmt.Fprint(stderr, "raylane serve: --tls-cert and --tls-key must be given together\n")
+		return 2
+	}
+	certPath, keyPath := *tlsCert, *tlsKey
+	if certPath == "" {
+		if !*tlsAuto || *tlsDir == "" {
+			fmt.Fprint(stderr, "raylane serve: TLS is mandatory: pass --tls-cert/--tls-key, or --tls-generate-self-signed with --tls-dir\n")
+			return 2
+		}
+		certPath = filepath.Join(*tlsDir, "tls", "management.crt")
+		keyPath = filepath.Join(*tlsDir, "tls", "management.key")
+		if err := ensureSelfSignedTLS(certPath, keyPath, splitTrimmed(*tlsFor)); err != nil {
+			fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+			return 1
+		}
+	}
+	cfg := authhttp.Config{
+		ManagementListen: *listen,
+		TrustedOrigin:    *origin,
+		TLSCertPath:      certPath,
+		TLSKeyPath:       keyPath,
+		DBPath:           *db,
+		UnixSocketDir:    *socketDir,
+	}
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+		return 2
+	}
+	return serve(cfg, stdout, stderr)
+}
+
+// serve opens the state database, binds BOTH listeners before serving (a
+// half-bound control plane with bootstrap unreachable is refused), then runs
+// until SIGINT/SIGTERM or a listener failure, and shuts down gracefully.
+func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	db, err := store.Open(ctx, cfg.DBPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: open state database: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	srv, err := authhttp.NewServer(cfg, db)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+		return 1
+	}
+
+	lanLn, err := net.Listen("tcp", cfg.ManagementListen)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: listen %s: %v\n", cfg.ManagementListen, err)
+		return 1
+	}
+	defer lanLn.Close()
+	localLn, err := listenLocalSocket(cfg.UnixSocketDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+		return 1
+	}
+	sockPath := localLn.Addr().String()
+	defer os.Remove(sockPath)
+	defer localLn.Close()
+
+	httpsLn, err := tlsListener(lanLn, cfg.TLSCertPath, cfg.TLSKeyPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+		return 1
+	}
+
+	lanSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	localSrv := &http.Server{Handler: srv.ManagementHandler(), ReadHeaderTimeout: 10 * time.Second}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- lanSrv.Serve(httpsLn) }()
+	go func() { errCh <- localSrv.Serve(localLn) }()
+
+	fmt.Fprintf(stdout, "raylane: management https://%s origin %s; local control socket %s\n",
+		httpsLn.Addr().String(), cfg.TrustedOrigin, sockPath)
+
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(stderr, "raylane serve: listener failed: %v\n", err)
+			shutdownBoth(lanSrv, localSrv)
+			return 1
+		}
+	}
+	shutdownBoth(lanSrv, localSrv)
+	return 0
+}
+
+func shutdownBoth(lanSrv, localSrv *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lanSrv.Shutdown(ctx)
+	localSrv.Shutdown(ctx)
+}
+
+// listenLocalSocket binds the owner-only Unix control socket: the parent
+// directory is created 0700 and re-proved, a stale socket file from a dead
+// previous run is replaced, a socket that still accepts connections (a live
+// server owns it) is a hard error, and the socket is bound 0600 with the mode
+// proven by stat afterwards (a wide umask must not silently widen it).
+func listenLocalSocket(dir string) (net.Listener, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("local socket dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("local socket dir mode: %w", err)
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("local socket dir stat: %w", err)
+	}
+	if st.Mode().Perm() != 0o700 {
+		return nil, fmt.Errorf("local socket dir %s has mode %o, want 700", dir, st.Mode().Perm())
+	}
+	sockPath := filepath.Join(dir, "control.sock")
+	if err := ensureStaleSocketRemovable(sockPath); err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("local socket listen: %w", err)
+	}
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("local socket mode: %w", err)
+	}
+	st, err = os.Stat(sockPath)
+	if err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("local socket stat: %w", err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		ln.Close()
+		return nil, fmt.Errorf("local socket %s has mode %o, want 600", sockPath, st.Mode().Perm())
+	}
+	return ln, nil
+}
+
+// ensureStaleSocketRemovable refuses to displace a socket that still accepts
+// connections and clears a stale socket file whose owner is gone. A
+// non-socket file at the path is a hard error — never unlinked.
+func ensureStaleSocketRemovable(path string) error {
+	st, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("local socket stat: %w", err)
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("local socket path %s exists and is not a socket", path)
+	}
+	c, derr := net.DialTimeout("unix", path, 500*time.Millisecond)
+	if derr == nil {
+		c.Close()
+		return fmt.Errorf("another live raylane owns %s", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove stale local socket: %w", err)
+	}
+	return nil
+}
+
+func tlsListener(ln net.Listener, certPath, keyPath string) (net.Listener, error) {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS material: %w", err)
+	}
+	return tls.NewListener(ln, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}), nil
+}
+
+// runBootstrap is the local-socket bootstrap client. Credentials come only
+// from the named environment variables; the token is requested and redeemed
+// over the owner-only socket, and neither the token nor the password is ever
+// written to stdout/stderr — only the generic server problem on failure.
+func runBootstrap(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	socketDir := fs.String("socket-dir", "", "directory holding the local control socket (required)")
+	usernameEnv := fs.String("username-env", "RAYLANE_BOOTSTRAP_USERNAME", "environment variable holding the admin username")
+	passwordEnv := fs.String("password-env", "RAYLANE_BOOTSTRAP_PASSWORD", "environment variable holding the admin password")
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "Usage:\n  raylane bootstrap --socket-dir <dir>  (credentials via %s/%s environment variables)\n\nFlags:\n", *usernameEnv, *passwordEnv)
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if *socketDir == "" {
+		fmt.Fprint(stderr, "raylane bootstrap: --socket-dir is required\n")
+		return 2
+	}
+	username, password := getenv(*usernameEnv), getenv(*passwordEnv)
+	if username == "" || password == "" {
+		fmt.Fprintf(stderr, "raylane bootstrap: the admin username and password must come from the environment variables named by --username-env/--password-env (never argv)\n")
+		return 2
+	}
+	client := localSocketClient(filepath.Join(*socketDir, "control.sock"))
+	status, tokBody, err := postLocal(client, "http://unix/api/v1/bootstrap-token", `{}`)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane bootstrap: token issuance: %v\n", err)
+		return 1
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "raylane bootstrap: token issuance: HTTP %d %s\n", status, strings.TrimSpace(string(tokBody)))
+		return 1
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(tokBody, &tok); err != nil || tok.Token == "" {
+		fmt.Fprint(stderr, "raylane bootstrap: malformed token response\n")
+		return 1
+	}
+	reqBody, err := json.Marshal(map[string]string{"token": tok.Token, "username": username, "password": password})
+	if err != nil {
+		fmt.Fprint(stderr, "raylane bootstrap: encode request\n")
+		return 1
+	}
+	status, respBody, err := postLocal(client, "http://unix/api/v1/bootstrap", string(reqBody))
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane bootstrap: %v\n", err)
+		return 1
+	}
+	if status != http.StatusNoContent {
+		// The server's generic problem body is safe to print; the request is
+		// never echoed.
+		fmt.Fprintf(stderr, "raylane bootstrap: refused: HTTP %d %s\n", status, strings.TrimSpace(string(respBody)))
+		return 1
+	}
+	fmt.Fprintln(stdout, "raylane bootstrap: admin created; bootstrap is permanently closed")
+	return 0
+}
+
+func localSocketClient(sockPath string) *http.Client {
+	return &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sockPath)
+			},
+		},
+	}
+}
+
+func postLocal(client *http.Client, url, body string) (int, []byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if rerr != nil {
+		return resp.StatusCode, nil, rerr
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+// ensureSelfSignedTLS creates an ECDSA P-256 self-signed certificate with the
+// key at mode 0600 (directory 0700), ONLY if the pair is absent; an existing
+// pair is never touched. It is a development/test aid — a production
+// deployment supplies its own certificate and key.
+func ensureSelfSignedTLS(certPath, keyPath string, dnsNames []string) error {
+	certOK, keyOK := fileExists(certPath), fileExists(keyPath)
+	if certOK && keyOK {
+		return nil
+	}
+	if certOK != keyOK {
+		return fmt.Errorf("TLS material incomplete: %s and %s must exist together", certPath, keyPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		return fmt.Errorf("create TLS dir: %w", err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate TLS key: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generate serial: %w", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: dnsNames[0]},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              dnsNames,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		return fmt.Errorf("create certificate: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return fmt.Errorf("marshal TLS key: %w", err)
+	}
+	if err := writeFileMode(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		return err
+	}
+	return writeFileMode(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
+}
+
+func writeFileMode(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("chmod %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("install %s: %w", path, err)
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func splitTrimmed(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if t := strings.TrimSpace(part); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"localhost"}
+	}
+	return out
+}

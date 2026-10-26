@@ -997,6 +997,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
     delete:
       operationId: logout
       tags: [auth]
@@ -1048,6 +1050,8 @@ paths:
           $ref: "#/components/responses/Conflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /revisions/{revisionId}/apply:
     parameters:
@@ -1307,6 +1311,16 @@ components:
         minLength: 1
         maxLength: 128
         pattern: "^[A-Za-z0-9._:-]+$"
+    RetryAfter:
+      description: |
+        Integer seconds until the next attempt is permitted, computed from
+        the next token availability for this peer. Present on rate-limited
+        responses whenever it can be computed; omitted otherwise.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 86400
 
   parameters:
     RequestId:
@@ -1439,6 +1453,24 @@ components:
       headers:
         X-Request-Id:
           $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: |
+        The per-peer login attempt budget or a resource ceiling is exhausted.
+        `Retry-After` carries integer seconds until the next attempt is
+        permitted; it is omitted when the server cannot compute a value, and
+        a client must then treat the retry as unspecified rather than invent
+        a countdown. The body is the generic ErrorResponse; it never reveals
+        whether a username exists, whether the admin is bootstrapped, or how
+        close a password was.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:

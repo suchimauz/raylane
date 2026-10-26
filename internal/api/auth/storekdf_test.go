@@ -2077,6 +2077,14 @@ func declareInScope(named map[string]ast.Expr, sc *scopeFrame, name string, typ 
 // and restored at the list's lexical boundary (not bypassing the frame). A
 // type-only spec (no Values) still records the declared type.
 func declareValueSpecInScope(vs *ast.ValueSpec, named map[string]ast.Expr, sc *scopeFrame, fileFuncs map[string]bool, filePkgs map[string]bool, methods map[string]bool, typeFields map[string]map[string]recvField, funcResults map[string][]ast.Expr) error {
+	// A body-declared variable whose declared type is function-typed
+	// (var f func()) is a seam at DECLARATION, even with no initialiser and
+	// no continued use — reject before recording any binding.
+	for _, nm := range vs.Names {
+		if err := checkSeamExpr(vs.Type, named, "declared variable "+nm.Name); err != nil {
+			return err
+		}
+	}
 	if ts, ok := vs.Type.(*ast.Ident); ok {
 		for _, nm := range vs.Names {
 			if nm.Name != "_" {
@@ -2210,6 +2218,16 @@ func checkPairwiseBindingClassifies(names []*ast.Ident, values []ast.Expr, named
 		// the actual producer arity and bind each name its OWN slot type.
 		if classifyNonCallBinds(names, values[0], named, typeFields) {
 			return nil
+		}
+		// A MULTI-NAME bind against a non-call index (slice/array/pointer) is
+		// NOT a valid comma-ok — those containers are single-result. Proving the
+		// element kind is non-function does not make a 2-name slice index legal,
+		// so it must FAIL CLOSED here rather than fall through to a value-kind
+		// acceptance that would invent a second slot.
+		if len(names) > 1 {
+			if _, isIdx := unparen(values[0]).(*ast.IndexExpr); isIdx {
+				return fmt.Errorf("declaration binds %d names to a single-result container index — not a valid comma-ok, fail closed", len(names))
+			}
 		}
 		kind := bindingValueKind(values[0], named, fileFuncs, filePkgs, methods, typeFields, funcResults)
 		if kind == "func" {
@@ -3438,6 +3456,20 @@ func checkDecls(decls []ast.Decl, named map[string]ast.Expr, fileFuncs map[strin
 							for _, nm := range fld.Names {
 								bind(nm.Name, id)
 							}
+						}
+					}
+					// Composite-typed parameter (m map[K]V, s []T): bind m to the
+					// composite type expression itself so an index into m resolves
+					// the container's element type (C4 map/slice index proofs).
+					if compOk := func() bool {
+						switch fld.Type.(type) {
+						case *ast.MapType, *ast.ArrayType:
+							return true
+						}
+						return false
+					}(); compOk {
+						for _, nm := range fld.Names {
+							bind(nm.Name, fld.Type)
 						}
 					}
 				}

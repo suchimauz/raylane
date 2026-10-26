@@ -978,6 +978,11 @@ paths:
         per-field oracle. Session policy (D5/A04): idle 900 seconds
         (polling and reads do not extend it), absolute 43200 seconds,
         re-login required after a control-plane restart.
+
+        Login requires a same-origin `Origin` header (login-CSRF): a missing,
+        `null`, duplicate or foreign Origin is rejected with 403
+        `csrf_rejected` BEFORE any credential check, with a generic body that
+        never echoes the received origin.
       security: []
       requestBody:
         required: true
@@ -995,6 +1000,8 @@ paths:
           $ref: "#/components/responses/InvalidJson"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "429":
@@ -1004,8 +1011,12 @@ paths:
       tags: [auth]
       summary: Log out and revoke the current session.
       description: |
-        Revokes the current session and its confirmation tokens. The
-        response is idempotent.
+        Revokes the current session and expires the session cookie
+        (`Max-Age=0`, empty value, the SAME attributes). Ordering on DELETE:
+        a bad Origin is rejected with 403 `csrf_rejected` FIRST (before any
+        session check); with no valid session the response is 401; with a
+        valid session the session is revoked and the response is 204
+        (idempotent — a repeat logout has no valid session and is 401).
       security:
         - sessionCookie: []
       responses:
@@ -1016,6 +1027,8 @@ paths:
               $ref: "#/components/headers/XRequestId"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /bootstrap:
     post:
@@ -1265,30 +1278,39 @@ components:
       in: cookie
       name: raylane_session
       description: |
-        **Placeholder only.** The cookie name, the session mechanics, the
-        bootstrap path and the CSRF scheme are part of the A04 session-policy
-        decision, which is partially accepted and otherwise open. This
-        security scheme documents that the operations require an authenticated
-        administrator session; it does **not** specify how that session is
-        established, how it is protected or how CSRF is enforced. See gaps
-        G-01, G-02 and G-03 in the companion document.
+        Authenticated administrator session. The cookie carries an opaque
+        32-byte CSPRNG token (base64url, no padding). Only the SHA-256 digest
+        of the token is retained server-side; the token itself never appears
+        in a body, query, URL, log or audit record.
 
-        The session-policy decision is INDEPENDENT of the backup A/B choice:
-        G-01..G-03 depend only on the session part of A04, while G-04..G-06
-        depend only on backup/restore/GC. The partial acceptance therefore
-        lets the session work proceed separately from the backup work.
+        Cookie attributes (settled policy): `Secure`, `HttpOnly`,
+        `SameSite=Strict`, host-only (no `Domain` attribute), `Path=/api/v1`.
+        The cookie is a session cookie with no explicit `Max-Age` on login;
+        logout expires it with `Max-Age=0`, an empty value and the SAME
+        attributes.
 
-        The following session values are USER-ACCEPTED and are recorded here
-        as the policy the implementation must honour. They do not by
-        themselves make the session implementation ready:
-          * idle timeout 15 minutes (900 s); polling and reads do NOT extend
-            the idle deadline, and neither does a long edit without saving;
-          * absolute lifetime 12 hours (43 200 s), regardless of activity;
-          * after a control-plane restart, re-login is required.
+        Session policy (settled): login always creates a NEW session; there is
+        NO rotation on ordinary activity. Idle timeout 900 s (polling and
+        reads do NOT extend the idle deadline); absolute lifetime 43 200 s
+        regardless of activity; re-login is required after a control-plane
+        restart (sessions are RAM-only and do not survive it).
 
-        The exact activity allowlist, the limiter constants and the
-        enforcement details remain PROPOSED and are not turned into
-        defaults here.
+        CSRF (settled): unsafe methods (POST/PUT/PATCH/DELETE) require a
+        present `Origin` header that EXACTLY equals the configured management
+        origin. Missing, `null`, duplicate or any foreign Origin is rejected
+        with 403 `csrf_rejected` before any session validation; the trusted
+        origin is never derived from Host, `X-Forwarded-Host`,
+        `X-Forwarded-Proto` or Referer. Login additionally requires a
+        same-origin Origin (login-CSRF). There is no synchronizer
+        token/header/cookie/endpoint.
+
+        Auth tri-state for clients: a `200` on `GET /state` means
+        authenticated; a `401` means NOT authenticated (the only auth-negative
+        signal, identical for missing/wrong credentials); any transport
+        failure, timeout, TLS error or 5xx means auth state is UNKNOWN and
+        must not be rendered as "session expired".
+
+        This closes gaps G-01, G-02 and G-03.
 
         **UX condition on the accepted expiry:** loss of UNSAVED edits is
         not permitted. Before any UI is built, a mechanism for preserving and

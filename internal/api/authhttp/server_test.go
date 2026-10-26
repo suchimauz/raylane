@@ -396,6 +396,41 @@ func TestT008LimiterBoundaryAndRetryAfter(t *testing.T) {
 	}
 }
 
+// TestT008GlobalArgon2CeilingSpansAllKDFPaths: the global max-2 ceiling is
+// held on EVERY path that spends KDF cost — no-admin (dummy burn), wrong
+// username (dummy burn) and wrong password (real verify) — so a burst cannot
+// pile up KDF work through ANY of them. Two in-flight hold the ceiling; a
+// third concurrent attempt on a DIFFERENT path fails fast (429, no queue).
+func TestT008GlobalArgon2CeilingSpansAllKDFPaths(t *testing.T) {
+	srv, h := newTestServer(t, "")
+	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
+
+	// Occupy both global Argon2 slots directly (a held slot models an in-flight
+	// KDF on any path), then prove a third concurrent attempt is refused fast.
+	srv.limiter.argon2 <- struct{}{}
+	srv.limiter.argon2 <- struct{}{}
+	resp := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"admin","password":"x"}`, func(r *http.Request) {
+		r.RemoteAddr = "198.51.100.11:1" // fresh peer, bucket has tokens
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("third concurrent KDF attempt status = %d, want 429 (global ceiling)", resp.StatusCode)
+	}
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		t.Fatalf("global-ceiling attempt fabricated Retry-After %q (not computable)", v)
+	}
+	// Drain and the next attempt is admitted again.
+	<-srv.limiter.argon2
+	<-srv.limiter.argon2
+	resp2 := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"nope","password":"x"}`, func(r *http.Request) {
+		r.RemoteAddr = "198.51.100.12:1"
+	})
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-drain attempt status = %d, want 401 (ceiling released)", resp2.StatusCode)
+	}
+}
+
 // TestT008StateTruthfulBody: the body conforms to RuntimeState (no extra
 // fields) and the readiness posture is truthful.
 func TestT008StateTruthfulBody(t *testing.T) {

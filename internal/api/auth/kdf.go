@@ -145,6 +145,31 @@ func verifyPassword(password []byte, v verifierInput) bool {
 	return subtle.ConstantTimeCompare(derived[:], rec.derivedKey[:]) == 1
 }
 
+// burnConstantCost runs a FIXED-COST Argon2id derivation on internal dummy
+// material (never caller input) so that a path which reaches no real KDF
+// still spends the same wall-clock time as a real password verification.
+// This closes the timing oracle between "no admin exists", "wrong username"
+// and "wrong password": all three take comparable time, so an anonymous
+// caller cannot distinguish existence or username-correctness by measuring
+// the response.
+//
+// The derivation goes through deriveFor — the SINGLE guarded Argon2id call
+// site (K-11) — with a frozen all-constant dummy record, so it is a pure time
+// cost with no observable output and no second KDF call site.
+func burnConstantCost() {
+	rec := adminVerifierRecord{
+		formatVersion: formatVersion,
+		argon2Version: argon2Version,
+		timeCost:      timeCost,
+		memoryKiB:     memoryKiB,
+		parallelism:   parallelism,
+	}
+	// dummy password/salt: fixed length, fixed (zero) content — NOT caller
+	// input — so the cost is independent of anything the caller supplied.
+	var dummyPassword [8]byte
+	_, _ = deriveFor(rec, dummyPassword[:])
+}
+
 // fillSalt writes saltBytes random bytes into dst using the given source.
 // Production binds read to crypto/rand.Read directly at exactly one call
 // site (newVerifierRecord). Every failure — the reader's own error or a

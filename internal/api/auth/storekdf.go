@@ -156,6 +156,9 @@ func verifyAdminIdentity(ctx context.Context, s *store.Store, creds Credentials)
 		if errors.Is(err, domain.ErrNotFound) {
 			// No well-formed identity (including a v3 row without username) is
 			// the SAME generic-mismatch category as a wrong username or password.
+			// Spend the fixed KDF cost so "no admin" is not faster than "admin
+			// exists", closing the existence timing oracle.
+			burnConstantCost()
 			return false, nil
 		}
 		return false, bridgeError{kind: bridgeErrStorage}
@@ -165,6 +168,9 @@ func verifyAdminIdentity(ctx context.Context, s *store.Store, creds Credentials)
 	// does not shortcut on the first differing byte any more than the password
 	// check does.
 	if subtle.ConstantTimeCompare(id.Username, creds.Username) != 1 {
+		// Wrong username: spend the same fixed KDF cost as a real password
+		// verification so username-correctness is not revealed by timing.
+		burnConstantCost()
 		return false, nil
 	}
 	in, ok := storeVerifierInput(id.Verifier)

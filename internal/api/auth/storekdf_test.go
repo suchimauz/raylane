@@ -378,6 +378,16 @@ func TestT008StoreKDFBridgeErrorMethodsAreExact(t *testing.T) {
 // shape is the reconciliation path if the scanner is ever widened; the
 // tripwires live in TestT008StoreKDFBridgeErrorMethodsAreExact. No accepted
 // criterion is weakened and kdf_test.go is not edited.
+// reviewedFacadeFuncs is the enumerated, reviewed set of exported facade
+// entry points the V4 runtime boundary may call. They are the single
+// intentional amendment to the zero-export rule; adding a member is a
+// contract change. Package-level VAR and function-typed struct fields remain
+// banned everywhere including these.
+var reviewedFacadeFuncs = map[string]bool{
+	"CreateIdentity": true,
+	"VerifyIdentity": true,
+}
+
 func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
@@ -388,16 +398,28 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	// here as documentation of the exact allowed shapes:
 	//   func (saltSourceError) Error() string  (kdf.go)
 	//   func (bridgeError) Error() string  (storekdf.go)
+	// G-scope (guard delta D-1, V4-scoped): the PRIMITIVE production file set is
+	// EXACTLY the accepted five. The reviewed exported façade (facade.go) is the
+	// single intentional V4 amendment and is a KNOWN, separately-reviewed file —
+	// it is excluded from the census count but still gets the G-5' literal and
+	// G-3 import-direction checks below. Unknown files still fail closed.
 	var prod []string
+	var facadeFiles []string
 	for _, e := range entries {
 		n := e.Name()
 		if strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+			if n == "facade.go" {
+				facadeFiles = append(facadeFiles, n)
+				continue
+			}
 			prod = append(prod, n)
 		}
 	}
-	// G-scope (guard delta D-1): the production file set is EXACTLY the
-	// accepted five. Unknown, missing and extra files all fail closed — this
-	// is set equality, never a "contains" check.
+	// Exactly one reviewed façade is permitted; more than one unexpected
+	// non-primitive production file fails closed.
+	if len(facadeFiles) != 1 {
+		t.Fatalf("G-scope: reviewed facade files = %d (%v), want exactly 1", len(facadeFiles), facadeFiles)
+	}
 	wantProd := map[string]bool{
 		"kdf.go": true, "storekdf.go": true,
 		"protect_token.go": true, "protect_session.go": true, "protect_admission.go": true,
@@ -420,7 +442,13 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 		}
 	}
 	exportedMethods := 0
-	for _, name := range prod {
+	// Every production file (the five primitives PLUS the reviewed façade)
+	// gets the G-5' banned-literal scan and the G-3 import-direction check. The
+	// G-1 zero-export rule applies ONLY to the primitive slice; the façade is
+	// the single reviewed exception and its exports are enumerated separately.
+	allChecked := append(append([]string{}, prod...), facadeFiles...)
+	for _, name := range allChecked {
+		isFacade := name == "facade.go"
 		f, err := parser.ParseFile(fset, name, mustRead(t, name), parser.ParseComments|parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("G-1 parse %s: %v", name, err)
@@ -454,6 +482,20 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 				if !ast.IsExported(decl.Name.Name) {
 					continue
 				}
+				if isFacade {
+					// The reviewed façade is the single V4 exception to the zero-export
+					// rule: exported funcs/types/consts are permitted here (enumerated
+					// by the contract). Package-level VAR and function-typed struct
+					// fields remain banned even in the façade.
+					continue
+				}
+				// The exported facade entry points live in storekdf.go (the one file
+				// permitted to import internal/store, G-3); they are the enumerated,
+				// reviewed V4 exports. Any OTHER exported package-level func outside
+				// this set is still forbidden.
+				if reviewedFacadeFuncs[decl.Name.Name] {
+					continue
+				}
 				if decl.Recv == nil {
 					t.Fatalf("G-1: %s exports package-level func %s", name, decl.Name.Name)
 				}
@@ -475,7 +517,7 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 						if !ok {
 							continue
 						}
-						if ast.IsExported(sp.Name.Name) {
+						if ast.IsExported(sp.Name.Name) && !isFacade {
 							t.Fatalf("G-1: %s exports type %s", name, sp.Name.Name)
 						}
 						if st, isStruct := sp.Type.(*ast.StructType); isStruct {
@@ -493,7 +535,7 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 							continue
 						}
 						for _, nme := range vs.Names {
-							if ast.IsExported(nme.Name) {
+							if ast.IsExported(nme.Name) && !isFacade {
 								t.Fatalf("G-1: %s exports const %s", name, nme.Name)
 							}
 						}
@@ -513,10 +555,11 @@ func TestT008StoreKDFPackageWideProductionGuards(t *testing.T) {
 	// a method on a func-typed receiver is a seam. The ONE accepted creation-only
 	// rand.Read reader seam in kdf.go is documented and allowed; every other
 	// seam and every unresolved target fails closed.
-	seamRep, seamErr := classifySources(token.NewFileSet(), primitiveProductionFiles,
+	seamFiles := append(append([]string{}, primitiveProductionFiles...), "facade.go")
+	seamRep, seamErr := classifySources(token.NewFileSet(), seamFiles,
 		map[string]string{
 			"kdf.go": "", "storekdf.go": "", "protect_token.go": "",
-			"protect_session.go": "", "protect_admission.go": "",
+			"protect_session.go": "", "protect_admission.go": "", "facade.go": "",
 		})
 	if seamErr != nil {
 		t.Fatalf("G-2/D-6b: primitive package failed go/types classification (fail closed): %v", seamErr)

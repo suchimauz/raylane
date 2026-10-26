@@ -35,6 +35,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 
 	"github.com/suchimauz/raylane/internal/domain"
@@ -129,6 +130,68 @@ func storeVerifierRecord(r adminVerifierRecord) store.AdminVerifier {
 		Salt:          append([]byte(nil), r.salt[:]...),
 		DerivedKey:    append([]byte(nil), r.derivedKey[:]...),
 	}
+}
+
+// CreateIdentity derives the Argon2id verifier from password and atomically
+// persists username + verifier + the permanent bootstrap closure through the
+// ONE accepted V4 store call. It is the exported facade creation entry (the
+// single reviewed export, documented in facade.go); on any failure it
+// persists nothing. A caller must first prove ValidUsername(username) and
+// ValidPassword(password).
+func CreateIdentity(ctx context.Context, s *store.Store, username, password []byte) error {
+	return createAdminIdentity(ctx, s, username, password)
+}
+
+// VerifyIdentity reports whether the supplied credentials match the persisted
+// admin identity. Missing identity, wrong username and wrong password are ALL
+// false (the generic mismatch category), so no existence oracle is exposed.
+// It is the exported facade verification entry.
+func VerifyIdentity(ctx context.Context, s *store.Store, creds Credentials) (bool, error) {
+	return verifyAdminIdentity(ctx, s, creds)
+}
+
+func verifyAdminIdentity(ctx context.Context, s *store.Store, creds Credentials) (bool, error) {
+	id, err := s.AdminIdentity(ctx)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			// No well-formed identity (including a v3 row without username) is
+			// the SAME generic-mismatch category as a wrong username or password.
+			return false, nil
+		}
+		return false, bridgeError{kind: bridgeErrStorage}
+	}
+	// Exact-byte username comparison: a wrong username is the generic mismatch
+	// category. subtle is used for the byte comparison so the username check
+	// does not shortcut on the first differing byte any more than the password
+	// check does.
+	if subtle.ConstantTimeCompare(id.Username, creds.Username) != 1 {
+		return false, nil
+	}
+	in, ok := storeVerifierInput(id.Verifier)
+	if !ok {
+		// Defense in depth: the K1-style read already validated; an invalid
+		// adapter value is the same generic-mismatch category.
+		return false, nil
+	}
+	return verifyPassword(creds.Password, in), nil
+}
+
+// createAdminIdentity derives a fresh verifier for password and atomically
+// persists username + verifier + the permanent bootstrap closure through the
+// ONE accepted V4 store call. Control flow mirrors createAdminVerifier:
+// derive FIRST (any failure makes no store call), then persist through the
+// single atomic CreateAdminIdentityAndConsumeBootstrap so no partial state is
+// ever observable.
+func createAdminIdentity(ctx context.Context, s *store.Store, username, password []byte) error {
+	rec, ok, err := newVerifierRecord(password)
+	if !ok {
+		_ = err
+		return bridgeError{kind: bridgeErrCreation}
+	}
+	if err := s.CreateAdminIdentityAndConsumeBootstrap(ctx, username, storeVerifierRecord(rec)); err != nil {
+		return bridgeError{kind: bridgeErrStorage}
+	}
+	return nil
 }
 
 // createAdminVerifier derives a fresh verifier for password and persists it

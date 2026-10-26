@@ -549,14 +549,16 @@ async function testPhase() {
         up.off('request', boundListener);
 
         // Server-side proof of the SEPARATE 4096-byte bound over the SAME
-        // real HTTPS origin at the EXACT boundary: grow an ASCII password
-        // byte-by-byte (length measured with TextEncoder, exactly like the
-        // client) until the serialized body crosses 4096. The last in-bound
-        // body must answer 401 (size accepted, auth negative — never 413);
-        // the first over-bound body must answer 413 on bytes alone, with
-        // BOTH fields still inside their codepoint bounds.
+        // real HTTPS origin at the EXACT boundary, with BOTH fields inside
+        // their codepoint bounds (the field-legal shape): a tiny 3-codepoint
+        // astral username plus an astral password, binary-searching the
+        // astral password count so the serialized body crosses 4096 while the
+        // username (3 ≤ 256) and password (N ≤ 1024) both stay legal. The last
+        // in-bound body must answer 401 (size accepted, auth negative — never
+        // 413); the first over-bound body must answer 413 on bytes alone.
         const boundary = await up.evaluate(async () => {
           const enc = new TextEncoder();
+          const A = '\u{1F600}';
           const mk = async (u, p) => {
             const body = JSON.stringify({ username: u, password: p });
             const r = await fetch('/api/v1/session', {
@@ -565,26 +567,27 @@ async function testPhase() {
             });
             return [r.status, enc.encode(body).length];
           };
-          const user = '\u{1F600}'.repeat(256);
-          // Binary search the largest ASCII password whose body is ≤ 4096.
-          let lo = 1, hi = 4200;
-          const size = (n) => enc.encode(JSON.stringify({ username: user, password: 'x'.repeat(n) })).length;
+          const user = A.repeat(3); // 3 codepoints (≤ 256), 12 UTF-8 bytes
+          const size = (n) => enc.encode(JSON.stringify({ username: user, password: A.repeat(n) })).length;
+          // Binary search the largest astral-password count whose body is ≤ 4096.
+          let lo = 1, hi = 1024;
           while (lo < hi) {
             const mid = Math.ceil((lo + hi) / 2);
             if (size(mid) <= 4096) lo = mid; else hi = mid - 1;
           }
           return {
-            in: await mk(user, 'x'.repeat(lo)),
-            out: await mk(user, 'x'.repeat(lo + 1)),
+            in: await mk(user, A.repeat(lo)),
+            out: await mk(user, A.repeat(lo + 1)),
+            inCp: lo, outCp: lo + 1,
             inSize: size(lo), outSize: size(lo + 1),
           };
         });
-        check('F4: server accepts a body of exactly the bound (401, not 413) — both fields in codepoint bounds',
-          boundary.in[0] === 401 && boundary.in[1] <= 4096 && boundary.in[1] > 4096 - 2,
-          `status=${boundary.in[0]} bytes=${boundary.in[1]}`);
-        check('F4: server rejects one byte over the bound with 413 while both fields stay in their codepoint bounds',
-          boundary.out[0] === 413 && boundary.out[1] === boundary.in[1] + 1,
-          `status=${boundary.out[0]} bytes=${boundary.out[1]}`);
+        check('F4: server accepts a body of exactly the bound (401, not 413) — BOTH fields in codepoint bounds',
+          boundary.in[0] === 401 && boundary.in[1] <= 4096 && boundary.in[1] > 4096 - 5 && boundary.inCp <= 1024,
+          `status=${boundary.in[0]} bytes=${boundary.in[1]} passwordCp=${boundary.inCp}`);
+        check('F4: server rejects one step over the bound with 413 while BOTH fields stay in their codepoint bounds',
+          boundary.out[0] === 413 && boundary.out[1] > 4096 && boundary.outCp <= 1024,
+          `status=${boundary.out[0]} bytes=${boundary.out[1]} passwordCp=${boundary.outCp}`);
 
         // 1025-codepoint password PAST its own codepoint bound (1..1024) must
         // be explicitly rejected by the client without mutation — a distinct
@@ -661,6 +664,90 @@ async function testPhase() {
         await h4.stop();
       }
 
+      // ---- F5 residual: malformed generation evidence -> UNKNOWN retained ----
+      // Through the REAL api.ts probeState path: the /state payload carries an
+      // out-of-range activeGeneration (-1, 1.5, 2**60). The page must treat the
+      // WHOLE state as untrusted (retained snapshot + Retry), NOT render -1.
+      console.log('\n[F5-residual] malformed activeGeneration -> UNKNOWN');
+      const h5 = await ServerHarness.start({ bin: TEST_BIN });
+      h5.bootstrapAdmin(USER, PASS);
+      try {
+        nssTrustCa(taskHome, h5.mat.caPem);
+        const gp = await freshPage(ctx, consoleErrors, failedReqs);
+        await gp.goto(h5.url('/'), { waitUntil: 'load', timeout: 20000 });
+        await gp.waitForSelector('#login-heading', { timeout: 10000 });
+        await loginAs(gp);
+        await gp.waitForSelector('[data-testid="status-refresh"]', { timeout: 8000 });
+        for (const bad of [-1, 1.5, 2 ** 60]) {
+          // Intercept the real same-origin GET /state and answer with a
+          // malformed-generation payload, so the REAL probeState validation
+          // (not the test hook) is what rejects it.
+          await gp.route('**/api/v1/state', (route) => {
+            route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({
+                phase: 'running',
+                readiness: { management: true, dns: true, engine: true, classification: true },
+                activeGeneration: bad,
+              }),
+            });
+          });
+          await gp.click('[data-testid="status-refresh"]');
+          // Malformed evidence => UNKNOWN: the honest "Connection problem"
+          // view with a Retry, NEVER a numeric -1/1.5 row.
+          await gp.waitForSelector('h1:has-text("Connection problem")', { timeout: 8000 });
+          await gp.waitForTimeout(200);
+          const genText = await gp.evaluate(() =>
+            document.querySelector('[data-testid="status-generation"]')?.textContent,
+          );
+          const showsUnknown = await gp.evaluate(() => /connection problem/i.test(document.body.textContent || ''));
+          check(`F5: generation ${bad} not rendered (UNKNOWN retained)`, genText !== String(bad), `genText=${genText}`);
+          check(`F5: malformed generation ${bad} surfaces UNKNOWN + Retry`, showsUnknown, `genText=${genText}`);
+          await gp.unroute('**/api/v1/state');
+          // Restore a healthy signed-in state for the next iteration: the
+          // unknown view's Retry re-reads the REAL (unrouted) /state.
+          await gp.click('#main button:has-text("Retry")');
+          await gp.waitForSelector('[data-testid="status-refresh"]', { timeout: 8000 });
+        }
+        await gp.close();
+      } finally {
+        await h5.stop();
+      }
+
+      // ---- F6 residual: generic 401 error associated with the recovery target ----
+      console.log('\n[F6-residual] generic 401 error association');
+      const h6 = await ServerHarness.start({ bin: TEST_BIN });
+      h6.bootstrapAdmin(USER, PASS);
+      try {
+        nssTrustCa(taskHome, h6.mat.caPem);
+        const fp = await freshPage(ctx, consoleErrors, failedReqs);
+        await fp.goto(h6.url('/'), { waitUntil: 'load', timeout: 20000 });
+        await fp.waitForSelector('#login-heading', { timeout: 10000 });
+        await fp.fill('#username', USER);
+        await fp.fill('#password', 'wrong password');
+        await fp.click('button[type=submit]');
+        await fp.waitForSelector('.field__error', { timeout: 8000 });
+        await fp.waitForTimeout(150);
+        const assoc = await fp.evaluate(() => {
+          const u = document.getElementById('username');
+          const err = document.getElementById('login-error');
+          return {
+            focus: document.activeElement?.id,
+            usernameDescribedBy: u?.getAttribute('aria-describedby'),
+            errorRole: err?.getAttribute('role'),
+            errorId: err?.id,
+            associated: !!u?.getAttribute('aria-describedby')?.split(/\s+/).includes('login-error'),
+          };
+        });
+        check('F6: focus on username after generic 401', assoc.focus === 'username', assoc.focus);
+        check('F6: username associated with the error (aria-describedby)', assoc.associated, JSON.stringify(assoc));
+        check('F6: error exposed as role=alert', assoc.errorRole === 'alert', assoc.errorRole);
+        await fp.close();
+      } finally {
+        await h6.stop();
+      }
+
       // ---- F7: dirty sign-out modal semantics ----
       console.log('\n[F7] Dirty sign-out modal');
       const h3 = await ServerHarness.start({ bin: TEST_BIN });
@@ -678,13 +765,80 @@ async function testPhase() {
         await p.waitForSelector('[role=dialog]', { timeout: 8000 });
         check('F7: dialog opens', true);
         check('F7: initial focus on Stay (safe action)', await p.evaluate(() => document.activeElement?.textContent?.trim() === 'Stay'));
-        // Tab containment: cycle within the two actions only.
+        // Native modal Tab order: Stay -> Discard -> (brief body) -> Stay …
+        // Focus is TRAPPED in the dialog: it never reaches a background control.
         await p.keyboard.press('Tab');
         const afterTab = await p.evaluate(() => document.activeElement?.textContent?.trim());
         check('F7: Tab moves to Discard', afterTab === 'Discard and sign out', String(afterTab));
-        await p.keyboard.press('Tab');
-        const afterTab2 = await p.evaluate(() => document.activeElement?.textContent?.trim());
-        check('F7: Tab wraps back to Stay (contained)', afterTab2 === 'Stay', String(afterTab2));
+        // The F7 residual: the background must be GENUINELY inert/AX-excluded,
+        // enforced natively by <dialog>.showModal() (top layer). Two proofs:
+        // (a) a controlled programmatic focus onto a background control is
+        //     REFUSED — focus stays in the dialog (the old div-modal defect);
+        // (b) keyboard Tab cycling from the last dialog control cannot reach a
+        //     background control.
+        const inertProbe = await p.evaluate(() => {
+          const dlg = document.querySelector('dialog[open]');
+          const bg = [...document.querySelectorAll('button')].find((b) => !dlg.contains(b));
+          if (!bg) return { ok: false, why: 'no background button found' };
+          bg.focus(); // programmatic; the inert background must refuse
+          return {
+            ok: dlg.contains(document.activeElement),
+            active: document.activeElement?.textContent?.trim()?.slice(0, 24) || document.activeElement?.tagName,
+            bgText: bg.textContent?.trim(),
+          };
+        });
+        check('F7: controlled background focus refused (inert)', inertProbe.ok, JSON.stringify(inertProbe));
+        // Keyboard containment: with focus on the LAST dialog action, Tab must
+        // wrap into the dialog (or its backdrop), NEVER onto a background
+        // control. Cycle several Tab presses and assert focus never escapes.
+        let escaped = false;
+        await p.evaluate(() => {
+          const dlg = document.querySelector('dialog[open]');
+          const acts = [...dlg.querySelectorAll('button')];
+          acts[acts.length - 1].focus(); // Discard (last action)
+        });
+        for (let i = 0; i < 6; i++) {
+          await p.keyboard.press('Tab');
+          // "Escaped" means focus landed on an actual BACKGROUND INTERACTIVE
+          // control (a button/input/link outside the dialog). The native wrap
+          // may momentarily visit <body> (not a control) — that is contained,
+          // not an escape.
+          const onBgControl = await p.evaluate(() => {
+            const dlg = document.querySelector('dialog[open]');
+            const a = document.activeElement;
+            if (!a || a === document.body) return false;
+            return !dlg.contains(a);
+          });
+          if (onBgControl) { escaped = true; break; }
+        }
+        check('F7: Tab cycling never reaches a background control (contained)', !escaped);
+        // Enter must NOT issue a background /state GET while the modal is open.
+        // Refocus the SAFE action (Stay) first so Enter cannot trigger Discard,
+        // then verify a forced-background-focus + Enter neither GETs /state nor
+        // closes the modal (the F7 "Enter issues GET while open" defect).
+        let bgGets = 0;
+        const onReq = (r) => { if (r.method() === 'GET' && r.url().includes('/api/v1/state')) bgGets++; };
+        p.on('request', onReq);
+        await p.evaluate(() => {
+          const dlg = document.querySelector('dialog[open]');
+          dlg.querySelector('button').focus(); // Stay (safe action)
+          const bg = [...document.querySelectorAll('button')].find((b) => !dlg.contains(b));
+          if (bg) bg.focus(); // try to force focus onto the inert background
+        });
+        await p.keyboard.press('Enter');
+        await p.waitForTimeout(150);
+        p.off('request', onReq);
+        check('F7: Enter does not issue a background /state GET while modal open', bgGets === 0, `bgGets=${bgGets}`);
+        // Note: focus stayed on the Stay action (the forced background focus
+        // was refused), so Enter legitimately chose Stay and closed the modal —
+        // correct, not a defect. The residual closed is that Enter can never
+        // activate a BACKGROUND control (no background GET, no side effect).
+        // Re-open the dialog so the dedicated Escape/Stay semantics below are
+        // exercised against a live modal.
+        if ((await p.$('dialog[open]')) === null) {
+          await p.click('header button:has-text("Sign out")');
+          await p.waitForSelector('[role=dialog]', { timeout: 8000 });
+        }
         // Escape == Stay: no DELETE, RAM preserved, focus returns to invoker.
         let deletes = 0;
         p.on('request', (r) => { if (r.method() === 'DELETE') deletes++; });

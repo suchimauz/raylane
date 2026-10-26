@@ -316,22 +316,28 @@ body {
   left: 0;
 }
 
-.dialog__backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-4);
+.dialog {
+  /* Native <dialog> shown with showModal(): borderless, no default margin,
+     laid out by flex inside the centered backdrop. */
+  border: none;
+  margin: auto;
+  padding: 0;
+  background: transparent;
+  max-width: 24rem;
+  width: 100%;
 }
 
-.dialog {
+/* The native modal backdrop: a dimmed overlay that also blocks pointer access
+   to the (now inert) background. */
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* The dialog panel body (a plain div inside the native <dialog>). */
+.dialog__body {
   background: var(--surface-page);
   border-radius: var(--radius);
   padding: var(--space-6);
-  max-width: 24rem;
-  width: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

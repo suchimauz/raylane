@@ -123,8 +123,19 @@ func referencedAssets(fsys fs.FS) (map[string]struct{}, error) {
 		if err != nil {
 			return fmt.Errorf("frontend bundle invalid: manifest references an unsafe asset path %q: %w", rel, err)
 		}
-		if _, err := fs.Stat(fsys, "assets/"+name); err != nil {
+		// Wrong-kind entries are rejected BEFORE the bundle is accepted: a
+		// directory (or any non-regular special file) at a manifest-declared
+		// asset path is an incomplete/corrupt bundle, not a servable artifact.
+		// fs.Stat alone is not sufficient — it succeeds on a directory. We
+		// check the file kind here, up front, so a wrong-kind entry fails
+		// closed at startup without ever being opened (a pipe/device would
+		// otherwise block or misbehave on read).
+		info, err := fs.Stat(fsys, "assets/"+name)
+		if err != nil {
 			return fmt.Errorf("frontend bundle incomplete: missing referenced asset assets/%s; run `npm --prefix web run build`", name)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("frontend bundle invalid: referenced asset assets/%s is a %s, not a regular file; run `npm --prefix web run build`", name, fileKind(info.Mode()))
 		}
 		assets[name] = struct{}{}
 		return nil
@@ -142,10 +153,36 @@ func referencedAssets(fsys fs.FS) (map[string]struct{}, error) {
 	if len(assets) == 0 {
 		return nil, errors.New("frontend bundle invalid: build manifest declares no assets; run `npm --prefix web run build`")
 	}
-	if _, err := fs.Stat(fsys, "index.html"); err != nil {
+	// index.html must be present AND a regular file: a directory (or special
+	// file) at the shell path is a corrupt bundle, rejected fail-closed before
+	// any request is served.
+	info, err := fs.Stat(fsys, "index.html")
+	if err != nil {
 		return nil, errors.New("frontend bundle incomplete: missing index.html; run `npm --prefix web run build`")
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("frontend bundle invalid: index.html is a %s, not a regular file; run `npm --prefix web run build`", fileKind(info.Mode()))
+	}
 	return assets, nil
+}
+
+// fileKind returns a short human-readable name for a non-regular file mode,
+// for an actionable startup error (e.g. "directory", "symlink", "pipe").
+func fileKind(m fs.FileMode) string {
+	switch {
+	case m.IsDir():
+		return "directory"
+	case m&fs.ModeSymlink != 0:
+		return "symlink"
+	case m&fs.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&fs.ModeSocket != 0:
+		return "socket"
+	case m&fs.ModeDevice != 0:
+		return "device"
+	default:
+		return "non-regular file"
+	}
 }
 
 // ServeHTTP serves only the exact root (shell) and /assets/{name} (allowlisted

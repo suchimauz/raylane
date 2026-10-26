@@ -57,6 +57,18 @@ export async function probeState(signal: AbortSignal | null = null): Promise<Pro
     if (!data || typeof data.phase !== 'string' || !data.readiness) {
       return { kind: 'unknown', retained: true };
     }
+    // Malformed generation evidence is UNKNOWN, never displayed: when the
+    // field is present it must be an INTEGER in the settled wire range
+    // [0, Number.MAX_SAFE_INTEGER] (0 is meaningful). A negative, fractional,
+    // non-finite or unsafe value (e.g. -1, 1.5, 2**60) means the state payload
+    // cannot be trusted as a whole, so it falls back to the retained snapshot
+    // with a Retry — the F5 residual — rather than rendering a bogus row.
+    if (
+      data.activeGeneration !== undefined &&
+      (!Number.isSafeInteger(data.activeGeneration) || data.activeGeneration < 0)
+    ) {
+      return { kind: 'unknown', retained: true };
+    }
     return { kind: 'ok', state: data };
   } catch {
     return { kind: 'unknown', retained: true };

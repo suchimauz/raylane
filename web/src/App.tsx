@@ -352,85 +352,63 @@ export function App() {
 
 // DirtySignOutDialog is the reusable dirty sign-out boundary. It is reachable
 // in production only when a real consuming child holds unsaved work; there is
-// no fake editor. Full modal semantics: background inert, Tab/Shift+Tab
-// contained, Escape = Stay, initial focus on the safe action, focus returned
-// to the invoker on cancel.
+// no fake editor. It uses the NATIVE <dialog> shown with showModal(): the
+// browser makes the ENTIRE rest of the document inert and AX-excluded (not
+// focusable, not clickable, hidden from the accessibility tree), so neither
+// pointer nor a controlled DOM.focus can reach the background — the F7
+// defect. Escape fires `cancel` (= Stay, preserving RAM and returning focus
+// to the invoker); initial focus lands on the safe action (Stay); native
+// focus trapping keeps Tab/Shift+Tab contained.
 function DirtySignOutDialog(props: { onStay: () => void; onDiscardSignOut: () => void }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const stayRef = useRef<HTMLButtonElement>(null);
-  const discardRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    const dlg = dialogRef.current;
+    if (!dlg) return;
+    // showModal() puts the dialog in the top layer and makes everything else
+    // inert — the genuine modal boundary, enforced by the browser.
+    dlg.showModal();
     // Initial focus on the safe action (Stay).
     stayRef.current?.focus();
 
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        props.onStay();
-        return;
-      }
-      if (e.key === 'Tab') {
-        // Contain Tab / Shift+Tab within the two actions.
-        const focusables = [stayRef.current, discardRef.current].filter(
-          (el): el is HTMLButtonElement => el !== null,
-        );
-        if (focusables.length === 0) return;
-        const [first, last] = [focusables[0], focusables[focusables.length - 1]] as [
-          HTMLButtonElement,
-          HTMLButtonElement,
-        ];
-        const active = document.activeElement;
-        if (e.shiftKey) {
-          if (active === first || !dialogRef.current?.contains(active)) {
-            e.preventDefault();
-            last.focus();
-          }
-        } else {
-          if (active === last || !dialogRef.current?.contains(active)) {
-            e.preventDefault();
-            first.focus();
-          }
-        }
-      }
+    // Escape → cancel == Stay: keep in-RAM work, return focus to the invoker.
+    // This runs BEFORE the dialog closes, so the background is still inert.
+    const onCancel = (e: Event) => {
+      e.preventDefault();
+      props.onStay();
     };
-    document.addEventListener('keydown', onKey, true);
-    return () => document.removeEventListener('keydown', onKey, true);
+    dlg.addEventListener('cancel', onCancel);
+    return () => dlg.removeEventListener('cancel', onCancel);
   }, [props]);
 
   return (
-    <div className="dialog__backdrop" role="presentation" onClick={props.onStay}>
-      <div
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="signout-title"
-        ref={dialogRef}
-        // Background inertness: the rest of the app is behind the backdrop and
-        // unreachable by pointer; focus is contained by the key handler above.
-        onClick={(e) => e.stopPropagation()}
-      >
+    <dialog
+      className="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="signout-title"
+      ref={dialogRef}
+      onClick={(e) => {
+        // A click on the dialog's own backdrop (outside the panel) is Stay.
+        if (e.target === dialogRef.current) props.onStay();
+      }}
+    >
+      <div className="dialog__body">
         <h2 className="dialog__title" id="signout-title">
           {COPY.unsavedChanges}
         </h2>
-        <p className="panel__text">
-          Leaving will discard unsaved work that exists only in this page.
-        </p>
+        <p className="panel__text">Leaving will discard unsaved work that exists only in this page.</p>
         <div className="dialog__actions">
           <button type="button" className="button" onClick={props.onStay} ref={stayRef}>
             {COPY.stay}
           </button>
-          <button
-            type="button"
-            className="button button--danger"
-            onClick={props.onDiscardSignOut}
-            ref={discardRef}
-          >
+          <button type="button" className="button button--danger" onClick={props.onDiscardSignOut}>
             {COPY.discardSignOut}
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -448,6 +426,12 @@ function LoginForm(props: {
   const usernameInvalid = username.length > 0 && (usernameLen < 1 || usernameLen > USERNAME_MAX);
   const passwordInvalid = password.length > 0 && (passwordLen < 1 || passwordLen > PASSWORD_MAX);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Which control the current submit error is the recovery context for, so the
+  // error can be programmatically ASSOCIATED with that control (not just
+  // announced once): a screen-reader user lands on the focused field and hears
+  // the error via aria-describedby (the F6 residual — the visible role=alert
+  // summary existed but had no association with the focused recovery target).
+  const [errorFocus, setErrorFocus] = useState<'username' | 'password' | 'error' | null>(null);
   const [busy, setBusy] = useState(false);
   const local = useRef<SessionFlags>({ pending: false });
   // Refs for stable focus management: keep focus on the form across pending
@@ -459,6 +443,7 @@ function LoginForm(props: {
 
   const fail = useCallback((msg: string, focus: 'username' | 'password' | 'error') => {
     setSubmitError(msg);
+    setErrorFocus(focus);
     // Move focus deliberately so a screen reader user lands on the correction.
     requestAnimationFrame(() => {
       if (focus === 'username') usernameRef.current?.focus();
@@ -545,8 +530,12 @@ function LoginForm(props: {
             type="text"
             autoComplete="username"
             required
-            aria-invalid={usernameInvalid || undefined}
-            aria-describedby={usernameInvalid ? errorId : undefined}
+            aria-invalid={usernameInvalid || (submitError !== null && errorFocus === 'username') || undefined}
+            aria-describedby={
+              [usernameInvalid || errorFocus === 'username' ? errorId : '',]
+                .filter(Boolean)
+                .join(' ') || undefined
+            }
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             // Inputs are NOT natively disabled while pending — that is what
@@ -565,8 +554,12 @@ function LoginForm(props: {
             type="password"
             autoComplete="current-password"
             required
-            aria-invalid={passwordInvalid || undefined}
-            aria-describedby={passwordInvalid ? errorId : undefined}
+            aria-invalid={passwordInvalid || (submitError !== null && errorFocus === 'password') || undefined}
+            aria-describedby={
+              [passwordInvalid || errorFocus === 'password' ? errorId : '']
+                .filter(Boolean)
+                .join(' ') || undefined
+            }
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             ref={passwordRef}

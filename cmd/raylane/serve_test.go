@@ -850,6 +850,210 @@ func TestT009ComposeLANRouting(t *testing.T) {
 	}
 }
 
+// TestT009WrongKindBundleFailsClosedAtStartup proves the INCOMPLETE-BUNDLE
+// preflight on the REAL compiled serve path: an embedded bundle whose
+// index.html or a manifest-declared asset exists but is a DIRECTORY (wrong
+// kind — fs.Stat alone succeeds on it) makes `raylane serve` exit non-zero
+// with one actionable error BEFORE the state DB is created/opened, before the
+// control socket is bound and before the management listener is bound or
+// readiness advertised. The isolated binary is built from a copied module
+// snapshot with a crafted dist; the shared production dist is never touched.
+func TestT009WrongKindBundleFailsClosedAtStartup(t *testing.T) {
+	moduleDir := copyModuleForBundleTest(t)
+	dist := filepath.Join(moduleDir, "web", "dist")
+	// Craft a valid-looking dist, then corrupt one entry into a directory.
+	write := func(rel, body string) {
+		t.Helper()
+		full := filepath.Join(dist, rel)
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	mkdir := func(rel string) {
+		t.Helper()
+		full := filepath.Join(dist, rel)
+		if err := os.RemoveAll(full); err != nil {
+			t.Fatalf("remove %s: %v", rel, err)
+		}
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		// A directory is only visible to go:embed when it is non-empty (embed
+		// records directories implicitly from their files); give it a child so
+		// the wrong-kind entry is actually embedded and Stat sees a directory.
+		if err := os.WriteFile(filepath.Join(full, ".keep"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed dir %s: %v", rel, err)
+		}
+	}
+	manifest := `{"index.html":{"file":"assets/index-D0S6vb5b.js","css":["assets/index-D3b3cTyl.css"]}}`
+	seed := func() {
+		if err := os.RemoveAll(dist); err != nil {
+			t.Fatalf("reset dist: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(dist, "assets"), 0o755); err != nil {
+			t.Fatalf("mkdir assets: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(dist, ".vite"), 0o755); err != nil {
+			t.Fatalf("mkdir .vite: %v", err)
+		}
+		write("index.html", "<!doctype html><div id=root></div>")
+		write(".vite/manifest.json", manifest)
+		write("assets/index-D0S6vb5b.js", "console.log(1)")
+		write("assets/index-D3b3cTyl.css", "body{margin:0}")
+	}
+
+	cases := map[string]func() string{
+		"directory index": func() string {
+			seed()
+			mkdir("index.html")
+			return "index.html"
+		},
+		"directory js asset": func() string {
+			seed()
+			mkdir("assets/index-D0S6vb5b.js")
+			return "index.html" // index is fine; the JS asset is the directory
+		},
+		"directory css asset": func() string {
+			seed()
+			mkdir("assets/index-D3b3cTyl.css")
+			return "index.html"
+		},
+	}
+	for name, corrupt := range cases {
+		t.Run(name, func(t *testing.T) {
+			keptIndex := corrupt()
+			bin := filepath.Join(moduleDir, "bin-wrongkind")
+			build := exec.Command("go", "build", "-o", bin, "./cmd/raylane")
+			build.Dir = moduleDir
+			if out, err := build.CombinedOutput(); err != nil {
+				t.Fatalf("build isolated binary: %v\n%s", err, out)
+			}
+
+			runDir := t.TempDir()
+			sockDir := filepath.Join(runDir, "run")
+			// A real, knowable loopback port (ephemeral :0 is refused by config
+			// validation before the bundle preflight, so it cannot be used here).
+			pl, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("pick port: %v", err)
+			}
+			port := pl.Addr().(*net.TCPAddr).Port
+			pl.Close()
+			origin := fmt.Sprintf("https://127.0.0.1:%d", port)
+			cfgPath := filepath.Join(runDir, "cfg.json")
+			cfgJSON := fmt.Sprintf(`{"db":%q,"listen":%q,"origin":%q,"socketDir":%q,"tlsCert":%q,"tlsKey":%q}`,
+				filepath.Join(runDir, "state.db"),
+				fmt.Sprintf("127.0.0.1:%d", port),
+				origin,
+				sockDir,
+				filepath.Join(runDir, "tls.crt"),
+				filepath.Join(runDir, "tls.key"),
+			)
+			if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+				t.Fatalf("write cfg: %v", err)
+			}
+			// The TLS material paths need not exist: the bundle preflight runs
+			// BEFORE the cert is loaded, so a fail-closed bundle never reaches it.
+			cmd := exec.Command(bin, "serve", "--config", cfgPath)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			runErr := cmd.Run()
+			if runErr == nil {
+				t.Fatalf("serve exited 0 on a wrong-kind bundle (index=%s); stdout=%s stderr=%s", keptIndex, stdout.String(), stderr.String())
+			}
+			if ee, ok := runErr.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+				t.Fatalf("serve err=%v want exit 1; stderr=%s", runErr, stderr.String())
+			}
+			// Actionable, names the wrong kind, fails closed.
+			combined := stdout.String() + stderr.String()
+			if !strings.Contains(combined, "directory") {
+				t.Fatalf("error should name the wrong kind 'directory': %s", combined)
+			}
+			if !strings.Contains(combined, "npm --prefix web run build") {
+				t.Fatalf("error not actionable: %s", combined)
+			}
+			// No startup side effects: no state DB created/opened, no control
+			// socket bound, no readiness line.
+			if _, err := os.Stat(filepath.Join(runDir, "state.db")); !os.IsNotExist(err) {
+				t.Fatalf("state.db created despite fail-closed bundle (err=%v)", err)
+			}
+			if entries, _ := os.ReadDir(sockDir); len(entries) != 0 {
+				t.Fatalf("control socket dir not empty after bundle refusal: %v", entries)
+			}
+			if strings.Contains(stdout.String(), "raylane: management") {
+				t.Fatalf("readiness advertised despite fail-closed bundle: %s", stdout.String())
+			}
+		})
+	}
+}
+
+// copyModuleForBundleTest copies the Go module source needed to build
+// cmd/raylane into a fresh temp dir (never the shared tree), so a crafted
+// web/dist can be embedded without touching the production bundle. It copies
+// go.mod/go.sum, cmd/, internal/, and web/embed.go; web/dist is created empty
+// for the caller to seed.
+func copyModuleForBundleTest(t *testing.T) string {
+	t.Helper()
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("repo root: %v", err)
+	}
+	dst := t.TempDir()
+	copyFile := func(rel string, mode os.FileMode) {
+		t.Helper()
+		src := filepath.Join(repoRoot, rel)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		target := filepath.Join(dst, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(rel), err)
+		}
+		if err := os.WriteFile(target, data, mode); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	copyDir := func(rel string) {
+		t.Helper()
+		err := filepath.WalkDir(filepath.Join(repoRoot, rel), func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			relToRepo, err := filepath.Rel(repoRoot, p)
+			if err != nil {
+				return err
+			}
+			target := filepath.Join(dst, relToRepo)
+			if d.IsDir() {
+				return os.MkdirAll(target, 0o755)
+			}
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(target, data, 0o644)
+		})
+		if err != nil {
+			t.Fatalf("copy dir %s: %v", rel, err)
+		}
+	}
+	copyFile("go.mod", 0o644)
+	copyFile("go.sum", 0o644)
+	copyDir("cmd")
+	copyDir("internal")
+	copyFile("web/embed.go", 0o644)
+	// Fresh empty dist for the caller to seed (never copy the production dist).
+	if err := os.MkdirAll(filepath.Join(dst, "web", "dist"), 0o755); err != nil {
+		t.Fatalf("mkdir dist: %v", err)
+	}
+	return dst
+}
+
 // TestT008ServeRejectsSecondInstance: while a live server owns the socket,
 // a second `serve` exits non-zero WITHOUT touching the live one.
 func TestT008ServeRejectsSecondInstance(t *testing.T) {

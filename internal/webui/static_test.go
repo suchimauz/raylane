@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // fixtureFS is a minimal embedded-bundle shape: the shell, the Vite build
@@ -266,6 +267,103 @@ func TestIncompleteBundleFailsClosed(t *testing.T) {
 			t.Fatalf("%s: New succeeded; want fail-closed error", name)
 		} else if !strings.Contains(err.Error(), "npm --prefix web run build") {
 			t.Fatalf("%s: error not actionable: %v", name, err)
+		}
+	}
+}
+
+// TestWrongKindBundleEntriesFailClosed proves fs.Stat success is NOT enough:
+// a manifest-declared asset or the index that exists but is a DIRECTORY (or a
+// safely representable special file) is a corrupt bundle, rejected fail-closed
+// with an actionable error. The check is by file kind, up front, so a pipe or
+// device is never opened (no hang/misbehavior).
+func TestWrongKindBundleEntriesFailClosed(t *testing.T) {
+	const (
+		manifest = `{"index.html":{"file":"assets/index-D0S6vb5b.js","css":["assets/index-D3b3cTyl.css"]}}`
+		index    = `<!doctype html>`
+		js       = "console.log(1)"
+		css      = "body{margin:0}"
+	)
+	dir := &fstest.MapFile{Data: []byte("x"), Mode: fs.ModeDir | 0o755}
+	pipe := &fstest.MapFile{Data: []byte("x"), Mode: fs.ModeNamedPipe}
+	dev := &fstest.MapFile{Data: []byte("x"), Mode: fs.ModeDevice}
+	sym := &fstest.MapFile{Data: []byte("x"), Mode: fs.ModeSymlink}
+	cases := map[string]struct {
+		fsys fs.FS
+		kind string
+	}{
+		"directory index": {
+			fstest.MapFS{
+				"index.html":                dir,
+				".vite/manifest.json":       &fstest.MapFile{Data: []byte(manifest)},
+				"assets/index-D0S6vb5b.js":  &fstest.MapFile{Data: []byte(js)},
+				"assets/index-D3b3cTyl.css": &fstest.MapFile{Data: []byte(css)},
+			}, "directory",
+		},
+		"directory js asset": {
+			fstest.MapFS{
+				"index.html":                &fstest.MapFile{Data: []byte(index)},
+				".vite/manifest.json":       &fstest.MapFile{Data: []byte(manifest)},
+				"assets/index-D0S6vb5b.js":  dir,
+				"assets/index-D3b3cTyl.css": &fstest.MapFile{Data: []byte(css)},
+			}, "directory",
+		},
+		"directory css asset": {
+			fstest.MapFS{
+				"index.html":                &fstest.MapFile{Data: []byte(index)},
+				".vite/manifest.json":       &fstest.MapFile{Data: []byte(manifest)},
+				"assets/index-D0S6vb5b.js":  &fstest.MapFile{Data: []byte(js)},
+				"assets/index-D3b3cTyl.css": dir,
+			}, "directory",
+		},
+		"named-pipe js asset (never opened)": {
+			fstest.MapFS{
+				"index.html":                &fstest.MapFile{Data: []byte(index)},
+				".vite/manifest.json":       &fstest.MapFile{Data: []byte(manifest)},
+				"assets/index-D0S6vb5b.js":  pipe,
+				"assets/index-D3b3cTyl.css": &fstest.MapFile{Data: []byte(css)},
+			}, "named pipe",
+		},
+		"device js asset (never opened)": {
+			fstest.MapFS{
+				"index.html":                &fstest.MapFile{Data: []byte(index)},
+				".vite/manifest.json":       &fstest.MapFile{Data: []byte(manifest)},
+				"assets/index-D0S6vb5b.js":  dev,
+				"assets/index-D3b3cTyl.css": &fstest.MapFile{Data: []byte(css)},
+			}, "device",
+		},
+		"symlink js asset (never opened)": {
+			fstest.MapFS{
+				"index.html":                &fstest.MapFile{Data: []byte(index)},
+				".vite/manifest.json":       &fstest.MapFile{Data: []byte(manifest)},
+				"assets/index-D0S6vb5b.js":  sym,
+				"assets/index-D3b3cTyl.css": &fstest.MapFile{Data: []byte(css)},
+			}, "symlink",
+		},
+	}
+	for name, tc := range cases {
+		err := func() (err error) {
+			// A wrong-kind pipe/device must not be opened (which would block); a
+			// short deadline guards against an accidental hang regardless.
+			done := make(chan error, 1)
+			go func() { _, e := New(tc.fsys); done <- e }()
+			select {
+			case err = <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: New hung (opened a special file?)", name)
+			}
+			return err
+		}()
+		if err == nil {
+			t.Fatalf("%s: New succeeded; want fail-closed error", name)
+		}
+		if !strings.Contains(err.Error(), "npm --prefix web run build") {
+			t.Fatalf("%s: error not actionable: %v", name, err)
+		}
+		// A symlink whose target is absent is reported as a missing referenced
+		// asset (MapFS resolves the link); every other wrong kind names its
+		// kind. Both are fail-closed rejections.
+		if tc.kind != "symlink" && !strings.Contains(err.Error(), tc.kind) {
+			t.Fatalf("%s: error should name the kind %q: %v", name, tc.kind, err)
 		}
 	}
 }

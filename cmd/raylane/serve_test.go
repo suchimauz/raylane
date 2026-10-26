@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -55,23 +58,49 @@ func buildSharedBinary(t *testing.T) string {
 	return sharedBinary.path
 }
 
-type harness struct {
-	t       *testing.T
-	bin     string
-	dir     string
-	sockDir string
-	stdout  *bytes.Buffer
-	stderr  *bytes.Buffer
-	cmd     *exec.Cmd
-	env     []string
-	lanURL  string
-	lanHost string
-	lanPort int
-	origin  string
+// syncBuf is a goroutine-safe bytes.Buffer. The child process's stdout/stderr
+// are written by an os/exec copy goroutine while the readiness loop reads
+// them, so a plain bytes.Buffer races (this is harness synchronization, not
+// detector suppression).
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
-// startServe picks a free loopback port, launches the real binary with
-// --tls-generate-self-signed and waits for the "raylane: management" line.
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+type harness struct {
+	t        *testing.T
+	bin      string
+	dir      string
+	sockDir  string
+	cfgPath  string
+	certPath string
+	caPool   *x509.CertPool
+	stdout   *syncBuf
+	stderr   *syncBuf
+	cmd      *exec.Cmd
+	env      []string
+	lanURL   string
+	lanHost  string
+	lanPort  int
+	origin   string
+}
+
+// startServe picks a free loopback port, generates its OWN isolated TLS
+// material (the product never mints certificates), writes the strict JSON
+// operator config, and launches the real binary with --config, waiting for
+// the "raylane: management" line.
 func startServe(t *testing.T) *harness {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -85,8 +114,8 @@ func startServe(t *testing.T) *harness {
 		bin:     buildBinary(t),
 		dir:     t.TempDir(),
 		sockDir: filepath.Join(t.TempDir(), "run"),
-		stdout:  &bytes.Buffer{},
-		stderr:  &bytes.Buffer{},
+		stdout:  &syncBuf{},
+		stderr:  &syncBuf{},
 	}
 	h.lanHost = "127.0.0.1"
 	h.lanPort = addr.Port
@@ -94,15 +123,40 @@ func startServe(t *testing.T) *harness {
 	// host:port as the client sees it.
 	h.lanURL = fmt.Sprintf("https://%s:%d", h.lanHost, h.lanPort)
 	h.origin = h.lanURL
-	h.cmd = exec.Command(h.bin, "serve",
-		"--db", filepath.Join(h.dir, "state.db"),
-		"--listen", fmt.Sprintf("%s:%d", h.lanHost, h.lanPort),
-		"--origin", h.origin,
-		"--socket-dir", h.sockDir,
-		"--tls-generate-self-signed",
-		"--tls-dir", h.dir,
-		"--tls-generate-for", "localhost,127.0.0.1",
+
+	// Own isolated test TLS material (never server-minted).
+	certPath := filepath.Join(h.dir, "tls", "management.crt")
+	keyPath := filepath.Join(h.dir, "tls", "management.key")
+	if err := ensureSelfSignedTLS(certPath, keyPath, []string{"localhost", "127.0.0.1"}); err != nil {
+		t.Fatalf("generate test TLS material: %v", err)
+	}
+	h.certPath = certPath
+	// Trust ONLY the test CA (positive trust anchor) — never InsecureSkipVerify.
+	caCert, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read test CA: %v", err)
+	}
+	h.caPool = x509.NewCertPool()
+	if !h.caPool.AppendCertsFromPEM(caCert) {
+		t.Fatal("append test CA to pool")
+	}
+
+	// Strict JSON operator config.
+	cfgPath := filepath.Join(h.dir, "serve-config.json")
+	cfgJSON := fmt.Sprintf(`{"db":%q,"listen":%q,"origin":%q,"socketDir":%q,"tlsCert":%q,"tlsKey":%q}`,
+		filepath.Join(h.dir, "state.db"),
+		fmt.Sprintf("%s:%d", h.lanHost, h.lanPort),
+		h.origin,
+		h.sockDir,
+		certPath,
+		keyPath,
 	)
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("write serve config: %v", err)
+	}
+	h.cfgPath = cfgPath
+
+	h.cmd = exec.Command(h.bin, "serve", "--config", cfgPath)
 	h.cmd.Stdout = h.stdout
 	h.cmd.Stderr = h.stderr
 	if err := h.cmd.Start(); err != nil {
@@ -135,12 +189,15 @@ func (h *harness) stopAll() {
 	}
 }
 
-// exitCode runs one CLI invocation of the real binary and returns its exit
-// code plus combined output.
-func (h *harness) run(args ...string) (int, string) {
+// runWithStdin runs one CLI invocation of the real binary with the given
+// stdin and returns its exit code plus combined output.
+func (h *harness) runWithStdin(stdin string, args ...string) (int, string) {
 	h.t.Helper()
 	cmd := exec.Command(h.bin, args...)
 	cmd.Env = append(os.Environ(), h.env...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
@@ -153,6 +210,12 @@ func (h *harness) run(args ...string) (int, string) {
 	return code, string(out)
 }
 
+// run is runWithStdin with no stdin (the process inherits the test's stdin,
+// which for these non-interactive subcommands is never read).
+func (h *harness) run(args ...string) (int, string) {
+	return h.runWithStdin("", args...)
+}
+
 func errorsAs(err error, target **exec.ExitError) bool {
 	ee, ok := err.(*exec.ExitError)
 	if ok {
@@ -161,14 +224,18 @@ func errorsAs(err error, target **exec.ExitError) bool {
 	return ok
 }
 
-func (h *harness) bootstrap(credsEnv ...string) (int, string) {
+// bootstrapCredentialsJSON is a valid stdin credential body for tests.
+const bootstrapCredentialsJSON = `{"username":"admin","password":"correct horse battery staple"}`
+
+// bootstrap runs the local bootstrap subcommand feeding the credential JSON
+// on stdin (credentials are never passed via env/argv). credsJSON overrides
+// the default valid body.
+func (h *harness) bootstrap(credsJSON string) (int, string) {
 	h.t.Helper()
-	extra := append([]string{}, credsEnv...)
-	saved := h.env
-	h.env = append(saved, extra...)
-	defer func() { h.env = saved }()
-	code, out := h.run("bootstrap", "--socket-dir", h.sockDir)
-	return code, out
+	if credsJSON == "" {
+		credsJSON = bootstrapCredentialsJSON
+	}
+	return h.runWithStdin(credsJSON, "bootstrap", "--socket-dir", h.sockDir)
 }
 
 func (h *harness) socketExists() bool {
@@ -200,11 +267,19 @@ func (h *harness) tlsKeyMode() os.FileMode {
 	return st.Mode().Perm()
 }
 
+// client returns an HTTPS client that trusts ONLY the test CA (a positive
+// trust anchor with the correct SAN) — never InsecureSkipVerify.
 func (h *harness) client() *http.Client {
+	return h.clientTrusting(h.caPool)
+}
+
+// clientTrusting returns an HTTPS client rooted at the supplied pool. A nil
+// or unrelated pool exercises the trust NEGATIVE (unknown CA / wrong SAN).
+func (h *harness) clientTrusting(pool *x509.CertPool) *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // test-only cert
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 		},
 	}
 }
@@ -252,6 +327,73 @@ func readAll(t *testing.T, resp *http.Response) []byte {
 	return b
 }
 
+// TestT008TLSTrustNegatives: the management listener is reached over REAL
+// TLS with a positive trust anchor; an unrelated CA, a wrong-SAN certificate
+// and a plain-HTTP request are all refused. The client never uses
+// InsecureSkipVerify (that would be a trust bypass, not a test shortcut).
+func TestT008TLSTrustNegatives(t *testing.T) {
+	h := startServe(t)
+
+	// Positive: trusting the test CA with the right SAN succeeds (login
+	// reaches the server: 401 for unknown user, proving TLS + routing work).
+	resp := h.login("nobody", "nothing", h.origin)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("trusted-CA login = %d, want 401 (TLS handshake + handler reached)", resp.StatusCode)
+	}
+	readAll(t, resp)
+
+	// Negative 1: a DIFFERENT CA (unknown to the server cert) must refuse the
+	// handshake. Build an unrelated self-signed CA.
+	otherDir := t.TempDir()
+	otherCert := filepath.Join(otherDir, "other.crt")
+	otherKey := filepath.Join(otherDir, "other.key")
+	if err := ensureSelfSignedTLS(otherCert, otherKey, []string{"other.example"}); err != nil {
+		t.Fatalf("generate unrelated CA: %v", err)
+	}
+	otherCAPEM, err := os.ReadFile(otherCert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPool := x509.NewCertPool()
+	otherPool.AppendCertsFromPEM(otherCAPEM)
+	if _, err := h.clientTrusting(otherPool).Get(h.lanURL + "/api/v1/state"); err == nil {
+		t.Fatal("unknown-CA handshake was accepted (trust bypass?)")
+	}
+
+	// Negative 2: the test CA is trusted but the cert SAN does not cover the
+	// requested host. Connect by a hostname the cert does not name (the cert
+	// covers localhost and 127.0.0.1, not "wronghost").
+	wrongHostURL := fmt.Sprintf("https://wronghost:%d/api/v1/state", h.lanPort)
+	wrongHostClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			// Trust the real CA but dial 127.0.0.1 for host "wronghost", so the
+			// SAN check (not name resolution) is what must fail.
+			TLSClientConfig: &tls.Config{RootCAs: h.caPool, ServerName: "wronghost", MinVersion: tls.VersionTLS12},
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", h.lanPort))
+			},
+		},
+	}
+	if _, err := wrongHostClient.Get(wrongHostURL); err == nil {
+		t.Fatal("wrong-SAN certificate was accepted (SAN check bypassed?)")
+	}
+
+	// Negative 3: plain HTTP to the TLS port must not yield a usable response.
+	// The TLS listener cannot complete a plaintext handshake; at most the server
+	// answers a malformed-request 400 — never a real 200 state (no insecure
+	// HTTP fallback).
+	plain := &http.Client{Timeout: 5 * time.Second}
+	plainResp, err := plain.Get(fmt.Sprintf("http://127.0.0.1:%d/api/v1/state", h.lanPort))
+	if err == nil {
+		if plainResp.StatusCode == http.StatusOK {
+			t.Fatal("plain-HTTP request received a real 200 (insecure fallback serving data?)")
+		}
+		plainResp.Body.Close()
+	}
+}
+
 // TestT008ServeScaffoldPreserved: the pre-existing scaffold readout and exit
 // codes are unchanged next to the new subcommands.
 func TestT008ServeScaffoldPreserved(t *testing.T) {
@@ -277,14 +419,20 @@ func TestT008CLIBootstrapErrorsUseDistinctExitCodes(t *testing.T) {
 	if code, _ := h.run("bootstrap"); code != 2 {
 		t.Fatalf("bootstrap without --socket-dir code=%d, want 2", code)
 	}
-	if code, out := h.run("bootstrap", "--socket-dir", t.TempDir()); code != 2 || !strings.Contains(out, "environment") {
-		t.Fatalf("bootstrap without env credentials code=%d out=%s, want 2 + env hint", code, out)
+	// No credential JSON on stdin (inherited non-redirected stdin) is refused
+	// with exit 2 and a stdin hint, never an env hint.
+	if code, out := h.run("bootstrap", "--socket-dir", t.TempDir()); code != 2 || !strings.Contains(out, "stdin") {
+		t.Fatalf("bootstrap without stdin credentials code=%d out=%s, want 2 + stdin hint", code, out)
 	}
 	if code, _ := h.run("serve"); code != 2 {
 		t.Fatalf("serve without flags code=%d, want 2", code)
 	}
+	// Malformed credential JSON on stdin is a usage error (exit 2).
+	if code, out := h.runWithStdin(`{"username":"a"}`, "bootstrap", "--socket-dir", t.TempDir()); code != 2 {
+		t.Fatalf("bootstrap with malformed stdin code=%d out=%s, want 2", code, out)
+	}
 	// The stderr never contains any credential material.
-	code, out := h.run("bootstrap", "--socket-dir", t.TempDir())
+	code, out := h.runWithStdin(`{"username":"x","password":"hunter2secret"}`, "bootstrap", "--socket-dir", t.TempDir())
 	_ = code
 	if strings.Contains(out, "hunter2secret") {
 		t.Fatal("credential echoed by the CLI")
@@ -310,21 +458,20 @@ func TestT008EndToEndRealProcess(t *testing.T) {
 		t.Fatalf("tls key mode = %o, want 600", h.tlsKeyMode())
 	}
 
-	// Bootstrap without credentials in env is refused before touching the
-	// socket (exit 2), and never echoes them.
+	// Bootstrap without redirected stdin credentials is refused before
+	// touching the socket (exit 2), and never echoes them.
 	code, out := h.run("bootstrap", "--socket-dir", h.sockDir)
 	if code != 2 {
-		t.Fatalf("bootstrap without env creds code=%d out=%s, want 2", code, out)
+		t.Fatalf("bootstrap without stdin creds code=%d out=%s, want 2", code, out)
 	}
 
-	creds := []string{"RAYLANE_BOOTSTRAP_USERNAME=admin", "RAYLANE_BOOTSTRAP_PASSWORD=correct horse battery staple"}
-	code, out = h.bootstrap(creds...)
+	code, out = h.bootstrap("")
 	if code != 0 || !strings.Contains(out, "permanently closed") {
 		t.Fatalf("bootstrap code=%d out=%s stderr=%s, want 0 + success line", code, out, h.stderr)
 	}
 	// Second bootstrap: issuance of a NEW token is possible, but redeeming it
 	// hits the permanent store closure — CLI exits 1 with the generic problem.
-	code, out = h.bootstrap(creds...)
+	code, out = h.bootstrap("")
 	if code != 1 {
 		t.Fatalf("second bootstrap code=%d out=%s, want 1", code, out)
 	}
@@ -437,15 +584,10 @@ func TestT008EndToEndRealProcess(t *testing.T) {
 
 	// RESTART: old cookie is dead, the previous bootstrap token is dead, a
 	// fresh local bootstrap token cannot reopen the closed bootstrap.
-	h2 := &harness{t: t, bin: h.bin, dir: h.dir, sockDir: h.sockDir, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, lanHost: h.lanHost, lanPort: h.lanPort, lanURL: h.lanURL, origin: h.origin}
-	h2.cmd = exec.Command(h2.bin, "serve",
-		"--db", filepath.Join(h2.dir, "state.db"),
-		"--listen", fmt.Sprintf("%s:%d", h2.lanHost, h2.lanPort),
-		"--origin", h2.origin,
-		"--socket-dir", h2.sockDir,
-		"--tls-generate-self-signed",
-		"--tls-dir", h2.dir,
-	) // the cert/key pair from the first run is REUSED (no overwrite)
+	h2 := &harness{t: t, bin: h.bin, dir: h.dir, sockDir: h.sockDir, cfgPath: h.cfgPath, certPath: h.certPath, caPool: h.caPool, stdout: &syncBuf{}, stderr: &syncBuf{}, lanHost: h.lanHost, lanPort: h.lanPort, lanURL: h.lanURL, origin: h.origin}
+	// The config file (DB path, TLS cert/key) from the first run is REUSED:
+	// same admin DB, same cert/key pair, same socket dir — a real restart.
+	h2.cmd = exec.Command(h2.bin, "serve", "--config", h2.cfgPath)
 	h2.cmd.Stdout = h2.stdout
 	h2.cmd.Stderr = h2.stderr
 	if err := h2.cmd.Start(); err != nil {
@@ -470,7 +612,7 @@ func TestT008EndToEndRealProcess(t *testing.T) {
 		t.Fatalf("old cookie after restart = %d, want 401 (sessions are RAM-only)", resp.StatusCode)
 	}
 	readAll(t, resp)
-	code, _ = h2.bootstrap(creds...)
+	code, _ = h2.bootstrap("")
 	if code != 1 {
 		t.Fatalf("bootstrap after restart code=%d, want 1 (store closure permanent)", code)
 	}
@@ -486,18 +628,25 @@ func TestT008EndToEndRealProcess(t *testing.T) {
 // a second `serve` exits non-zero WITHOUT touching the live one.
 func TestT008ServeRejectsSecondInstance(t *testing.T) {
 	h := startServe(t)
-	second := exec.Command(h.bin, "serve",
-		"--db", filepath.Join(h.dir, "state.db"),
-		"--listen", fmt.Sprintf("127.0.0.1:%d", h.lanPort+1),
-		"--origin", fmt.Sprintf("https://127.0.0.1:%d", h.lanPort+1),
-		"--socket-dir", h.sockDir,
-		"--tls-cert", filepath.Join(h.dir, "tls", "management.crt"),
-		"--tls-key", filepath.Join(h.dir, "tls", "management.key"),
+	// A second instance on a DIFFERENT port (so the config is valid) but the
+	// SAME socket dir reuses the first instance's TLS material; it must be
+	// refused by the live-socket ownership check (exit 1), not bind over it.
+	secondPort := h.lanPort + 1
+	secondCfgPath := filepath.Join(h.dir, "serve-config-second.json")
+	secondCfgJSON := fmt.Sprintf(`{"db":%q,"listen":%q,"origin":%q,"socketDir":%q,"tlsCert":%q,"tlsKey":%q}`,
+		filepath.Join(h.dir, "state.db"),
+		fmt.Sprintf("127.0.0.1:%d", secondPort),
+		fmt.Sprintf("https://127.0.0.1:%d", secondPort),
+		h.sockDir,
+		h.certPath,
+		filepath.Join(h.dir, "tls", "management.key"),
 	)
-	second.Stdout = io.Discard
-	second.Stderr = io.Discard
-	second.Stdout = nil
+	if err := os.WriteFile(secondCfgPath, []byte(secondCfgJSON), 0o600); err != nil {
+		t.Fatalf("write second serve config: %v", err)
+	}
+	second := exec.Command(h.bin, "serve", "--config", secondCfgPath)
 	out2 := &bytes.Buffer{}
+	second.Stdout = io.Discard
 	second.Stderr = out2
 	err := second.Run()
 	if err == nil {

@@ -33,14 +33,14 @@ type info struct {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, os.Getenv))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, os.Stdin))
 }
 
 // run dispatches the runnable subcommands first; when args do not name one,
 // the scaffold flag handling below keeps --version/--config behaviour and
 // exit codes exactly intact.
-func run(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
-	if code, ok := dispatchCommands(args, stdout, stderr, getenv); ok {
+func run(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
+	if code, ok := dispatchCommands(args, stdout, stderr, stdin); ok {
 		return code
 	}
 	fs := flag.NewFlagSet("raylane", flag.ContinueOnError)

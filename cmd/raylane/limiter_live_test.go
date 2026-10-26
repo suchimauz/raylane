@@ -18,7 +18,7 @@ func TestT008LiveLimiterRealProcess(t *testing.T) {
 	h := startServe(t)
 	// Bootstrap so a WRONG password goes through the real KDF (not the
 	// no-verifier path): same generic 401 either way.
-	code, out := h.bootstrap("RAYLANE_BOOTSTRAP_USERNAME=admin", "RAYLANE_BOOTSTRAP_PASSWORD=long enough bootstrap pw")
+	code, out := h.bootstrap(`{"username":"admin","password":"long enough bootstrap pw"}`)
 	if code != 0 {
 		t.Fatalf("bootstrap code=%d out=%s", code, out)
 	}

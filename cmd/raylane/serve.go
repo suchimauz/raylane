@@ -42,7 +42,7 @@ import (
 // dispatchCommands routes the runnable subcommands. ok is false when args do
 // not name one of them, so main falls through to the scaffold flag handling
 // (which keeps --version/--config behaviour and exit codes intact).
-func dispatchCommands(args []string, stdout, stderr io.Writer, getenv func(string) string) (code int, ok bool) {
+func dispatchCommands(args []string, stdout, stderr io.Writer, stdin io.Reader) (code int, ok bool) {
 	if len(args) == 0 {
 		return 0, false
 	}
@@ -50,27 +50,30 @@ func dispatchCommands(args []string, stdout, stderr io.Writer, getenv func(strin
 	case "serve":
 		return runServe(args[1:], stdout, stderr), true
 	case "bootstrap":
-		return runBootstrap(args[1:], stdout, stderr, getenv), true
+		return runBootstrap(args[1:], stdout, stderr, stdin), true
 	}
 	return 0, false
+}
+
+// serveConfigJSON is the strict explicit operator configuration read from a
+// JSON file (never from credentials-bearing flags). Every field is required
+// and the whole shape is validated by authhttp.Config.Validate before any
+// listener opens or certificate work happens.
+type serveConfigJSON struct {
+	DBPath      string `json:"db"`
+	Listen      string `json:"listen"`
+	Origin      string `json:"origin"`
+	SocketDir   string `json:"socketDir"`
+	TLSCertPath string `json:"tlsCert"`
+	TLSKeyPath  string `json:"tlsKey"`
 }
 
 func runServe(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var (
-		db        = fs.String("db", "", "path to the SQLite state database (required)")
-		listen    = fs.String("listen", "", "LAN HTTPS listen host:port (required)")
-		origin    = fs.String("origin", "", "exact trusted management origin, e.g. https://host:port (required)")
-		socketDir = fs.String("socket-dir", "", "owner-only directory for the local control socket (required)")
-		tlsDir    = fs.String("tls-dir", "", "directory for generated TLS material (with --tls-generate-self-signed)")
-		tlsCert   = fs.String("tls-cert", "", "TLS certificate PEM; must pair with --tls-key")
-		tlsKey    = fs.String("tls-key", "", "TLS private key PEM; must pair with --tls-cert")
-		tlsAuto   = fs.Bool("tls-generate-self-signed", false, "create the TLS material if absent (development aid)")
-		tlsFor    = fs.String("tls-generate-for", "localhost", "DNS names for the generated certificate, comma-separated")
-	)
+	configPath := fs.String("config", "", "path to the strict JSON operator configuration (required)")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "Usage:\n  raylane serve --db <path> --listen <host:port> --origin <https://host:port> --socket-dir <dir> [--tls-cert <pem> --tls-key <pem> | --tls-generate-self-signed --tls-dir <dir>]\n\nFlags:\n")
+		fmt.Fprintf(stderr, "Usage:\n  raylane serve --config <path>\n\nThe JSON configuration object carries exactly:\n  {\"db\":\"...\",\"listen\":\"host:port\",\"origin\":\"https://host:port\",\"socketDir\":\"...\",\"tlsCert\":\"...\",\"tlsKey\":\"...\"}\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -84,36 +87,49 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	if (*tlsCert == "") != (*tlsKey == "") {
-		fmt.Fprint(stderr, "raylane serve: --tls-cert and --tls-key must be given together\n")
+	if *configPath == "" {
+		fmt.Fprint(stderr, "raylane serve: --config is required\n")
 		return 2
 	}
-	certPath, keyPath := *tlsCert, *tlsKey
-	if certPath == "" {
-		if !*tlsAuto || *tlsDir == "" {
-			fmt.Fprint(stderr, "raylane serve: TLS is mandatory: pass --tls-cert/--tls-key, or --tls-generate-self-signed with --tls-dir\n")
-			return 2
-		}
-		certPath = filepath.Join(*tlsDir, "tls", "management.crt")
-		keyPath = filepath.Join(*tlsDir, "tls", "management.key")
-		if err := ensureSelfSignedTLS(certPath, keyPath, splitTrimmed(*tlsFor)); err != nil {
-			fmt.Fprintf(stderr, "raylane serve: %v\n", err)
-			return 1
-		}
+	raw, err := os.ReadFile(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: read config: %v\n", err)
+		return 2
+	}
+	var sc serveConfigJSON
+	if err := decodeStrictConfig(raw, &sc); err != nil {
+		fmt.Fprintf(stderr, "raylane serve: config: %v\n", err)
+		return 2
 	}
 	cfg := authhttp.Config{
-		ManagementListen: *listen,
-		TrustedOrigin:    *origin,
-		TLSCertPath:      certPath,
-		TLSKeyPath:       keyPath,
-		DBPath:           *db,
-		UnixSocketDir:    *socketDir,
+		ManagementListen: sc.Listen,
+		TrustedOrigin:    sc.Origin,
+		TLSCertPath:      sc.TLSCertPath,
+		TLSKeyPath:       sc.TLSKeyPath,
+		DBPath:           sc.DBPath,
+		UnixSocketDir:    sc.SocketDir,
 	}
+	// Validate the strict config BEFORE any certificate or listener work: an
+	// unsafe/wildcard/public/non-HTTPS/mismatched config is refused here.
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
 		return 2
 	}
 	return serve(cfg, stdout, stderr)
+}
+
+// decodeStrictConfig decodes a strict JSON object: unknown fields, trailing
+// data and non-object shapes are rejected.
+func decodeStrictConfig(raw []byte, dst *serveConfigJSON) error {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data after JSON config")
+	}
+	return nil
 }
 
 // serve opens the state database, binds BOTH listeners before serving (a
@@ -266,18 +282,21 @@ func tlsListener(ln net.Listener, certPath, keyPath string) (net.Listener, error
 	}), nil
 }
 
-// runBootstrap is the local-socket bootstrap client. Credentials come only
-// from the named environment variables; the token is requested and redeemed
-// over the owner-only socket, and neither the token nor the password is ever
-// written to stdout/stderr — only the generic server problem on failure.
-func runBootstrap(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+// runBootstrap is the local-socket bootstrap client. The admin username and
+// password are read ONLY from a bounded strict JSON object on redirected
+// standard input ({\"username\":\"...\",\"password\":\"...\"}) — never from
+// argv, environment variables or files, which would leak credentials into the
+// process table or disk. A terminal (character-device) stdin is refused unless
+// secure no-echo input is implemented; the operator redirects a file or pipe
+// instead. The one-time token is requested and redeemed over the owner-only
+// socket internally, and neither the token nor the password is ever written to
+// stdout/stderr — only the generic server problem on failure.
+func runBootstrap(args []string, stdout, stderr io.Writer, stdin io.Reader) int {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	socketDir := fs.String("socket-dir", "", "directory holding the local control socket (required)")
-	usernameEnv := fs.String("username-env", "RAYLANE_BOOTSTRAP_USERNAME", "environment variable holding the admin username")
-	passwordEnv := fs.String("password-env", "RAYLANE_BOOTSTRAP_PASSWORD", "environment variable holding the admin password")
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "Usage:\n  raylane bootstrap --socket-dir <dir>  (credentials via %s/%s environment variables)\n\nFlags:\n", *usernameEnv, *passwordEnv)
+		fmt.Fprintf(stderr, "Usage:\n  raylane bootstrap --socket-dir <dir>  < credentials.json\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -290,9 +309,9 @@ func runBootstrap(args []string, stdout, stderr io.Writer, getenv func(string) s
 		fmt.Fprint(stderr, "raylane bootstrap: --socket-dir is required\n")
 		return 2
 	}
-	username, password := getenv(*usernameEnv), getenv(*passwordEnv)
-	if username == "" || password == "" {
-		fmt.Fprintf(stderr, "raylane bootstrap: the admin username and password must come from the environment variables named by --username-env/--password-env (never argv)\n")
+	username, password, err := readBootstrapCredentials(stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane bootstrap: %v\n", err)
 		return 2
 	}
 	client := localSocketClient(filepath.Join(*socketDir, "control.sock"))
@@ -330,6 +349,48 @@ func runBootstrap(args []string, stdout, stderr io.Writer, getenv func(string) s
 	}
 	fmt.Fprintln(stdout, "raylane bootstrap: admin created; bootstrap is permanently closed")
 	return 0
+}
+
+// bootstrapCredentialsBound bounds the stdin credential JSON (well under the
+// smallest credential set, but generous enough for 256+1024 code points).
+const bootstrapCredentialsBound = 8192
+
+// readBootstrapCredentials reads and strictly decodes the credential JSON from
+// stdin. It refuses a terminal (character-device) stdin: interactive echo
+// would expose the password. Only a redirected file/pipe is accepted.
+func readBootstrapCredentials(stdin io.Reader) (username, password string, err error) {
+	if f, ok := stdin.(*os.File); ok {
+		st, serr := f.Stat()
+		if serr != nil {
+			return "", "", fmt.Errorf("stat stdin: %w", serr)
+		}
+		if st.Mode()&os.ModeCharDevice != 0 {
+			return "", "", errors.New("refusing to read credentials from a terminal; redirect a JSON file or pipe on stdin")
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(stdin, bootstrapCredentialsBound+1))
+	if err != nil {
+		return "", "", fmt.Errorf("read stdin: %w", err)
+	}
+	if len(body) > bootstrapCredentialsBound {
+		return "", "", errors.New("credential JSON exceeds the bound")
+	}
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&creds); err != nil {
+		return "", "", fmt.Errorf("decode credential JSON: %w", err)
+	}
+	if dec.More() {
+		return "", "", errors.New("trailing data after credential JSON")
+	}
+	if creds.Username == "" || creds.Password == "" {
+		return "", "", errors.New("credential JSON must carry non-empty username and password")
+	}
+	return creds.Username, creds.Password, nil
 }
 
 func localSocketClient(sockPath string) *http.Client {
@@ -392,7 +453,8 @@ func ensureSelfSignedTLS(certPath, keyPath string, dnsNames []string) error {
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:              dnsNames,
+		DNSNames:              dnsOnlyNames(dnsNames),
+		IPAddresses:           ipOnlyAddrs(dnsNames),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
@@ -439,6 +501,30 @@ func writeFileMode(path string, data []byte, mode os.FileMode) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// dnsOnlyNames returns the DNS names among the supplied identities (an IP
+// literal is NOT a DNS name and must go in IPAddresses, or the SAN check for
+// that IP fails).
+func dnsOnlyNames(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if net.ParseIP(n) == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// ipOnlyAddrs returns the parsed IP addresses among the supplied identities.
+func ipOnlyAddrs(names []string) []net.IP {
+	var out []net.IP
+	for _, n := range names {
+		if ip := net.ParseIP(n); ip != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 func splitTrimmed(s string) []string {

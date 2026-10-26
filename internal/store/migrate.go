@@ -28,6 +28,11 @@ var migrations = []migration{
 	// T008 (storage-only) appends the auth-store step; steps 1 and 2 stay
 	// byte-unchanged and any applied database upgrades transactionally.
 	{Version: 3, Name: "auth-store", Apply: migrateAuthStore},
+	// V4 appends the persisted admin identity step; steps 1-3 stay
+	// byte-unchanged and any applied database upgrades transactionally. A
+	// pre-existing v3 admin row gains no username and remains fail-closed at
+	// the identity read (no invented identity, no reopened bootstrap).
+	{Version: 4, Name: "auth-identity", Apply: migrateAuthIdentityStore},
 }
 
 const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (

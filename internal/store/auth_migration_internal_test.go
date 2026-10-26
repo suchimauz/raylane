@@ -90,8 +90,8 @@ func TestT008StorageLegacyV1V2UpgradePreservesData(t *testing.T) {
 		versions = append(versions, v)
 	}
 	rows.Close()
-	if len(versions) != 3 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 {
-		t.Fatalf("versions=%v want [1 2 3]", versions)
+	if len(versions) != 4 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 {
+		t.Fatalf("versions=%v want [1 2 3 4]", versions)
 	}
 	if nd, err := s2.GetNode(ctx, "node-1"); err != nil || string(nd.Doc.Raw) != `{"name":"keep-me"}` {
 		t.Fatalf("node preserved: %+v err=%v", nd, err)
@@ -144,7 +144,19 @@ func TestT008StorageV3FailureRollsBackSchemaAndVersion(t *testing.T) {
 	sentinel := errors.New("t008 v3 boom")
 	inject := func(attempt *int) {
 		migrations = append([]migration{}, migrations...)
-		migrations[len(migrations)-1] = migration{Version: 3, Name: "auth-store", Apply: func(ctx context.Context, tx *sql.Tx) error {
+		// Target the version-3 slot explicitly (NOT the last entry): V4 added a
+		// higher step, so len-1 is no longer v3. The injector replaces the v3
+		// step in place, preserving the test's v3-rollback intent.
+		v3idx := -1
+		for i, m := range migrations {
+			if m.Version == 3 {
+				v3idx = i
+			}
+		}
+		if v3idx < 0 {
+			t.Fatal("test setup: version 3 migration not found")
+		}
+		migrations[v3idx] = migration{Version: 3, Name: "auth-store", Apply: func(ctx context.Context, tx *sql.Tx) error {
 			// Actual partial v3 work FIRST — identical DDL to the real step.
 			if err := migrateAuthStore(ctx, tx); err != nil {
 				return err

@@ -946,7 +946,6 @@ func fileImports(f *ast.File) (map[string]bool, error) {
 // qualified call then fails closed instead of resolving under a guessed
 // name.
 
-
 // commentMask returns a byte-for-byte same-length copy of src in which
 // every comment's span is replaced by 0x00, except '\n' which is preserved
 // (so line structure, byte offsets and every string literal survive).
@@ -1245,7 +1244,6 @@ var closedNonFuncIdents = map[string]bool{
 // at ANY depth is a seam; an unresolved or cyclic named-type reference
 // fails CLOSED (never treated as safe). seen guards named-type cycles.
 
-
 // localTypeDecl carries a file-level named type's LAST underlying
 // expression plus whether ANY declaration of it is a direct alias (no
 // StructType/InterfaceType shape). Go lawfully allows extending a local
@@ -1368,7 +1366,6 @@ type activePath struct {
 // pointer edge INSIDE a loop keeps its mark through the re-entry. This is
 // the caller-owned branch lifetime that replaces the self-restoring helper.
 
-
 // checkFieldListEdgesIndirected is the field-list walker for a struct or
 // interface reached through an indirection (a pointer/slice/map/chan
 // element). The indirection that reached THIS struct is owned by the calling
@@ -1463,10 +1460,8 @@ type scopeFrame struct {
 	declared map[string]bool
 }
 
-
 // pushScope enters a new lexical block; popScope restores every name declared
 // in it to its pre-block binding.
-
 
 // declareInScope binds `name` to `typ` in `named`, snapshotting the outer
 // binding the FIRST time `name` is declared in this block. A re-declaration in
@@ -1499,8 +1494,6 @@ type scopeFrame struct {
 // CURRENT scopeFrame, so the declared names live to the end of the enclosing
 // statement list and are restored at its boundary (not leaked past a nested
 // shadow). TYPE-only GenDecls are still seam-checked by checkDecls elsewhere.
-
-
 
 // classifyOneBinding rejects a single name/value binding whose RHS is a
 // named function or method value, and records an ordinary value binding
@@ -1602,7 +1595,6 @@ var closedPackageCallResults = map[string]map[string][]string{
 // This is the C4 producer-arity evidence: a call bound to N names must
 // produce exactly N non-function result slots.
 
-
 // containerElementNonFunc is the C4 positive element-kind proof for an index
 // expression container[key]: it resolves the container's element type and
 // requires it to resolve positively non-function. The container may be a
@@ -1665,31 +1657,17 @@ var localKindValue = &ast.CallExpr{}
 // from the enclosing package file set to anything but a FuncDecl, fails
 // closed. Call argument expressions are literal-scanned too.
 
-// methodOnNonFuncField proves a recv.Field.Method() call is an ordinary
-// method call on a concrete NON-FUNCTION field value (not a function-typed
-// dispatch seam). It resolves the receiver base to its named struct type,
-// looks up the field Field, and accepts ONLY when (a) that field's type is
-// positively non-function, and (b) Method is a member of the closed selector
-// call set — the accepted non-func method surface (sync.Mutex Lock/Unlock,
-// time.Time methods). A function-typed field, a shadowed/unresolvable base,
-// or a Method outside the closed set yields no proof (returns false) so the
-// caller fails closed.
-
-// isGoBuiltinName recognises the predeclared callable functions.
-
-// closedCallSelectors is the closed set of selector call names the three
-// protection files legitimately use on values of the accepted non-func
-// types (sync.Mutex, time.Time; crypto/rand's Reader is a value, never a
-// call target). Adding a member is a contract change; anything else fails
-// closed.
-var closedCallSelectors = map[string]bool{
-	"Lock": true, "Unlock": true, // sync.Mutex methods
-	"Before": true, "After": true, "Unix": true, "Sub": true, "Add": true, "Equal": true, "Nanosecond": true, // time.Time methods
-}
+// [The bespoke interpreter and its name-based call-surface allowlist were
+// removed in the go/types classifier transition (commit af778b2). Seam
+// classification is now purely type-based: a direct method call on a
+// positively resolved CONCRETE receiver is accepted whatever its name; there
+// is intentionally no name list and no receiver-type list here. The stale
+// closedCallSelectors map and the methodOnNonFuncField/isGoBuiltinName
+// comments were deleted to keep this file from contradicting the type-based
+// contract.]
 
 // checkFuncCallSite covers the go/defer call positions through the same
 // conservative call-target rule, and checks call arguments.
-
 
 // receiverTypeOf returns an AST Ident naming the receiver's named type for
 // a method's receiver field, unwrapping one pointer level (a *T receiver has

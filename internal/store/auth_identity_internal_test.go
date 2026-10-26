@@ -98,3 +98,60 @@ func TestT008StorageV4V3RowWithoutUsernameIsNoIdentity(t *testing.T) {
 		t.Fatalf("v3-row identity = %v, want ErrNotFound (no-identity category)", err)
 	}
 }
+
+// Embedded-NUL byte bound: a row whose username is "x\x00" followed by a
+// large tail reports length(TEXT)=1 (SQLite counts code points only up to the
+// first NUL), so a length(TEXT) guard would pass it and project an unbounded
+// username. The byte-length guard length(CAST(username AS BLOB)) must reject
+// it at the SQL boundary — the read is the no-identity category, and the
+// oversized bytes are never projected into Go.
+func TestT008StorageV4EmbeddedNULUsernameIsRejected(t *testing.T) {
+	ctx := context.Background()
+	s, path := openFreshAuthStore(t)
+	// Plant a hostile row directly through the private pool, bypassing the
+	// validated create, to plant a TEXT username whose BYTE length far exceeds
+	// the bound but whose length(TEXT) is 1 (NUL at index 1).
+	hostile := append([]byte{'x', 0x00}, bytesOf(0x61, 20000)...)
+	if err := authIdentityPlantRowForTests(ctx, s, path, hostile); err != nil {
+		t.Fatalf("plant hostile row: %v", err)
+	}
+	// The identity read must be the no-identity category, never projecting the
+	// 20,002 hostile bytes into Go.
+	if _, err := s.AdminIdentity(ctx); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("embedded-NUL identity = %v, want ErrNotFound (byte-bound guard)", err)
+	}
+}
+
+// A username whose byte length is within the hard bound but whose code-point
+// count exceeds 256 must also be rejected (byte-bound passes, rune-bound fails
+// in Go). 300 ASCII 'a' bytes are 300 runes, over the 256 code-point limit.
+func TestT008StorageV4TooManyCodePointsRejected(t *testing.T) {
+	ctx := context.Background()
+	s, path := openFreshAuthStore(t)
+	tooMany := bytesOf('a', 300) // 300 bytes, 300 runes: bytes<=1024 but runes>256
+	if err := authIdentityPlantRowForTests(ctx, s, path, tooMany); err != nil {
+		t.Fatalf("plant row: %v", err)
+	}
+	if _, err := s.AdminIdentity(ctx); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("over-codepoint identity = %v, want ErrNotFound (rune bound)", err)
+	}
+}
+
+// authIdentityPlantRowForTests inserts a complete valid verifier row with a
+// caller-supplied raw username through the SAME private pool the production
+// table lives on (no production seam is added). It is used ONLY to plant
+// hostile or boundary rows the validated create would reject, so the read
+// guard can be proven against them. The closure row is inserted so the record
+// is a realistic consumed state; the read under test only consults
+// admin_verifier.
+func authIdentityPlantRowForTests(ctx context.Context, s *Store, path string, username []byte) error {
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO admin_verifier (id, format_version, argon2_version, time_cost, memory_kib, parallelism, salt, derived_key, username)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		authFormatVersion, authArgon2Version, authTimeCost, authMemoryKiB, authParallelism,
+		bytesOf(0x11, authSaltBytes), bytesOf(0x22, authDerivedKeyByte), string(username)); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO bootstrap_state (id, consumed) VALUES (1, 1)`)
+	return err
+}

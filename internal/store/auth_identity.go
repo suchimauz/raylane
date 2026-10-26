@@ -31,17 +31,20 @@ type AdminIdentity struct {
 // k1GuardedIdentitySelect is the K1-style read boundary for the V4 identity:
 // the WHERE clause enforces storage class (typeof), the exact signed-integer
 // verifier values, the exact BLOB byte lengths, and that username is a TEXT
-// blob whose BYTE length is within the hard bound INSIDE SQLite, so a
+// blob whose BYTE length is within the hard bound INSIDE SQLite — computed
+// with length(CAST(username AS BLOB)), because length() on TEXT counts
+// Unicode code points only UP TO THE FIRST NUL (so "x\0"+20000 bytes reports
+// length 1 and would otherwise pass with an unbounded projection). A
 // wrong-class, wrong-value, NULL, oversized or unbacked row yields no rows at
-// all. A v3 row whose username column is NULL therefore matches nothing and is
-// the no-identity category. Well-formedness (valid UTF-8, code-point length)
-// is re-proven in Go on the projected copy.
+// all, so a v3 row whose username column is NULL is the no-identity category.
+// Well-formedness (valid UTF-8, code-point length 1..256) is re-proven in Go
+// on the projected copy.
 const k1GuardedIdentitySelect = `SELECT username, format_version, argon2_version, time_cost, memory_kib, parallelism, salt, derived_key
 	FROM admin_verifier
 	WHERE id = 1
 	  AND typeof(username) = 'text'
-	  AND length(username) >= 1
-	  AND length(username) <= 1024
+	  AND length(CAST(username AS BLOB)) >= 1
+	  AND length(CAST(username AS BLOB)) <= 1024
 	  AND typeof(format_version) = 'integer' AND format_version = 1
 	  AND typeof(argon2_version) = 'integer' AND argon2_version = 19
 	  AND typeof(time_cost) = 'integer' AND time_cost = 3

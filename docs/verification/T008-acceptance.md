@@ -51,7 +51,9 @@ logs are retained in the task evidence stores, not here.
 ## Status reconciliation
 
 - **T008: COMPLETE / ACCEPTED** (by both independent roles; this doc records it).
-- **T009: OPEN / UNCHECKED.** T009 delivers the same-origin HTTPS sign-in/status shell
-  on top of the accepted T008 runtime. It stays unchecked until a fresh independent
-  review and execution accept it. T009 is NOT part of this T008 acceptance.
+- **T009: COMPLETE / EXTERNALLY ACCEPTED** (updated 2026-10-26, after this T008 record
+  was written). T009 delivered the same-origin HTTPS sign-in/status shell on top of the
+  accepted T008 runtime and was accepted by independent review/designer/QA at
+  `3d7b342`; see [T009 acceptance](T009-acceptance.md). The historical T008 limits below
+  are unchanged.
 - **Foundation: OPEN.** No foundation acceptance is implied by T008 or T009.

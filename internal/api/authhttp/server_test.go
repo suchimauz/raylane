@@ -19,16 +19,27 @@ import (
 	"github.com/suchimauz/raylane/internal/store"
 )
 
+// testListen/testOrigin are the coherent loopback fixtures for every test in
+// this package: a FIXED numeric loopback bind with an exactly matching
+// canonical numeric origin. Validate refuses an ephemeral :0 bind and a
+// non-numeric hostname origin, so the old "127.0.0.1:0" + "https://manage.test"
+// pair is not a valid configuration; nothing binds testListen here — the
+// handler tests run through httptest in-process.
+const (
+	testListen = "127.0.0.1:8443"
+	testOrigin = "https://127.0.0.1:8443"
+)
+
 // newTestServer opens a REAL store in t.TempDir and returns a Server plus the
 // LAN handler. Every test below drives the real handlers over httptest with
 // real store transactions — no source-text assertions.
 func newTestServer(t *testing.T, origin string) (*Server, http.Handler) {
 	t.Helper()
 	if origin == "" {
-		origin = "https://manage.test"
+		origin = testOrigin
 	}
 	cfg := Config{
-		ManagementListen: "127.0.0.1:0",
+		ManagementListen: testListen,
 		TrustedOrigin:    origin,
 		TLSCertPath:      "unused",
 		TLSKeyPath:       "unused",
@@ -96,7 +107,7 @@ func loginCookie(t *testing.T, resp *http.Response) *http.Cookie {
 func TestT008LoginCookieExactSettledAttributes(t *testing.T) {
 	srv, h := newTestServer(t, "")
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
-	resp := login(t, h, "https://manage.test", "admin", "correct horse battery staple")
+	resp := login(t, h, testOrigin, "admin", "correct horse battery staple")
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("login status = %d, want 204", resp.StatusCode)
 	}
@@ -127,10 +138,10 @@ func TestT008LoginCookieExactSettledAttributes(t *testing.T) {
 // the per-request requestId differs (required by the contract).
 func TestT008LoginFailureIsGenericNoOracle(t *testing.T) {
 	srv, h := newTestServer(t, "")
-	before := problemOf(t, login(t, h, "https://manage.test", "whoever", "whatever"))
+	before := problemOf(t, login(t, h, testOrigin, "whoever", "whatever"))
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
-	wrongPass := problemOf(t, login(t, h, "https://manage.test", "admin", "wrong password here"))
-	wrongUser := problemOf(t, login(t, h, "https://manage.test", "no-such-user", "correct horse battery staple"))
+	wrongPass := problemOf(t, login(t, h, testOrigin, "admin", "wrong password here"))
+	wrongUser := problemOf(t, login(t, h, testOrigin, "no-such-user", "correct horse battery staple"))
 	for _, p := range []problem{before, wrongPass, wrongUser} {
 		if p.RequestID == "" {
 			t.Fatal("problem body must carry a non-empty requestId")
@@ -151,14 +162,14 @@ func TestT008LoginFailureIsGenericNoOracle(t *testing.T) {
 // SIMILAR origin is a 403 forbidden with the generic body, before any session
 // or credential processing; the received origin is never echoed.
 func TestT008OriginCSRFRejectBeforeAnyWork(t *testing.T) {
-	srv, h := newTestServer(t, "https://manage.test")
+	srv, h := newTestServer(t, testOrigin)
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
 	cases := map[string]string{
 		"missing":      "",
 		"null":         "null",
 		"foreign":      "https://evil.test",
-		"similar":      "https://manage.test.evil.test",
-		"wrong-scheme": "http://manage.test",
+		"similar":      "https://127.0.0.1.evil.test",
+		"wrong-scheme": "http://127.0.0.1:8443",
 	}
 	body := `{"username":"admin","password":"correct horse battery staple"}`
 	for name, origin := range cases {
@@ -175,7 +186,7 @@ func TestT008OriginCSRFRejectBeforeAnyWork(t *testing.T) {
 		if p.Code != codeForbidden || p.Message != msgForbidden {
 			t.Fatalf("%s: problem = %+v, want generic forbidden", name, p)
 		}
-		if strings.Contains(string(raw), "evil") || strings.Contains(string(raw), "manage") {
+		if strings.Contains(string(raw), "evil") || strings.Contains(string(raw), "127.0.0.1") {
 			t.Fatalf("%s: body echoes the origin: %s", name, raw)
 		}
 	}
@@ -188,8 +199,8 @@ func TestT008OriginCSRFRejectBeforeAnyWork(t *testing.T) {
 // a 404).
 func TestT008LANHandlerNeverRoutesBootstrap(t *testing.T) {
 	_, h := newTestServer(t, "")
-	unknown := do(h, http.MethodPost, "/api/v1/bootstrap", "https://manage.test", `{}`, nil)
-	bogus := do(h, http.MethodPost, "/api/v1/no-such-route", "https://manage.test", `{}`, nil)
+	unknown := do(h, http.MethodPost, "/api/v1/bootstrap", testOrigin, `{}`, nil)
+	bogus := do(h, http.MethodPost, "/api/v1/no-such-route", testOrigin, `{}`, nil)
 	if unknown.StatusCode != http.StatusForbidden || bogus.StatusCode != http.StatusForbidden {
 		t.Fatalf("LAN bootstrap=%d bogus=%d, want 403/403", unknown.StatusCode, bogus.StatusCode)
 	}
@@ -207,7 +218,7 @@ func TestT008LANHandlerNeverRoutesBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	post.Header.Set("Origin", "https://manage.test")
+	post.Header.Set("Origin", testOrigin)
 	resp, err := client.Do(post)
 	if err != nil {
 		t.Fatal(err)
@@ -286,8 +297,8 @@ func TestT008RequestIdentity(t *testing.T) {
 func TestT008LogoutExpiresCookieWithSameAttributes(t *testing.T) {
 	srv, h := newTestServer(t, "")
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
-	c := loginCookie(t, login(t, h, "https://manage.test", "admin", "correct horse battery staple"))
-	resp := do(h, http.MethodDelete, "/api/v1/session", "https://manage.test", "", func(r *http.Request) { r.AddCookie(c) })
+	c := loginCookie(t, login(t, h, testOrigin, "admin", "correct horse battery staple"))
+	resp := do(h, http.MethodDelete, "/api/v1/session", testOrigin, "", func(r *http.Request) { r.AddCookie(c) })
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout status = %d, want 204", resp.StatusCode)
 	}
@@ -323,7 +334,7 @@ func TestT008SessionIdleExpiryUsesServerClock(t *testing.T) {
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
 	now := time.Unix(1700000000, 0)
 	srv.now = func() time.Time { return now }
-	c := loginCookie(t, login(t, h, "https://manage.test", "admin", "correct horse battery staple"))
+	c := loginCookie(t, login(t, h, testOrigin, "admin", "correct horse battery staple"))
 	state := func() int {
 		return do(h, http.MethodGet, "/api/v1/state", "", "", func(r *http.Request) { r.AddCookie(c) }).StatusCode
 	}
@@ -344,7 +355,7 @@ func TestT008LimiterBoundaryAndRetryAfter(t *testing.T) {
 	srv, h := newTestServer(t, "")
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
 	attempt := func(body, peer string) *http.Response {
-		return do(h, http.MethodPost, "/api/v1/session", "https://manage.test", body, func(r *http.Request) {
+		return do(h, http.MethodPost, "/api/v1/session", testOrigin, body, func(r *http.Request) {
 			r.RemoteAddr = peer
 		})
 	}
@@ -409,7 +420,7 @@ func TestT008GlobalArgon2CeilingSpansAllKDFPaths(t *testing.T) {
 	// KDF on any path), then prove a third concurrent attempt is refused fast.
 	srv.limiter.argon2 <- struct{}{}
 	srv.limiter.argon2 <- struct{}{}
-	resp := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"admin","password":"x"}`, func(r *http.Request) {
+	resp := do(h, http.MethodPost, "/api/v1/session", testOrigin, `{"username":"admin","password":"x"}`, func(r *http.Request) {
 		r.RemoteAddr = "198.51.100.11:1" // fresh peer, bucket has tokens
 	})
 	defer resp.Body.Close()
@@ -422,7 +433,7 @@ func TestT008GlobalArgon2CeilingSpansAllKDFPaths(t *testing.T) {
 	// Drain and the next attempt is admitted again.
 	<-srv.limiter.argon2
 	<-srv.limiter.argon2
-	resp2 := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"nope","password":"x"}`, func(r *http.Request) {
+	resp2 := do(h, http.MethodPost, "/api/v1/session", testOrigin, `{"username":"nope","password":"x"}`, func(r *http.Request) {
 		r.RemoteAddr = "198.51.100.12:1"
 	})
 	defer resp2.Body.Close()
@@ -436,7 +447,7 @@ func TestT008GlobalArgon2CeilingSpansAllKDFPaths(t *testing.T) {
 func TestT008StateTruthfulBody(t *testing.T) {
 	srv, h := newTestServer(t, "")
 	bootstrapAdmin(t, srv, "admin", "correct horse battery staple")
-	c := loginCookie(t, login(t, h, "https://manage.test", "admin", "correct horse battery staple"))
+	c := loginCookie(t, login(t, h, testOrigin, "admin", "correct horse battery staple"))
 	resp := do(h, http.MethodGet, "/api/v1/state", "", "", func(r *http.Request) { r.AddCookie(c) })
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(mustRead(t, resp), &raw); err != nil {
@@ -536,7 +547,7 @@ func TestT008LocalBootstrapConcurrencyOneWinner(t *testing.T) {
 	if wins != 1 {
 		t.Fatalf("winners = %d, want exactly 1 (codes %v)", wins, codes)
 	}
-	if c := login(t, srv.Handler(), "https://manage.test", "admin", "valid bootstrap password").StatusCode; c != http.StatusNoContent {
+	if c := login(t, srv.Handler(), testOrigin, "admin", "valid bootstrap password").StatusCode; c != http.StatusNoContent {
 		t.Fatalf("post-bootstrap LAN login = %d, want 204", c)
 	}
 }

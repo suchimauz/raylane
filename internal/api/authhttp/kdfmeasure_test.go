@@ -49,7 +49,7 @@ func processPeakRSSKiB() int64 {
 // per-attempt durations and process heap growth as the measured evidence.
 func TestT008MeasureGlobalArgon2Ceiling(t *testing.T) {
 	cfg := Config{
-		ManagementListen: "127.0.0.1:0", TrustedOrigin: "https://m.test",
+		ManagementListen: testListen, TrustedOrigin: testOrigin,
 		TLSCertPath: "x", TLSKeyPath: "x",
 		DBPath: filepath.Join(t.TempDir(), "s.db"), UnixSocketDir: t.TempDir(),
 	}
@@ -99,7 +99,7 @@ func TestT008MeasureGlobalArgon2Ceiling(t *testing.T) {
 			defer wg.Done()
 			body := `{"username":"admin","password":"wrong password variant ` + string(rune('A'+i)) + `"}`
 			t0 := time.Now()
-			resp := do(h, http.MethodPost, "/api/v1/session", "https://m.test", body, func(r *http.Request) {
+			resp := do(h, http.MethodPost, "/api/v1/session", testOrigin, body, func(r *http.Request) {
 				r.RemoteAddr = fmt.Sprintf("198.51.100.%d:7", 20+i/5)
 			})
 			resp.Body.Close()

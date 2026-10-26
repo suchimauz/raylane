@@ -10,8 +10,8 @@ import (
 // Early contract probes exist ONLY in bui's frozen WIP snapshot. They deliberately
 // assert the already assigned product contract, not the author's current assertions.
 func TestBuiCurrentContractOriginMultiplicity(t *testing.T) {
-	_, h := newTestServer(t, "https://manage.test")
-	resp := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"u","password":"p"}`, func(r *http.Request) { r.Header.Add("Origin", "https://foreign.test") })
+	_, h := newTestServer(t, testOrigin)
+	resp := do(h, http.MethodPost, "/api/v1/session", testOrigin, `{"username":"u","password":"p"}`, func(r *http.Request) { r.Header.Add("Origin", "https://foreign.test") })
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("two Origin fields trusted+foreign accepted through CSRF: got %d want 403", resp.StatusCode)
@@ -51,12 +51,12 @@ func TestBuiCurrentContractConfigurationRejectsUnsafe(t *testing.T) {
 	}
 }
 func TestBuiCurrentContractRetryAfterOnlyComputable(t *testing.T) {
-	_, h := newTestServer(t, "https://manage.test")
+	_, h := newTestServer(t, testOrigin)
 	// The global semaphore is occupied while this peer's bucket is fresh.
-	s, h := newTestServer(t, "https://manage.test")
+	s, h := newTestServer(t, testOrigin)
 	s.limiter.argon2 <- struct{}{}
 	s.limiter.argon2 <- struct{}{}
-	resp := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"u","password":"p"}`, nil)
+	resp := do(h, http.MethodPost, "/api/v1/session", testOrigin, `{"username":"u","password":"p"}`, nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 429 {
 		t.Fatalf("want429 got%d", resp.StatusCode)
@@ -66,17 +66,17 @@ func TestBuiCurrentContractRetryAfterOnlyComputable(t *testing.T) {
 	}
 }
 func TestBuiCurrentContractLANBootstrapGeneric(t *testing.T) {
-	_, h := newTestServer(t, "https://manage.test")
-	resp := do(h, http.MethodPost, "/bootstrap-token", "https://manage.test", `{}`, nil)
+	_, h := newTestServer(t, testOrigin)
+	resp := do(h, http.MethodPost, "/bootstrap-token", testOrigin, `{}`, nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("LAN bootstrap/unknown protected refusal=%d wantgeneric403", resp.StatusCode)
 	}
 }
 func TestBuiCurrentContractFreshStateAndCookie(t *testing.T) {
-	s, h := newTestServer(t, "https://manage.test")
+	s, h := newTestServer(t, testOrigin)
 	bootstrapAdmin(t, s, "operator", "synthetic-password")
-	resp := do(h, http.MethodPost, "/api/v1/session", "https://manage.test", `{"username":"operator","password":"synthetic-password"}`, nil)
+	resp := do(h, http.MethodPost, "/api/v1/session", testOrigin, `{"username":"operator","password":"synthetic-password"}`, nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 204 {
 		t.Fatalf("login=%d", resp.StatusCode)
@@ -94,7 +94,7 @@ func TestBuiCurrentContractFreshStateAndCookie(t *testing.T) {
 	if !strings.Contains(b.String(), `"phase":"not-running"`) {
 		t.Errorf("fresh state misclaims guarded dataplane: %s", b.String())
 	}
-	logout := do(h, http.MethodDelete, "/api/v1/session", "https://manage.test", "", func(r *http.Request) { r.AddCookie(c) })
+	logout := do(h, http.MethodDelete, "/api/v1/session", testOrigin, "", func(r *http.Request) { r.AddCookie(c) })
 	defer logout.Body.Close()
 	if !strings.Contains(logout.Header.Get("Set-Cookie"), "Max-Age=0") {
 		t.Errorf("logout fails to delete cookie: %q", logout.Header.Get("Set-Cookie"))

@@ -34,6 +34,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/suchimauz/raylane/internal/api/authhttp"
 	"github.com/suchimauz/raylane/internal/store"
@@ -119,8 +120,15 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 }
 
 // decodeStrictConfig decodes a strict JSON object: unknown fields, trailing
-// data and non-object shapes are rejected.
+// data and non-object shapes are rejected. The raw bytes are checked for
+// valid UTF-8 FIRST — encoding/json would silently replace every invalid byte
+// with U+FFFD and then accept the replaced value (e.g. turning an invalid
+// byte in a path into a literal '\ufffd' filename), which is not a
+// configuration any operator wrote.
 func decodeStrictConfig(raw []byte, dst *serveConfigJSON) error {
+	if !utf8.Valid(raw) {
+		return errors.New("config is not valid UTF-8")
+	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -449,6 +457,12 @@ func readBootstrapCredentials(stdin io.Reader) (username, password string, err e
 	}
 	if len(body) > bootstrapCredentialsBound {
 		return "", "", errors.New("credential JSON exceeds the bound")
+	}
+	// Raw-bytes UTF-8 gate BEFORE decoding, for the same reason as
+	// decodeStrictConfig: the decoder's silent U+FFFD replacement would both
+	// accept invalid input and alias two different raw usernames.
+	if !utf8.Valid(body) {
+		return "", "", errors.New("credential JSON is not valid UTF-8")
 	}
 	var creds struct {
 		Username string `json:"username"`

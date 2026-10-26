@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/suchimauz/raylane/internal/api/auth"
 	"github.com/suchimauz/raylane/internal/store"
@@ -262,12 +263,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // a valid session it revokes and returns 204 (idempotent — re-logout is 401
 // because the session is gone).
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	raw, err := r.Cookie(sessionCookieName)
-	if err != nil || !s.sess.Lookup(raw.Value) {
+	raw, ok := sessionCookieValue(r)
+	if !ok || !s.sess.Lookup(raw) {
 		writeProblem(w, http.StatusUnauthorized, codeInvalidCredentials, msgInvalidCredentials, requestIDFrom(r.Context()))
 		return
 	}
-	s.sess.Revoke(raw.Value)
+	s.sess.Revoke(raw)
 	// Expire: empty value + Max-Age=0 (maxAge<0 serializes as Max-Age=0) + the
 	// SAME attributes (Secure, HttpOnly, SameSite=Strict, host-only, Path).
 	http.SetCookie(w, sessionCookie("", -1))
@@ -276,11 +277,44 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // authenticated reports whether the request carries a valid session cookie.
 func (s *Server) authenticated(r *http.Request) bool {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
+	raw, ok := sessionCookieValue(r)
+	if !ok {
 		return false
 	}
-	return s.sess.Lookup(c.Value)
+	return s.sess.Lookup(raw)
+}
+
+// sessionCookieValue returns the single session-cookie value in r, or ok=false
+// when the named cookie is absent, DUPLICATED or AMBIGUOUS across EVERY Cookie
+// header.
+//
+// net/http's lenient request parser silently drops malformed pairs, so a
+// smuggled second form of the session cookie ("raylane_session =v" — a space
+// before '=', making the name an invalid token — or a bare "raylane_session")
+// would be invisible to it, leaving the request looking single-valued. Here
+// every ';'-separated pair of every Cookie header is examined and the name is
+// matched after trimming surrounding whitespace, so any second occurrence —
+// in any header, in any order, well-formed or not — fails closed. Exactly one
+// occurrence reaches lookup/revoke; the caller never gets a first-wins guess.
+func sessionCookieValue(r *http.Request) (value string, ok bool) {
+	count := 0
+	for _, header := range r.Header.Values("Cookie") {
+		for _, pair := range strings.Split(header, ";") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			name, val, _ := strings.Cut(pair, "=")
+			if strings.TrimSpace(name) == sessionCookieName {
+				count++
+				value = strings.TrimSpace(val)
+			}
+		}
+	}
+	if count != 1 {
+		return "", false
+	}
+	return value, true
 }
 
 // --- local-only bootstrap handlers (Unix transport only) ---
@@ -381,9 +415,16 @@ func readBounded(r *http.Request, limit int64) ([]byte, error) {
 }
 
 // decodeStrictJSON decodes a JSON object, rejecting trailing garbage and
-// unknown shapes by using a strict decoder. A syntax or trailing-data error is
-// reported as an error (the caller maps it to 400).
+// unknown shapes by using a strict decoder. The body is first checked as RAW
+// BYTES: encoding/json silently replaces every invalid byte with U+FFFD, which
+// would both accept originally-invalid input and create an alias between two
+// different raw usernames/passwords — the bytes the caller validated must be
+// the bytes decoded. A syntax or trailing-data error is reported as an error
+// (the caller maps it to 400).
 func decodeStrictJSON(body []byte, dst interface{}) error {
+	if !utf8.Valid(body) {
+		return errors.New("authhttp: request body is not valid UTF-8")
+	}
 	dec := json.NewDecoder(strings.NewReader(string(body)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

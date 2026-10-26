@@ -24,8 +24,8 @@ func authoredProfile(t *testing.T) *api.Profile {
 	if err != nil {
 		t.Fatalf("ParseCapabilityProfile(authored): %v", err)
 	}
-	if p.Version() != 1 {
-		t.Fatalf("profile version = %d, want 1", p.Version())
+	if p.Version() != 2 {
+		t.Fatalf("profile version = %d, want 2", p.Version())
 	}
 	return p
 }
@@ -116,7 +116,7 @@ func TestProjectAllFourProtocols(t *testing.T) {
 			"endpoint": "w.example", "endpointPort": float64(51820),
 			"publicKey": "pub", "privateKey": secretCanary, "preSharedKey": secretCanary,
 			"localAddresses": []any{"10.0.0.2/32"}, "mtu": float64(1420), "keepAlive": float64(25),
-			"reserved":  "000000",
+			"reserved":  []any{float64(0), float64(0), float64(0)},
 			"finalMask": map[string]any{"leaf": nestedCanary},
 		}, map[string]bool{"privateKey": true},
 			[]string{"endpoint", "endpointPort", "publicKey", "localAddresses", "mtu", "keepAlive", "reserved"},

@@ -1,0 +1,387 @@
+// Package nodes is the node-field validation seam (T011-A). It executes the
+// authored capability profile's required/type/bounds/enum/dependency rules
+// against a submitted node envelope, producing deterministic, value-free
+// results. It is pure validation: no storage, no transport, no compiler, no
+// network.
+//
+// Preservation over correction is the central rule: absent fields stay absent,
+// explicit defaults stay present, inactive data is retained, and an invalid
+// submitted value remains in the caller's original raw bytes for honest draft
+// storage — validation never rewrites, drops, or defaults a submitted value.
+//
+// Secret fields are evaluated by TRUSTED sealed-state presence (supplied by the
+// store boundary), never by a client-provided boolean and never by reading a
+// plaintext value. No secret or unknown value ever enters a result, issue,
+// projection or log.
+package nodes
+
+import (
+	"github.com/suchimauz/raylane/internal/capability"
+)
+
+// IssueCode is the CLOSED vocabulary of validation issue kinds. Like the
+// diagnostic codes, the set is fixed; a result can only carry these constants,
+// never caller bytes. Each code maps to one static, value-free reason string.
+type IssueCode string
+
+const (
+	// IssueRequiredMissing: an authored required field is absent.
+	IssueRequiredMissing IssueCode = "requiredMissing"
+	// IssueRequiredSecretMissing: an authored required secret has no trusted
+	// sealed presence.
+	IssueRequiredSecretMissing IssueCode = "requiredSecretMissing"
+	// IssueTypeMismatch: a field value does not match its declared type.
+	IssueTypeMismatch IssueCode = "typeMismatch"
+	// IssueEnumViolation: an enum value is not in the declared allowed set.
+	IssueEnumViolation IssueCode = "enumViolation"
+	// IssueBoundsViolation: an integer/length/item bound is violated.
+	IssueBoundsViolation IssueCode = "boundsViolation"
+	// IssuePatternViolation: a string does not match its declared pattern.
+	IssuePatternViolation IssueCode = "patternViolation"
+	// IssueArrayItemViolation: an array element is the wrong type, out of the
+	// item bound, or a nested container.
+	IssueArrayItemViolation IssueCode = "arrayItemViolation"
+	// IssueDependencyMissing: a field with dependencies.requires is present but
+	// a required target is absent.
+	IssueDependencyMissing IssueCode = "dependencyMissing"
+	// IssueDependencyIncompatible: a field is present alongside an
+	// incompatibleWith target.
+	IssueDependencyIncompatible IssueCode = "dependencyIncompatible"
+	// IssueUnsupportedField: a declared field is not applicable (supported=
+	// false or activeByDefault handling places it out of scope for validity).
+	IssueUnsupportedField IssueCode = "unsupportedField"
+	// IssueUnknownField: a submitted field is not declared by the profile.
+	IssueUnknownField IssueCode = "unknownField"
+	// IssueReservedByteRange: the WireGuard reserved array carries a byte
+	// outside 0..255 (narrow documented domain semantic for the 0-or-3 byte
+	// list; the profile schema has no per-item bound key).
+	IssueReservedByteRange IssueCode = "reservedByteRange"
+)
+
+// issueReason maps each code to ONE static, value-free reason. It is the only
+// source of outward issue text.
+var issueReason = map[IssueCode]string{
+	IssueRequiredMissing:        "a required field is missing",
+	IssueRequiredSecretMissing:  "a required secret has no stored value",
+	IssueTypeMismatch:           "a field has the wrong type",
+	IssueEnumViolation:          "a field value is not an allowed choice",
+	IssueBoundsViolation:        "a field value is outside its allowed range",
+	IssuePatternViolation:       "a field value has an invalid format",
+	IssueArrayItemViolation:     "an array element is invalid",
+	IssueDependencyMissing:      "a required companion field is missing",
+	IssueDependencyIncompatible: "a field conflicts with another present field",
+	IssueUnsupportedField:       "a declared field is not supported here",
+	IssueUnknownField:           "a field is not recognized",
+	IssueReservedByteRange:      "a reserved byte is outside 0..255",
+}
+
+func (c IssueCode) valid() bool { _, ok := issueReason[c]; return ok }
+
+// Issue is one deterministic, value-free validation finding. Field is the
+// declared (profile-authored) field path when known; for an attacker-
+// controlled unknown name it is the generic bucket path "unknown" so the opaque
+// name never echoes into a result. Reason is a package constant, never bytes.
+type Issue struct {
+	Code   IssueCode `json:"code"`
+	Field  string    `json:"field"`
+	Reason string    `json:"reason"`
+}
+
+// Input is the trusted, typed validation input. SecretPresence is supplied by
+// the store boundary (which knows sealed state), NEVER by the client: a caller
+// cannot assert a secret exists by passing a boolean.
+type Input struct {
+	// Protocol selects the profile protocol (vless/socks5/http/wireguard).
+	Protocol string
+	// Active holds the submitted active field map (decoded JSON object).
+	Active map[string]any
+	// Inactive holds fields the caller explicitly marks inactive. These are
+	// preserved and validated for shape but do not gate active validity.
+	Inactive map[string]any
+	// SecretPresence maps declared secret field names to whether a sealed
+	// value exists, from the store's trusted HasValue.
+	SecretPresence map[string]bool
+}
+
+// Result is the validation outcome. Status is domain.ValidationValid or
+// domain.ValidationInvalid. Applicable is false when the node cannot be
+// validated as a usable configuration (unknown protocol, an unresolved
+// capability, an unsupported protocol, or any invalid finding) — an
+// inapplicable node is never presented as valid. Issues are deterministic and
+// value-free. Secrets lists the DECLARED secret field names (never values).
+// Unknown lists attacker-controlled unknown names under the generic bucket
+// path, never the raw name. ProjectedActive/Inactive are the allowlisted,
+// value-copied safe projection for the valid subset.
+type Result struct {
+	Status     Validity
+	Applicable bool
+	Issues     []Issue
+	// Declared secret field names (presence-evaluated), never values.
+	Secrets []string
+	// Unknown attacker-controlled names, reported only under the bucket path.
+	Unknown []string
+}
+
+// Validity is the two-way validation verdict produced by an explicit Validate
+// call. It deliberately reuses the domain semantics (Valid/Invalid) but stays
+// local to avoid an import cycle with the store-facing domain package.
+type Validity int
+
+const (
+	Invalid Validity = iota
+	Valid
+)
+
+// Validate executes the profile's authored rules against the trusted input.
+// It never reads a secret value, never echoes an unknown or secret value, and
+// never mutates the input maps. Results are deterministic (sorted field order).
+func Validate(profile *capability.Profile, in Input) Result {
+	res := Result{Status: Valid, Applicable: true}
+	if profile == nil || !profile.HasProtocol(in.Protocol) {
+		// Unknown protocol fails closed: nothing is applicable, nothing valid.
+		res.Status = Invalid
+		res.Applicable = false
+		res.Issues = append(res.Issues, Issue{Code: IssueUnknownField, Field: "protocol", Reason: issueReason[IssueUnknownField]})
+		return res
+	}
+	names := profile.FieldNames(in.Protocol)
+	declared := make(map[string]capability.Field, len(names))
+	for _, n := range names {
+		f, _ := profile.Field(in.Protocol, n)
+		declared[n] = f
+		if f.Classification == "secret" {
+			res.Secrets = append(res.Secrets, n)
+		}
+	}
+
+	active := in.Active
+	if active == nil {
+		active = map[string]any{}
+	}
+	inactive := in.Inactive
+	if inactive == nil {
+		inactive = map[string]any{}
+	}
+
+	// Collect the full submitted declared-field presence (active + inactive)
+	// for dependency resolution, and detect unknown fields. Trusted sealed
+	// secret presence is REAL semantic presence too: a declared secret held
+	// only in the sealed store (no plaintext key anywhere) still participates
+	// in requires/incompatibleWith resolution — omitting it would report a
+	// bogus dependencyMissing for a correctly-sealed node.
+	present := make(map[string]bool, len(active)+len(inactive))
+	for _, n := range sortedKeys(active) {
+		present[n] = true
+	}
+	for _, n := range sortedKeys(inactive) {
+		present[n] = true
+	}
+	for _, n := range sortedKeysBool(in.SecretPresence) {
+		if in.SecretPresence[n] {
+			present[n] = true
+		}
+	}
+	// Unknown fields: any submitted name not declared. Report under the
+	// generic bucket path so an attacker-controlled name never echoes.
+	for _, n := range sortedKeys(active) {
+		if _, ok := declared[n]; !ok {
+			res.Unknown = append(res.Unknown, "unknown")
+			addIssue(&res, IssueUnknownField, "unknown")
+		}
+	}
+	for _, n := range sortedKeys(inactive) {
+		if _, ok := declared[n]; !ok {
+			res.Unknown = append(res.Unknown, "unknown")
+			addIssue(&res, IssueUnknownField, "unknown")
+		}
+	}
+
+	// Per-field validation, in sorted declaration order for determinism.
+	for _, n := range sortedKeysOf(declared) {
+		f := declared[n]
+		inActive := active[n]
+		_, hasActive := active[n]
+		_, hasInactive := inactive[n]
+		has := hasActive || hasInactive
+
+		// Required check. For a KNOWN field, presence means the field is a key
+		// in active/inactive. For a SECRET field, presence means the TRUSTED
+		// sealed state (SecretPresence) — a secret appearing as a key in the
+		// active map is a submitted VALUE (possibly a plaintext smuggle), never
+		// presence, and must not satisfy the requirement.
+		if f.Classification == "secret" {
+			if f.Required && !in.SecretPresence[n] {
+				addIssue(&res, IssueRequiredSecretMissing, n)
+			}
+		} else if f.Required && !has {
+			addIssue(&res, IssueRequiredMissing, n)
+		}
+
+		// Secret presence for an optional-but-present secret is trusted-state
+		// only; a missing sealed value on an optional secret is not an error,
+		// it is simply absent (presence drives apply later, not validity here).
+
+		// Active declared fields are validated for shape. Inactive declared
+		// fields are PRESERVED, not corrected: they stay in the caller's raw
+		// draft for a possible later return and are not shape-gated here (a
+		// collapsed/off option keeps its value; reactivation must not lose it).
+		// An invalid ACTIVE value is what makes the node invalid/inapplicable.
+		if hasActive {
+			checkValue(&res, n, f, inActive)
+		}
+
+		// Dependency rules. Presence of the SOURCE field — active, inactive or
+		// trusted sealed (for secrets) — drives requires/incompatibleWith: a
+		// sealed-only secret still depends on what it was authored to depend
+		// on (e.g. mldsa65Seed requires security). A required secret without
+		// trusted presence already produced requiredSecretMissing above; it
+		// contributes no further dependency findings.
+		hasTrustedSecret := f.Classification == "secret" && in.SecretPresence[n]
+		if (hasActive || hasInactive || hasTrustedSecret) && f.Dependencies != nil {
+			for _, tgt := range f.Dependencies.Requires {
+				if !present[tgt] {
+					addIssue(&res, IssueDependencyMissing, n)
+				}
+			}
+			for _, tgt := range f.Dependencies.IncompatibleWith {
+				if present[tgt] {
+					addIssue(&res, IssueDependencyIncompatible, n)
+				}
+			}
+		}
+	}
+
+	if len(res.Issues) > 0 {
+		res.Status = Invalid
+		// An invalid node is not applicable as a usable configuration.
+		res.Applicable = false
+	}
+	sortIssues(res.Issues)
+	return res
+}
+
+// checkValue validates one active declared field value, adding deterministic
+// value-free issues on failure.
+func checkValue(res *Result, name string, f capability.Field, val any) {
+	if f.Classification == "secret" {
+		// A secret's active VALUE is never inspected; only trusted presence
+		// (handled by the caller) matters. A submitted plaintext secret value
+		// is not accepted as a normal value.
+		return
+	}
+	// supported=false declared fields are not applicable for active use.
+	if f.HasSupported && !f.Supported {
+		addIssue(res, IssueUnsupportedField, name)
+		return
+	}
+	validateKnownValue(res, name, f, val)
+}
+
+// validateKnownValue runs the type/bounds/enum/pattern/array rules for one
+// known non-secret field value, appending the matching closed code.
+func validateKnownValue(res *Result, name string, f capability.Field, val any) {
+	ok, code := valueOK(f, val)
+	if !ok {
+		addIssue(res, code, name)
+	}
+}
+
+// valueOK checks a known scalar/array value against the field metadata and
+// returns the first violated closed code. Secret values never reach here.
+func valueOK(f capability.Field, val any) (bool, IssueCode) {
+	switch f.Type {
+	case "string":
+		s, ok := val.(string)
+		if !ok {
+			return false, IssueTypeMismatch
+		}
+		if f.HasMaxLength && len(s) > f.MaxLength {
+			return false, IssueBoundsViolation
+		}
+		if f.HasMinLength && len(s) < f.MinLength {
+			return false, IssueBoundsViolation
+		}
+		if f.Pattern != "" && !matchString(f, s) {
+			return false, IssuePatternViolation
+		}
+		return true, ""
+	case "integer":
+		n, ok := asInt(val)
+		if !ok {
+			return false, IssueTypeMismatch
+		}
+		if f.HasMinimum && n < f.Minimum {
+			return false, IssueBoundsViolation
+		}
+		if f.HasMaximum && n > f.Maximum {
+			return false, IssueBoundsViolation
+		}
+		return true, ""
+	case "boolean":
+		if _, ok := val.(bool); !ok {
+			return false, IssueTypeMismatch
+		}
+		return true, ""
+	case "enum":
+		s, ok := val.(string)
+		if !ok {
+			return false, IssueTypeMismatch
+		}
+		for _, a := range f.AllowedValues {
+			if s == a {
+				return true, ""
+			}
+		}
+		return false, IssueEnumViolation
+	case "array":
+		arr, ok := val.([]any)
+		if !ok {
+			return false, IssueTypeMismatch
+		}
+		if f.HasMaxItems && len(arr) > f.MaxItems {
+			return false, IssueBoundsViolation
+		}
+		if f.HasMinItems && len(arr) < f.MinItems {
+			return false, IssueBoundsViolation
+		}
+		// Narrow WireGuard reserved domain semantic: the authored rule is exactly
+		// 0 OR 3 bytes. The profile schema has no per-item or cross-count bound
+		// key, so the 0-or-3 cardinality is enforced here as a documented domain
+		// rule alongside the per-byte 0..255 range below.
+		if f.Name == "reserved" && len(arr) != 0 && len(arr) != 3 {
+			return false, IssueBoundsViolation
+		}
+		for _, el := range arr {
+			if _, isObj := el.(map[string]any); isObj {
+				return false, IssueArrayItemViolation
+			}
+			if _, isArr := el.([]any); isArr {
+				return false, IssueArrayItemViolation
+			}
+			if f.ItemType == "integer" {
+				n, ok := asInt(el)
+				if !ok {
+					return false, IssueArrayItemViolation
+				}
+				// Narrow WireGuard reserved domain semantic: byte range 0..255.
+				// Detected by the field name; only applies to reserved.
+				if f.Name == "reserved" && (n < 0 || n > 255) {
+					return false, IssueReservedByteRange
+				}
+			} else {
+				if _, ok := el.(string); !ok {
+					return false, IssueArrayItemViolation
+				}
+			}
+		}
+		return true, ""
+	}
+	return false, IssueTypeMismatch
+}
+
+// matchString reports whether s matches the field's pattern. The compiled
+// regexp is owned by the profile; nodes reaches it through the profile-backed
+// helper rather than recompiling an attacker-influenced pattern.
+func matchString(f capability.Field, s string) bool {
+	return capability.MatchPattern(f, s)
+}

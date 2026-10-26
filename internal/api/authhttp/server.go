@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/suchimauz/raylane/internal/api/auth"
@@ -73,13 +75,28 @@ func NewServer(cfg Config, st *store.Store) (*Server, error) {
 // then CSRF on unsafe methods. The /state and /session paths live here;
 // /bootstrap and /bootstrap-token are NOT on this LAN handler (they are
 // served only on the local Unix transport) and every unregistered LAN path
-// answers the generic 404.
+// answers the generic 403 (settled contract: no existence oracle).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/state", s.handleState)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
 	mux.HandleFunc("/", notFoundHandler)
-	return requestIdentity(requireOrigin(s.cfg.TrustedOrigin, mux))
+	// The LAN handler is the OUTER layer, so it is the one that applies the
+	// no-store response policy for every management response (the local
+	// handler is a different server instance and sets it on its issuance
+	// response explicitly).
+	return requestIdentity(requireOrigin(s.cfg.TrustedOrigin, noStore(mux)))
+}
+
+// noStore stamps the settled response policy on every management response:
+// no caching intermediaries and no MIME sniffing.
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ManagementHandler returns the local Unix-socket handler: it ADDS the
@@ -94,12 +111,14 @@ func (s *Server) ManagementHandler() http.Handler {
 
 // managementMux is the local Unix-socket handler: it ADDS the bootstrap
 // issuance and redemption routes, which are physically ABSENT from the LAN
-// handler. Locality is decided by WHICH listener accepted the connection.
+// handler. The settled local issuance path is the UNVERSIONED
+// POST /bootstrap-token; redemption stays POST /api/v1/bootstrap. Locality is
+// decided by WHICH listener accepted the connection.
 func (s *Server) managementMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/state", s.handleState)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
-	mux.HandleFunc("/api/v1/bootstrap-token", s.handleBootstrapToken)
+	mux.HandleFunc("/bootstrap-token", s.handleBootstrapToken)
 	mux.HandleFunc("/api/v1/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("/", notFoundHandler)
 	return mux
@@ -175,21 +194,10 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 // invalid_credentials; the missing-admin response is byte-identical.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	requestID := requestIDFrom(r.Context())
-	// Anonymous login limiter on the actual socket peer IP.
-	permitted, retryAfter, release := s.limiter.Allow(peerIP(r.RemoteAddr))
-	if !permitted {
-		// Retry-After is emitted ONLY when a concrete per-peer retry delay is
-		// computable; when the global Argon2 ceiling (not the per-IP bucket) is
-		// the blocker there is no per-peer delay, so the header is OMITTED
-		// rather than fabricated.
-		if retryAfter > 0 {
-			w.Header().Set("Retry-After", itoa(retryAfter))
-		}
-		writeProblem(w, http.StatusTooManyRequests, codeRateLimited, msgRateLimited, requestID)
-		return
-	}
-	defer release()
-
+	// Read and strictly decode the body BEFORE any limiter/KDF work: a
+	// non-conforming or invalid-UTF-8 credential is rejected with the generic
+	// 401 category without spending a token or touching Argon2, uniformly on
+	// login (and identically-shaped requests on bootstrap).
 	body, err := readBounded(r, loginBodyLimit)
 	if err != nil {
 		writeProblem(w, http.StatusRequestEntityTooLarge, codeBadRequest, msgBadRequest, requestID)
@@ -197,12 +205,34 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	var creds credentialsJSON
 	if err := decodeStrictJSON(body, &creds); err != nil {
-		writeProblem(w, http.StatusBadRequest, codeBadRequest, msgBadRequest, requestID)
+		writeProblem(w, http.StatusUnauthorized, codeInvalidCredentials, msgInvalidCredentials, requestID)
 		return
 	}
+	if !auth.ValidUsername([]byte(creds.Username)) || !auth.ValidPassword([]byte(creds.Password)) {
+		// A length/UTF-8-invalid credential never reaches the KDF; same generic
+		// 401, no per-field oracle.
+		writeProblem(w, http.StatusUnauthorized, codeInvalidCredentials, msgInvalidCredentials, requestID)
+		return
+	}
+	// Anonymous login limiter on the actual socket peer IP, consulted only
+	// for well-formed attempts.
+	permitted, retryAfter, release := s.limiter.Allow(peerIP(r.RemoteAddr))
+	if !permitted {
+		// Retry-After is emitted ONLY when a concrete per-peer retry delay is
+		// computable (retryAfter > 0, a positive integer); when the global
+		// Argon2 ceiling is the blocker the limiter reports -1 and the header
+		// is OMITTED rather than fabricated.
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", itoa(retryAfter))
+		}
+		writeProblem(w, http.StatusTooManyRequests, codeRateLimited, msgRateLimited, requestID)
+		return
+	}
+	defer release()
 	// Validate exact decoded bytes (valid UTF-8, code-point length) before any
 	// KDF work; a malformed credential is the same generic 401 category as a
-	// wrong one (never a per-field oracle).
+	// wrong one (never a per-field oracle). On success a FRESH session is
+	// issued (POST /session always replaces the caller's session).
 	ok, err := auth.VerifyIdentity(r.Context(), s.store, auth.Credentials{
 		Username: []byte(creds.Username),
 		Password: []byte(creds.Password),
@@ -306,16 +336,25 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, codeBadRequest, msgBadRequest, requestID)
 		return
 	}
-	// Consume the live token FIRST: this is the anti-brute-force gate — a
-	// wrong password burns the one-time token, so offline guessing over the
-	// local channel is impossible. Every token failure (expired/consumed/
-	// unknown/mismatched) is the SAME generic 403 (no expiry/existence
-	// oracle). A shape-rejected credential therefore also reports 403, never
-	// a field-specific 400 — no per-field oracle.
+	// Redeem the token BEFORE the expensive work: this is the
+	// anti-brute-force gate — a wrong password burns the one-time token, so
+	// offline guessing over the local channel is impossible. Then acquire the
+	// SAME global Argon2 admission that login uses (shared max-2, fail-fast,
+	// no queue) BEFORE any KDF/DB commit: a saturated gate is a bounded
+	// capacity refusal that consumed the one-time token (single-winner
+	// policy; no reusable credential survives a refusal) and fabricates no
+	// Retry-After. Every token failure (expired/consumed/unknown/mismatched)
+	// is the SAME generic 403 (no expiry/existence oracle). A shape-rejected
+	// credential therefore also reports 403, never a field-specific 400.
 	if !s.issuer.Redeem(req.Token) {
 		writeProblem(w, http.StatusForbidden, codeForbidden, msgForbidden, requestID)
 		return
 	}
+	if !s.limiter.TryAdmitKDF() {
+		writeProblem(w, http.StatusTooManyRequests, codeRateLimited, msgRateLimited, requestID)
+		return
+	}
+	defer s.limiter.ReleaseKDF()
 	if !auth.ValidUsername([]byte(req.Username)) || !auth.ValidPassword([]byte(req.Password)) {
 		// The token is already burned; the client must issue a new one.
 		writeProblem(w, http.StatusForbidden, codeForbidden, msgForbidden, requestID)
@@ -416,13 +455,42 @@ func (s *Server) ServeManagement(ctx context.Context) error {
 // socket is bound 0600, and both are removed on shutdown. Local trust is
 // decided by WHICH listener accepted the connection — never by a header.
 func (s *Server) ServeLocal(ctx context.Context) error {
-	if err := os.MkdirAll(s.cfg.UnixSocketDir, 0o700); err != nil {
+	sockDir := s.cfg.UnixSocketDir
+	// Establish the owner-only 0700 directory WITHOUT following a path alias:
+	// every component must be a real directory owned by the current uid; a
+	// symlinked or foreign component is refused BEFORE mkdir/chmod, so a
+	// symlink target's metadata/content is never touched.
+	uid := os.Getuid()
+	abs, err := filepath.Abs(sockDir)
+	if err != nil {
 		return fmt.Errorf("authhttp: local socket dir: %w", err)
 	}
-	if err := os.Chmod(s.cfg.UnixSocketDir, 0o700); err != nil {
-		return fmt.Errorf("authhttp: local socket dir mode: %w", err)
+	if err := proveNoForeignSymlinkComponent(abs, uid); err != nil {
+		return err
 	}
-	sockPath := s.cfg.UnixSocketPath()
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return fmt.Errorf("authhttp: local socket dir: %w", err)
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("authhttp: local socket dir stat: %w", err)
+	}
+	if st.Sys().(*syscall.Stat_t).Uid != uint32(uid) {
+		return fmt.Errorf("authhttp: local socket dir %s is owned by another uid", abs)
+	}
+	if st.Mode().Perm()&^0o700 != 0 {
+		if err := os.Chmod(abs, 0o700); err != nil {
+			return fmt.Errorf("authhttp: local socket dir mode: %w", err)
+		}
+		st, err = os.Stat(abs)
+		if err != nil {
+			return fmt.Errorf("authhttp: local socket dir stat: %w", err)
+		}
+	}
+	if st.Mode().Perm() != 0o700 {
+		return fmt.Errorf("authhttp: local socket dir %s has mode %o, want 700", abs, st.Mode().Perm())
+	}
+	sockPath := filepath.Join(abs, "control.sock")
 	if err := ensureLocalSocketPath(sockPath); err != nil {
 		return err
 	}
@@ -450,6 +518,37 @@ func (s *Server) ServeLocal(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// proveNoForeignSymlinkComponent refuses any symlink component of abs whose
+// resolved target is not a directory owned by uid, and any non-directory or
+// foreign-owned real component. It is pure inspection: nothing is created or
+// chmod'ed, so refusing leaves every touched path's metadata unchanged.
+func proveNoForeignSymlinkComponent(abs string, uid int) error {
+	parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+	cur := "/"
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		lst, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // remaining components do not exist yet
+			}
+			return fmt.Errorf("authhttp: local socket dir: lstat %s: %w", cur, err)
+		}
+		if lst.Mode()&os.ModeSymlink != 0 {
+			// Never follow a path alias just to make it appear safe: refuse the
+			// symlink component outright, before touching anything.
+			return fmt.Errorf("authhttp: local socket dir: symlink component %s is refused", cur)
+		}
+		if !lst.IsDir() {
+			return fmt.Errorf("authhttp: local socket dir: component %s exists and is not a directory", cur)
+		}
+	}
+	return nil
 }
 
 // ensureLocalSocketPath refuses to overwrite a live socket of another live

@@ -46,6 +46,23 @@ func (l *loginLimiter) activeForTest() int {
 	return len(l.argon2)
 }
 
+// TryAdmitKDF acquires one global Argon2 slot WITHOUT any per-IP bucket
+// accounting. The local bootstrap path uses it so its expensive KDF work
+// shares the SAME global max-2 admission as login: saturated means fail-fast
+// (no queue, no per-IP bucket consumed, no Retry-After hint — the bucket is
+// not the blocker). The caller MUST call ReleaseKDF exactly once.
+func (l *loginLimiter) TryAdmitKDF() bool {
+	select {
+	case l.argon2 <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReleaseKDF returns one global Argon2 slot taken by TryAdmitKDF.
+func (l *loginLimiter) ReleaseKDF() { <-l.argon2 }
+
 // peerIP extracts the actual socket peer IP from the request's RemoteAddr and
 // NORMALIZES it so equivalent IPv4 and IPv4-in-IPv6-mapped forms share ONE
 // limiter bucket ("127.0.0.1" and "::ffff:127.0.0.1" are the same host). It
@@ -72,9 +89,10 @@ func peerIP(remoteAddr string) string {
 // saturated it fails fast (no queue). The caller MUST call the returned
 // release function exactly once when the Argon2 work completes.
 //
-// RetryAfter is the integer seconds until the bucket next refills a token
-// (0 when a token is available now but Argon2 is saturated; the per-IP bucket
-// is not the blocker then).
+// A saturated global gate reports retryAfter = -1: the delay is NOT
+// computable for this peer (the bucket is not the blocker), so the caller
+// must OMIT Retry-After rather than fabricate one. A bucket refusal always
+// reports a positive integer second count.
 func (l *loginLimiter) Allow(peer string) (permitted bool, retryAfter int, release func()) {
 	release = func() {} // default no-op
 
@@ -103,28 +121,25 @@ func (l *loginLimiter) Allow(peer string) (permitted bool, retryAfter int, relea
 		b.last = now
 	}
 	if b.tokens < 1 {
-		// Depleted: integer seconds until the next whole token accrues.
+		// Depleted: integer seconds until the next whole token accrues. The
+		// deficit is strictly positive here (tokens < 1), so the ceiling is
+		// always >= 1 — a rate-limited answer NEVER fabricates "0".
 		deficit := (1 - b.tokens) * limitRefillSeconds
-		remaining := int(deficit + 0.9999) // round up to a positive integer
-		if remaining < 1 {
-			remaining = 1
-		}
+		remaining := int(deficit) + 1 // ceiling of a strictly positive value
 		l.mu.Unlock()
 		return false, remaining, release
 	}
 	b.tokens--
 	l.mu.Unlock()
 
-	// Global Argon2 semaphore: fail-fast, no queue.
-	select {
-	case l.argon2 <- struct{}{}:
-		release = func() { <-l.argon2 }
-		return true, 0, release
-	default:
-		// Saturated: the per-IP token was already consumed (the attempt is a
-		// real, bounded login try), and there is no per-IP retry hint because
-		// the bucket is not the blocker. Return permitted=false with a zero
-		// Retry-After (omitted when not computable).
-		return false, 0, release
+	// Global Argon2 semaphore: fail-fast, no queue. The shared helper is the
+	// SAME admission the local bootstrap path uses, so login and bootstrap
+	// verifications draw from one global max-2 pool.
+	if l.TryAdmitKDF() {
+		return true, 0, func() { l.ReleaseKDF() }
 	}
+	// Saturated: the per-IP token was already consumed (the attempt is a real,
+	// bounded login try). retryAfter = -1 signals NOT-COMPUTABLE: the caller
+	// omits the header instead of inventing a countdown.
+	return false, -1, release
 }

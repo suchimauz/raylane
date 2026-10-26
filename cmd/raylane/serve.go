@@ -209,11 +209,8 @@ func shutdownBoth(lanSrv, localSrv *http.Server) {
 // server owns it) is a hard error, and the socket is bound 0600 with the mode
 // proven by stat afterwards (a wide umask must not silently widen it).
 func listenLocalSocket(dir string) (net.Listener, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("local socket dir: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("local socket dir mode: %w", err)
+	if err := preparePrivateSocketDir(dir); err != nil {
+		return nil, err
 	}
 	st, err := os.Stat(dir)
 	if err != nil {
@@ -244,6 +241,84 @@ func listenLocalSocket(dir string) (net.Listener, error) {
 		return nil, fmt.Errorf("local socket %s has mode %o, want 600", sockPath, st.Mode().Perm())
 	}
 	return ln, nil
+}
+
+// preparePrivateSocketDir establishes the owner-only 0700 socket directory
+// WITHOUT ever following a path alias: every intermediate component of dir
+// must be a real directory owned by the current uid (or a symlink chain whose
+// resolved target is one), never a symlink into somebody else's tree, and the
+// final directory must be owned by us with mode 0700. A foreign-owned or
+// symlinked-away component is refused BEFORE any mkdir/chmod, so the target's
+// metadata and content are never touched. Only a safe, own new path is
+// created; an existing own 0700 directory is accepted as-is.
+func preparePrivateSocketDir(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("local socket dir: empty path")
+	}
+	uid := os.Getuid()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("local socket dir: %w", err)
+	}
+	// Walk every component: refuse any symlink whose resolved target is NOT
+	// ours (foreign-owned). os.MkdirAll would follow such aliases and then
+	// chmod someone else's directory — exactly the defect this prevents.
+	parts := strings.Split(strings.TrimPrefix(abs, "/"), "/")
+	cur := "/"
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		lst, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Remaining components do not exist; MkdirAll below creates
+				// them as real directories under a component we proved safe.
+				break
+			}
+			return fmt.Errorf("local socket dir: lstat %s: %w", cur, err)
+		}
+		if lst.Mode()&os.ModeSymlink != 0 {
+			// Never follow a path alias just to make it appear safe: refuse the
+			// symlink component outright, before any mkdir/chmod, leaving the
+			// alias target's metadata and content untouched.
+			return fmt.Errorf("local socket dir: symlink component %s is refused", cur)
+		}
+		if !lst.IsDir() {
+			return fmt.Errorf("local socket dir: component %s exists and is not a directory", cur)
+		}
+	}
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return fmt.Errorf("local socket dir: %w", err)
+	}
+	// Re-prove the FINAL directory: it must be ours and exactly 0700. Use
+	// Lstat semantics via Stat of the (now proven non-alias) path.
+	st, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("local socket dir stat: %w", err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("local socket dir %s is not a directory", abs)
+	}
+	if st.Sys().(*syscall.Stat_t).Uid != uint32(uid) {
+		return fmt.Errorf("local socket dir %s is owned by another uid", abs)
+	}
+	if st.Mode().Perm()&^0o700 != 0 {
+		// A too-wide mode on OUR own directory may be tightened; tightening
+		// is safe. (The refusal case — foreign/symlink — already returned.)
+		if err := os.Chmod(abs, 0o700); err != nil {
+			return fmt.Errorf("local socket dir mode: %w", err)
+		}
+		st, err = os.Stat(abs)
+		if err != nil {
+			return fmt.Errorf("local socket dir stat: %w", err)
+		}
+	}
+	if st.Mode().Perm() != 0o700 {
+		return fmt.Errorf("local socket dir %s has mode %o, want 700", abs, st.Mode().Perm())
+	}
+	return nil
 }
 
 // ensureStaleSocketRemovable refuses to displace a socket that still accepts
@@ -315,7 +390,7 @@ func runBootstrap(args []string, stdout, stderr io.Writer, stdin io.Reader) int 
 		return 2
 	}
 	client := localSocketClient(filepath.Join(*socketDir, "control.sock"))
-	status, tokBody, err := postLocal(client, "http://unix/api/v1/bootstrap-token", `{}`)
+	status, tokBody, err := postLocal(client, "http://unix/bootstrap-token", `{}`)
 	if err != nil {
 		fmt.Fprintf(stderr, "raylane bootstrap: token issuance: %v\n", err)
 		return 1

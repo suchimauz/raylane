@@ -468,7 +468,7 @@ func TestT008StateTruthfulBody(t *testing.T) {
 func TestT008LocalBootstrapHandlerOrdering(t *testing.T) {
 	srv, _ := newTestServer(t, "")
 	m := srv.ManagementHandler()
-	if c := do(m, http.MethodGet, "/api/v1/bootstrap-token", "", "", nil).StatusCode; c != http.StatusMethodNotAllowed {
+	if c := do(m, http.MethodGet, "/bootstrap-token", "", "", nil).StatusCode; c != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /bootstrap-token = %d, want 405", c)
 	}
 	if c := do(m, http.MethodGet, "/api/v1/bootstrap", "", "", nil).StatusCode; c != http.StatusMethodNotAllowed {
@@ -554,7 +554,7 @@ func TestT008ServeLocalUnixSocket(t *testing.T) {
 		t.Fatalf("socket dir mode = %v (%v), want 700", st.Mode(), err)
 	}
 	client := unixClient(sockPath)
-	resp, err := client.Post("http://unix/api/v1/bootstrap-token", "application/json", strings.NewReader(`{}`))
+	resp, err := client.Post("http://unix/bootstrap-token", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("issue over socket: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestT008ServeLocalRefusesLiveSocketAndForeignFile(t *testing.T) {
 
 func issueToken(t *testing.T, m http.Handler) string {
 	t.Helper()
-	resp := do(m, http.MethodPost, "/api/v1/bootstrap-token", "", `{}`, nil)
+	resp := do(m, http.MethodPost, "/bootstrap-token", "", `{}`, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("issue token = %d, want 200", resp.StatusCode)
 	}

@@ -13,8 +13,10 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  // Relative base so the built bundle can be served from any prefix.
-  base: './',
+  // Absolute base: the production shell is served ONLY at the exact root `/`,
+  // so its referenced assets resolve to `/assets/...` on the same origin. A
+  // relative base would let a non-root path mis-resolve asset URLs.
+  base: '/',
   build: {
     // Deterministic, self-contained output; no external CDN references.
     outDir: 'dist',

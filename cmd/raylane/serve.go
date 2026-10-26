@@ -38,6 +38,8 @@ import (
 
 	"github.com/suchimauz/raylane/internal/api/authhttp"
 	"github.com/suchimauz/raylane/internal/store"
+	"github.com/suchimauz/raylane/internal/webui"
+	webuiassets "github.com/suchimauz/raylane/web"
 )
 
 // dispatchCommands routes the runnable subcommands. ok is false when args do
@@ -159,6 +161,21 @@ func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
 		return 1
 	}
+	// Compose the production shell into the SAME HTTPS process and origin as
+	// the management API: one Raylane process, one configured origin, no second
+	// server, no dev proxy, no CORS. The embedded bundle (web/dist) was built
+	// by the canonical frontend step; if it is absent the Go build already
+	// failed at the go:embed, so reaching here means the bundle is present.
+	//
+	// The composition happens HERE (the CLI composition root), not inside
+	// authhttp: the settled authhttp runtime-composition boundary (the T008
+	// guard) is left byte-for-byte untouched. The shell/assets handler answers
+	// only the exact root and the /assets/ allowlist and sets its own strict
+	// no-store / immutable-cache / CSP headers; every other request — the API
+	// subtree, unknown paths, and every LAN bootstrap variant — falls through
+	// to srv.Handler(), which keeps the generic 403, request-id and Origin
+	// priority exactly as accepted.
+	lanHandler := composeLAN(webui.New(webuiassets.DistFS()), srv.Handler())
 
 	lanLn, err := net.Listen("tcp", cfg.ManagementListen)
 	if err != nil {
@@ -181,7 +198,7 @@ func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	lanSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	lanSrv := &http.Server{Handler: lanHandler, ReadHeaderTimeout: 10 * time.Second}
 	localSrv := &http.Server{Handler: srv.ManagementHandler(), ReadHeaderTimeout: 10 * time.Second}
 
 	errCh := make(chan error, 2)
@@ -202,6 +219,22 @@ func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
 	}
 	shutdownBoth(lanSrv, localSrv)
 	return 0
+}
+
+// composeLAN is the HTTPS request router for the single LAN listener. It
+// gives the embedded shell handler the FIRST chance to answer a read-only
+// request for the exact root or the /assets/ allowlist; anything the shell
+// declines (every API path, unknown path, unsafe method, and every bootstrap
+// variant) falls through to the authhttp LAN handler, which preserves the
+// settled generic 403, request-id and Origin priority. There is no SPA
+// catch-all: the shell is served ONLY at the exact root.
+func composeLAN(shell *webui.Handler, api http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if shell.ServeHTTP(w, r) {
+			return
+		}
+		api.ServeHTTP(w, r)
+	})
 }
 
 func shutdownBoth(lanSrv, localSrv *http.Server) {

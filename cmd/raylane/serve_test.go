@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,10 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
+
+	"github.com/suchimauz/raylane/internal/webui"
 )
 
 // buildBinary compiles the real raylane binary once per test run into
@@ -622,6 +626,221 @@ func TestT008EndToEndRealProcess(t *testing.T) {
 		t.Fatalf("post-restart login = %d, want 204", resp.StatusCode)
 	}
 	readAll(t, resp)
+}
+
+// TestT009ShellAndAssetsServedSameOrigin verifies, against the REAL compiled
+// process over REAL HTTPS on the SAME origin as the management API, that:
+//   - GET/HEAD the exact root serves the shell (no-store, strict CSP, nosniff,
+//     no-referrer, request-id) — never a redirect, never HTML on errors;
+//   - the referenced content-hashed assets are served with immutable caching
+//     and their own strict headers (the browser can actually load the UI);
+//   - unknown paths, the API subtree boundary and every LAN bootstrap variant
+//     still answer the SAME generic 403 — never the shell, no existence oracle.
+func TestT009ShellAndAssetsServedSameOrigin(t *testing.T) {
+	h := startServe(t)
+	client := h.client()
+
+	get := func(target string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, h.lanURL+target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v (stderr=%s)", target, err, h.stderr)
+		}
+		return resp
+	}
+
+	// Shell at exact root.
+	root := get("/")
+	if root.StatusCode != http.StatusOK {
+		t.Fatalf("GET / = %d, want 200", root.StatusCode)
+	}
+	if ct := root.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Fatalf("GET / Content-Type=%q", ct)
+	}
+	if cc := root.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("GET / Cache-Control=%q, want no-store", cc)
+	}
+	csp := root.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("GET / missing CSP")
+	}
+	for _, banned := range []string{"unsafe-inline", "unsafe-eval", "data:", "http://", "https://"} {
+		if strings.Contains(csp, banned) {
+			t.Fatalf("GET / CSP contains banned %q: %s", banned, csp)
+		}
+	}
+	for _, want := range []string{"script-src 'self'", "style-src 'self'", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Fatalf("GET / CSP missing %q: %s", want, csp)
+		}
+	}
+	if root.Header.Get("X-Content-Type-Options") != "nosniff" || root.Header.Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("GET / missing nosniff/no-referrer")
+	}
+	html := string(readAll(t, root))
+	if !strings.Contains(html, `<div id="root">`) || !strings.Contains(html, `/assets/`) {
+		t.Fatalf("GET / body is not the built shell: %q", html)
+	}
+
+	// HEAD root: headers, empty body.
+	req, _ := http.NewRequest(http.MethodHead, h.lanURL+"/", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD / = %d, want 200", resp.StatusCode)
+	}
+	if b := readAll(t, resp); len(b) != 0 {
+		t.Fatalf("HEAD / body len=%d, want 0", len(b))
+	}
+
+	// The shell references a content-hashed JS bundle: fetch it by parsing the
+	// reference out of the served HTML (the browser-visible asset path).
+	jsPath := extractAsset(t, html, ".js")
+	js := get(jsPath)
+	if js.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200 (browser must load the real bundle)", jsPath, js.StatusCode)
+	}
+	if ct := js.Header.Get("Content-Type"); ct != "text/javascript; charset=utf-8" {
+		t.Fatalf("GET %s Content-Type=%q", jsPath, ct)
+	}
+	if cc := js.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Fatalf("GET %s Cache-Control=%q, want immutable content-hash caching", jsPath, cc)
+	}
+	jsBody := readAll(t, js)
+	if len(jsBody) == 0 || !strings.Contains(string(jsBody), "Raylane") {
+		t.Fatalf("GET %s did not return the real built bundle (len=%d)", jsPath, len(jsBody))
+	}
+
+	// No SPA catch-all + settled 403 preservation over the wire.
+	for _, target := range []string{"/login", "/settings", "/index.html", "/a/b/c"} {
+		r := get(target)
+		if r.StatusCode != http.StatusForbidden {
+			t.Fatalf("GET %s = %d, want generic 403 (no SPA catch-all)", target, r.StatusCode)
+		}
+		if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+			t.Fatalf("GET %s returned HTML; unknown paths must never serve the shell", target)
+		}
+		// The 403 fall-through goes through authhttp, so it carries a fresh
+		// request id (the settled request-identity invariant on errors).
+		if r.Header.Get("X-Request-Id") == "" {
+			t.Fatalf("GET %s missing X-Request-Id", target)
+		}
+		readAll(t, r)
+	}
+	post, _ := http.NewRequest(http.MethodPost, h.lanURL+"/api/v1/bootstrap", strings.NewReader(`{}`))
+	post.Header.Set("Origin", h.origin)
+	resp, err = client.Do(post)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("LAN /bootstrap = %d, want 403", resp.StatusCode)
+	}
+	readAll(t, resp)
+
+	// A source map / unexpected file under assets is NOT served even if present
+	// in the build tree: the allowlist rejects .map (and the others) with a
+	// plain 404, never HTML.
+	for _, target := range []string{"/assets/index-Ab3.js.map", "/assets/app.db", "/assets/config.yaml"} {
+		r := get(target)
+		if r.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s = %d, want 404 (allowlist reject)", target, r.StatusCode)
+		}
+		if ct := r.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+			t.Fatalf("GET %s returned HTML", target)
+		}
+		readAll(t, r)
+	}
+}
+
+// extractAsset pulls the first /assets/... reference ending in ext out of the
+// served shell HTML (the path the browser will actually request).
+func extractAsset(t *testing.T, html, ext string) string {
+	t.Helper()
+	i := strings.Index(html, "/assets/")
+	if i < 0 {
+		t.Fatalf("shell HTML has no /assets/ reference: %q", html)
+	}
+	rest := html[i:]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatalf("unterminated asset reference: %q", rest)
+	}
+	ref := rest[:end]
+	if !strings.HasSuffix(ref, ext) {
+		t.Fatalf("first asset ref %q does not end in %s", ref, ext)
+	}
+	return ref
+}
+
+// TestT009ComposeLANRouting unit-tests the router with the REAL webui handler
+// over a fixture bundle: shell/assets are answered by webui; everything else
+// falls through to the API handler (which owns the generic 403). This pins the
+// composition contract without a process.
+func TestT009ComposeLANRouting(t *testing.T) {
+	bundle := fstest.MapFS{
+		"index.html":              &fstest.MapFile{Data: []byte("<shell/>")},
+		"assets/index-Ab3.js":     &fstest.MapFile{Data: []byte("bundle")},
+		"assets/index-Ab3.css":    &fstest.MapFile{Data: []byte("css")},
+		"assets/index-Ab3.js.map": &fstest.MapFile{Data: []byte("{}")},
+		"assets/leaked.db":        &fstest.MapFile{Data: []byte("SQLite")},
+	}
+	shell := webui.New(bundle)
+	var apiHits int
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits++
+		w.WriteHeader(http.StatusForbidden)
+	})
+	h := composeLAN(shell, api)
+
+	// Shell + allowlisted assets are served by webui (API not touched).
+	for _, target := range []string{"/", "/assets/index-Ab3.js", "/assets/index-Ab3.css"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200 from shell", target, rec.Code)
+		}
+	}
+	if apiHits != 0 {
+		t.Fatalf("api hits=%d, want 0 for shell/asset requests", apiHits)
+	}
+
+	// Disallowed-under-assets are a webui 404 (handled, NOT fall-through 403).
+	for _, target := range []string{"/assets/index-Ab3.js.map", "/assets/leaked.db"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s = %d, want 404 allowlist reject", target, rec.Code)
+		}
+	}
+	if apiHits != 0 {
+		t.Fatalf("api hits=%d, want 0 (webui handles its own rejects)", apiHits)
+	}
+
+	// Unknown paths, API subtree, unsafe methods on root fall through to the
+	// API handler (the generic 403 owner).
+	for _, tc := range []struct{ method, target string }{
+		{http.MethodGet, "/login"},
+		{http.MethodGet, "/index.html"},
+		{http.MethodGet, "/api/v1/state"},
+		{http.MethodPost, "/api/v1/bootstrap"},
+		{http.MethodPost, "/"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.target, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s = %d, want 403 from API", tc.method, tc.target, rec.Code)
+		}
+	}
+	if apiHits != 5 {
+		t.Fatalf("api hits=%d, want 5 (every non-shell request falls through)", apiHits)
+	}
 }
 
 // TestT008ServeRejectsSecondInstance: while a live server owns the socket,

@@ -19,7 +19,9 @@ export interface RuntimeState {
   readiness: RuntimeReadiness;
   draftRevisionId?: string;
   activeRevisionId?: string;
-  activeGeneration?: string;
+  // activeGeneration is an INTEGER 0..9007199254740991 on the wire (0 is a
+  // meaningful value), NOT a string.
+  activeGeneration?: number;
   lastErrorCode?: string;
   lastErrorMessage?: string;
 }
@@ -69,6 +71,14 @@ export type LoginResult =
   | { kind: 'csrf' } // 403 Origin rejected
   | { kind: 'unknown' };
 
+// loginBody is THE single JSON encoder for the login payload. The form
+// validates the serialized size with this exact function before sending, so
+// client-side checking and the wire can never disagree (and the server's own
+// 413 remains an independent second enforcement of the same bound).
+export function loginBody(username: string, password: string): string {
+  return JSON.stringify({ username, password });
+}
+
 export async function login(
   username: string,
   password: string,
@@ -81,7 +91,7 @@ export async function login(
       credentials: 'same-origin',
       cache: 'no-store',
       headers: JSON_HEADERS,
-      body: JSON.stringify({ username, password }),
+      body: loginBody(username, password),
       signal,
     });
   } catch {

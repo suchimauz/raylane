@@ -9,22 +9,37 @@ import (
 	"testing/fstest"
 )
 
-// fixtureFS is a minimal embedded-bundle shape: the shell plus a content-hashed
-// JS asset, a content-hashed CSS asset, and the kinds of files the allowlist
-// must reject even though they sit below assets/.
+// fixtureFS is a minimal embedded-bundle shape: the shell, the Vite build
+// manifest that declares this build's referenced asset membership, the two
+// referenced content-hashed assets, plus the kinds of files that must be
+// rejected even though they sit below assets/.
 func fixtureFS() fs.FS {
 	return fstest.MapFS{
 		"index.html":                &fstest.MapFile{Data: []byte("<!doctype html><div id=root></div>")},
+		".vite/manifest.json":       &fstest.MapFile{Data: []byte(`{"index.html":{"file":"assets/index-D0S6vb5b.js","css":["assets/index-D3b3cTyl.css"]}}`)},
 		"assets/index-D0S6vb5b.js":  &fstest.MapFile{Data: []byte("console.log(1)")},
 		"assets/index-D3b3cTyl.css": &fstest.MapFile{Data: []byte("body{margin:0}")},
-		// Must be rejected even though present below assets/:
-		"assets/index-D0S6vb5b.js.map": &fstest.MapFile{Data: []byte("{}")},
-		"assets/config.yaml":           &fstest.MapFile{Data: []byte("secret: 1")},
-		"assets/.hidden":               &fstest.MapFile{Data: []byte("x")},
-		"assets/app.db":                &fstest.MapFile{Data: []byte("SQLite")},
-		"assets/private.key":           &fstest.MapFile{Data: []byte("PRIVATE KEY")},
-		"assets/notes.txt":             &fstest.MapFile{Data: []byte("hi")},
+		// Must be rejected even though present below assets/ (not referenced):
+		"assets/index-D0S6vb5b.js.map":  &fstest.MapFile{Data: []byte("{}")},
+		"assets/config.yaml":            &fstest.MapFile{Data: []byte("secret: 1")},
+		"assets/.hidden":                &fstest.MapFile{Data: []byte("x")},
+		"assets/app.db":                 &fstest.MapFile{Data: []byte("SQLite")},
+		"assets/private.key":            &fstest.MapFile{Data: []byte("PRIVATE KEY")},
+		"assets/notes.txt":              &fstest.MapFile{Data: []byte("hi")},
+		"assets/stray-unreferenced.js":  &fstest.MapFile{Data: []byte("window.__strayJs=1")},
+		"assets/stray-unreferenced.css": &fstest.MapFile{Data: []byte("body{color:red}")},
+		"assets/stray-H4shL00king.js":   &fstest.MapFile{Data: []byte("window.__strayHash=1")},
 	}
+}
+
+// mustNew builds a Handler from a valid fixture or fails the test.
+func mustNew(t *testing.T, fsys fs.FS) *Handler {
+	t.Helper()
+	h, err := New(fsys)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return h
 }
 
 func do(h *Handler, method, target string) *httptest.ResponseRecorder {
@@ -38,7 +53,7 @@ func do(h *Handler, method, target string) *httptest.ResponseRecorder {
 }
 
 func TestShellServedAtExactRootOnly(t *testing.T) {
-	h := New(fixtureFS())
+	h := mustNew(t, fixtureFS())
 
 	for _, target := range []string{"/", "/?x=1"} {
 		rec := do(h, http.MethodGet, target)
@@ -99,7 +114,7 @@ func TestShellServedAtExactRootOnly(t *testing.T) {
 }
 
 func TestAllowlistedAssetServedWithImmutableCache(t *testing.T) {
-	h := New(fixtureFS())
+	h := mustNew(t, fixtureFS())
 	rec := do(h, http.MethodGet, "/assets/index-D0S6vb5b.js")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d", rec.Code)
@@ -124,7 +139,7 @@ func TestAllowlistedAssetServedWithImmutableCache(t *testing.T) {
 }
 
 func TestDisallowedUnderAssetsRejected(t *testing.T) {
-	h := New(fixtureFS())
+	h := mustNew(t, fixtureFS())
 	// Each of these EXISTS below assets/ but must be rejected by the allowlist
 	// with a plain text 404 — never HTML, never a listing, never served.
 	cases := []string{
@@ -151,7 +166,7 @@ func TestDisallowedUnderAssetsRejected(t *testing.T) {
 }
 
 func TestHostilePathsRejectedBeforeNormalization(t *testing.T) {
-	h := New(fixtureFS())
+	h := mustNew(t, fixtureFS())
 	// None of these may serve a file, redirect, or fall through to HTML; each
 	// is a plain 404. Encoded traversal and dot-segments are rejected on the
 	// raw segment before any normalizing fallback.
@@ -178,9 +193,79 @@ func TestHostilePathsRejectedBeforeNormalization(t *testing.T) {
 }
 
 func TestUnknownAssetIs404Not403OrHtml(t *testing.T) {
-	h := New(fixtureFS())
+	h := mustNew(t, fixtureFS())
 	rec := do(h, http.MethodGet, "/assets/does-not-exist-D0S6vb5b.js")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+}
+
+// TestUnreferencedAllowlistedAssetRejected (V4-T009-STATIC-ARTIFACT-MEMBERSHIP):
+// a file under assets/ that this build did NOT reference — even one with an
+// allowlisted extension and a content-hash-looking name — must be a plain 404,
+// never served, never given immutable-success caching, and must not leak its
+// canary body. Membership comes from the build manifest, not the extension.
+func TestUnreferencedAllowlistedAssetRejected(t *testing.T) {
+	h := mustNew(t, fixtureFS())
+	for _, target := range []string{
+		"/assets/stray-unreferenced.js",
+		"/assets/stray-unreferenced.css",
+		"/assets/stray-H4shL00king.js", // hash-shaped but NOT referenced
+	} {
+		rec := do(h, http.MethodGet, target)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s: status=%d, want 404 (unreferenced, not servable)", target, rec.Code)
+		}
+		if body := rec.Body.String(); strings.Contains(body, "stray") || strings.Contains(body, "__stray") {
+			t.Fatalf("GET %s: leaked unreferenced canary body %q", target, body)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc == "public, max-age=31536000, immutable" {
+			t.Fatalf("GET %s: unreferenced file got immutable-success caching", target)
+		}
+	}
+	// Sanity: the REFERENCED assets still succeed with immutable caching.
+	if rec := do(h, http.MethodGet, "/assets/index-D0S6vb5b.js"); rec.Code != http.StatusOK {
+		t.Fatalf("referenced JS must still serve: status=%d", rec.Code)
+	}
+}
+
+// TestIncompleteBundleFailsClosed (V4-T009-INCOMPLETE-BUNDLE-STARTUP): an
+// index/manifest that references an asset absent from the filesystem must make
+// New fail with one actionable error — before any listener is bound — never a
+// successful broken shell. A manifest declaring nothing, or a missing manifest,
+// also fails closed.
+func TestIncompleteBundleFailsClosed(t *testing.T) {
+	cases := map[string]fs.FS{
+		"missing referenced js": fstest.MapFS{
+			"index.html":          &fstest.MapFile{Data: []byte("<!doctype html>")},
+			".vite/manifest.json": &fstest.MapFile{Data: []byte(`{"index.html":{"file":"assets/gone-D0S6vb5b.js"}}`)},
+		},
+		"missing referenced css": fstest.MapFS{
+			"index.html":               &fstest.MapFile{Data: []byte("<!doctype html>")},
+			".vite/manifest.json":      &fstest.MapFile{Data: []byte(`{"index.html":{"file":"assets/index-D0S6vb5b.js","css":["assets/gone-D3b3cTyl.css"]}}`)},
+			"assets/index-D0S6vb5b.js": &fstest.MapFile{Data: []byte("x")},
+		},
+		"missing manifest": fstest.MapFS{
+			"index.html": &fstest.MapFile{Data: []byte("<!doctype html>")},
+		},
+		"missing index": fstest.MapFS{
+			".vite/manifest.json":      &fstest.MapFile{Data: []byte(`{"index.html":{"file":"assets/index-D0S6vb5b.js"}}`)},
+			"assets/index-D0S6vb5b.js": &fstest.MapFile{Data: []byte("x")},
+		},
+		"empty membership": fstest.MapFS{
+			"index.html":          &fstest.MapFile{Data: []byte("<!doctype html>")},
+			".vite/manifest.json": &fstest.MapFile{Data: []byte(`{}`)},
+		},
+		"unparseable manifest": fstest.MapFS{
+			"index.html":          &fstest.MapFile{Data: []byte("<!doctype html>")},
+			".vite/manifest.json": &fstest.MapFile{Data: []byte(`{not json`)},
+		},
+	}
+	for name, fsys := range cases {
+		if _, err := New(fsys); err == nil {
+			t.Fatalf("%s: New succeeded; want fail-closed error", name)
+		} else if !strings.Contains(err.Error(), "npm --prefix web run build") {
+			t.Fatalf("%s: error not actionable: %v", name, err)
+		}
 	}
 }

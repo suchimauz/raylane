@@ -141,17 +141,25 @@ export class ServerHarness {
   constructor() {
     this.proc = null;
   }
-  static async start({ bin }) {
+  // start launches a real `raylane serve`. By default it picks a fresh
+  // loopback port + state dir. Pass { port, dir, tlsDir } to RESTART on the
+  // same origin + DB (same TLS material) so an already-open document keeps a
+  // valid origin while sessions invalidate — the real D5 restart.
+  static async start({ bin, port = null, dir = null }) {
     const h = new ServerHarness();
     h.binPath = bin;
-    const scratch = mkdtempSync(path.join(tmpdir(), 'raylane-e2e-'));
-    chmodSync(scratch, 0o700);
-    h.scratch = scratch;
-    h.dir = path.join(scratch, 'srv');
-    mkdirSync(h.dir, { recursive: true });
-    const mat = makeLabMaterial(path.join(h.dir, 'tls'));
-    h.mat = mat;
-    h.port = await freePort();
+    if (dir) {
+      h.dir = dir;
+      h.mat = { srvPem: path.join(dir, 'tls', 'srv.pem'), srvKey: path.join(dir, 'tls', 'srv.key'), caPem: path.join(dir, 'tls', 'ca.pem') };
+    } else {
+      const scratch = mkdtempSync(path.join(tmpdir(), 'raylane-e2e-'));
+      chmodSync(scratch, 0o700);
+      h.scratch = scratch;
+      h.dir = path.join(scratch, 'srv');
+      mkdirSync(h.dir, { recursive: true });
+      h.mat = makeLabMaterial(path.join(h.dir, 'tls'));
+    }
+    h.port = port ?? (await freePort());
     h.sockDir = path.join(h.dir, 'run');
     mkdirSync(h.sockDir, { recursive: true });
     h.dbPath = path.join(h.dir, 'state.db');
@@ -164,8 +172,8 @@ export class ServerHarness {
         listen: `127.0.0.1:${h.port}`,
         origin: h.origin,
         socketDir: h.sockDir,
-        tlsCert: mat.srvPem,
-        tlsKey: mat.srvKey,
+        tlsCert: h.mat.srvPem,
+        tlsKey: h.mat.srvKey,
       }),
     );
     h.proc = spawn(bin, ['serve', '--config', h.cfgPath], {

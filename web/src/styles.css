@@ -211,7 +211,8 @@ body {
   align-self: flex-start;
 }
 
-.button:disabled {
+.button:disabled,
+.button[aria-disabled="true"] {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -275,6 +276,7 @@ body {
   padding: 0 var(--space-2);
 }
 
+.status__head,
 .canary__head {
   display: flex;
   align-items: center;

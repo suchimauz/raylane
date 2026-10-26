@@ -6,23 +6,31 @@
 //
 // Security contract (T009):
 //   - Exact root GET/HEAD only serves the shell; there is NO SPA catch-all.
-//   - /assets/{name} serves ONLY entries on an explicit allowlist of
-//     content-hashed generated asset types (.js/.css and, when present,
-//     needed image/font types). Source maps, hidden files, config, database,
-//     cert/key material and any unexpected file are rejected EVEN IF they
-//     happen to sit below assets/. There are no directory listings.
+//   - /assets/{name} serves ONLY build artifacts the produced index.html
+//     actually references (its <script src> / <link href> asset URLs). This is
+//     the declared membership of the build — NOT any file under assets/ whose
+//     extension happens to look acceptable. A stray unreferenced file, even a
+//     content-hashed .js/.css, is rejected. Source maps, hidden files,
+//     config, database, cert/key material and any unexpected file are rejected
+//     EVEN IF they happen to sit below assets/. There are no listings.
+//   - Bundle completeness is validated ONCE at startup (index present and
+//     every asset it references resolvable); an incomplete bundle fails
+//     closed with one actionable error BEFORE the listener is bound or
+//     readiness advertised — never a successful broken panel.
 //   - Hostile paths (traversal, backslash, NUL, hostile encodings) are
 //     rejected BEFORE any normalizing fallback could make them valid; a
 //     rejected path never redirects to an allowed file.
 //   - MIME is derived from a server-owned accept map, never from the request
-//     URL or sniffing. Only content-hashed assets get long immutable caching;
-//     the shell and errors are no-store.
+//     URL or sniffing. Only content-hashed referenced assets get long
+//     immutable caching; the shell and errors are no-store.
 //   - Strict CSP (self-only script/style/connect, object/base/frame none),
 //     nosniff and no-referrer; no unsafe-inline/unsafe-eval.
 package webui
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -66,14 +74,78 @@ const (
 		"form-action 'self'"
 )
 
-// Handler serves the embedded shell and its allowlisted assets.
+// Handler serves the embedded shell and its build-referenced assets.
 type Handler struct {
 	fsys fs.FS
+	// assets is the declared membership of THIS build: every asset file the
+	// produced index.html references, taken from the Vite build manifest. An
+	// asset is served only if its name is in this set — not merely because its
+	// extension looks acceptable. Never nil after New succeeds.
+	assets map[string]struct{}
 }
 
-// New returns a Handler serving the given filesystem (normally webui.DistFS()).
-func New(fsys fs.FS) *Handler {
-	return &Handler{fsys: fsys}
+// New returns a Handler serving the given filesystem (normally
+// webui.DistFS()). It validates the bundle ONCE, up front, before any
+// request is served or any listener bound: index.html must be present and
+// every asset the build references (per the Vite manifest) must resolve in
+// the filesystem. An incomplete bundle is a hard error with one actionable
+// message — the process must fail closed, not serve a broken panel.
+func New(fsys fs.FS) (*Handler, error) {
+	assets, err := referencedAssets(fsys)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{fsys: fsys, assets: assets}, nil
+}
+
+// referencedAssets derives the servable asset set from the Vite build
+// manifest and validates that index.html plus every referenced asset exists.
+// The manifest is the tool-generated record of what this build emitted and
+// the index references; we do not guess membership from extensions or
+// hash-shaped names.
+func referencedAssets(fsys fs.FS) (map[string]struct{}, error) {
+	manifest, err := fs.ReadFile(fsys, ".vite/manifest.json")
+	if err != nil {
+		return nil, errors.New("frontend bundle incomplete: missing build manifest (.vite/manifest.json); run `npm --prefix web run build`")
+	}
+	var entries map[string]struct {
+		File string   `json:"file"`
+		CSS  []string `json:"css"`
+	}
+	if err := json.Unmarshal(manifest, &entries); err != nil {
+		return nil, fmt.Errorf("frontend bundle invalid: build manifest is not parseable JSON (run `npm --prefix web run build`): %w", err)
+	}
+	assets := make(map[string]struct{})
+	add := func(rel string) error {
+		// Manifest file/css values are bundle-relative (e.g. "assets/x.js");
+		// the servable name is the single basename under assets/.
+		name, err := sanitizeAssetName(path.Base(rel))
+		if err != nil {
+			return fmt.Errorf("frontend bundle invalid: manifest references an unsafe asset path %q: %w", rel, err)
+		}
+		if _, err := fs.Stat(fsys, "assets/"+name); err != nil {
+			return fmt.Errorf("frontend bundle incomplete: missing referenced asset assets/%s; run `npm --prefix web run build`", name)
+		}
+		assets[name] = struct{}{}
+		return nil
+	}
+	for _, e := range entries {
+		if err := add(e.File); err != nil {
+			return nil, err
+		}
+		for _, css := range e.CSS {
+			if err := add(css); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(assets) == 0 {
+		return nil, errors.New("frontend bundle invalid: build manifest declares no assets; run `npm --prefix web run build`")
+	}
+	if _, err := fs.Stat(fsys, "index.html"); err != nil {
+		return nil, errors.New("frontend bundle incomplete: missing index.html; run `npm --prefix web run build`")
+	}
+	return assets, nil
 }
 
 // ServeHTTP serves only the exact root (shell) and /assets/{name} (allowlisted
@@ -115,11 +187,11 @@ func (h *Handler) serveShell(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// serveAsset serves a single allowlisted asset. Hostile and non-allowlisted
-// paths are rejected with a plain 404 (NOT redirected to a file, NOT a
-// listing, NOT HTML). Content-hashed generated assets are immutable, so they
-// get a long cache; everything else here is still validated against the
-// allowlist before caching is even considered.
+// serveAsset serves a single build-referenced asset. Hostile, non-allowlisted
+// and UNREFERENCED paths are rejected with a plain 404 (NOT redirected to a
+// file, NOT a listing, NOT HTML): only an artifact the produced index.html
+// actually references is servable. A referenced content-hashed generated
+// asset is immutable, so it gets a long cache; everything rejected is no-store.
 func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, name string) bool {
 	clean, err := sanitizeAssetName(name)
 	if err != nil {
@@ -128,9 +200,10 @@ func (h *Handler) serveAsset(w http.ResponseWriter, r *http.Request, name string
 		writeNotFound(w)
 		return true // handled (rejected); caller must not fall through to 403 HTML
 	}
-	// Validate the entry exists AND is a real file in the embedded bundle.
-	info, err := fs.Stat(h.fsys, path.Join("assets", clean))
-	if err != nil || info.IsDir() {
+	// Membership: the asset must be one THIS build declared (Vite manifest). A
+	// stray unreferenced file with an allowlisted extension/hash shape is not
+	// servable.
+	if _, referenced := h.assets[clean]; !referenced {
 		writeNotFound(w)
 		return true
 	}

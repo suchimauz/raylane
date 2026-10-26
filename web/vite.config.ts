@@ -23,6 +23,12 @@ export default defineConfig({
     assetsDir: 'assets',
     sourcemap: false,
     target: 'es2022',
+    // Emit the Vite build manifest: the authoritative, tool-generated record
+    // of every asset this build actually produced and the index references
+    // (entry file + its imported CSS). The Go shell serves ONLY this declared
+    // artifact membership and validates bundle completeness against it at
+    // startup — no guessing from extensions or hash-shaped names.
+    manifest: true,
   },
   server: {
     // Loopback only: the dev server must never be reachable from the LAN.

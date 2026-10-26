@@ -142,12 +142,45 @@ func decodeStrictConfig(raw []byte, dst *serveConfigJSON) error {
 	return nil
 }
 
-// serve opens the state database, binds BOTH listeners before serving (a
-// half-bound control plane with bootstrap unreachable is refused), then runs
+// serve is fail-closed at startup: it validates the embedded frontend bundle
+// and refuses to displace a live instance (the owner-only socket check) BEFORE
+// opening the state database or binding any listener — an incomplete bundle or
+// a second instance must not write application state, advertise readiness, or
+// collide with the first instance's TCP bind. Then it binds BOTH listeners
+// (a half-bound control plane with bootstrap unreachable is refused), serves
 // until SIGINT/SIGTERM or a listener failure, and shuts down gracefully.
 func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Preflight 1: the embedded bundle (web/dist) was produced by the
+	// canonical frontend step; if it is absent the Go build already failed at
+	// go:embed. New() validates index/manifest/referenced-asset completeness
+	// and fails closed with one actionable error — BEFORE any state write,
+	// listener bind or readiness, never a successful broken panel.
+	// The composition happens HERE (the CLI composition root), not inside
+	// authhttp: the settled authhttp runtime-composition boundary (the T008
+	// guard) is left byte-for-byte untouched.
+	shell, err := webui.New(webuiassets.DistFS())
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+		return 1
+	}
+
+	// Preflight 2: the live-socket ownership check runs before opening the DB
+	// or binding the LAN port, so a second instance is refused by the
+	// socket-ownership check (exit 1) rather than by an unrelated TCP
+	// address-in-use failure, and never touches the shared state database.
+	// The listener is held for the whole run, so the check cannot be raced by
+	// a third instance after the bind.
+	localLn, err := listenLocalSocket(cfg.UnixSocketDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
+		return 1
+	}
+	sockPath := localLn.Addr().String()
+	defer os.Remove(sockPath)
+	defer localLn.Close()
 
 	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
@@ -161,21 +194,13 @@ func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
 		return 1
 	}
-	// Compose the production shell into the SAME HTTPS process and origin as
-	// the management API: one Raylane process, one configured origin, no second
-	// server, no dev proxy, no CORS. The embedded bundle (web/dist) was built
-	// by the canonical frontend step; if it is absent the Go build already
-	// failed at the go:embed, so reaching here means the bundle is present.
-	//
-	// The composition happens HERE (the CLI composition root), not inside
-	// authhttp: the settled authhttp runtime-composition boundary (the T008
-	// guard) is left byte-for-byte untouched. The shell/assets handler answers
-	// only the exact root and the /assets/ allowlist and sets its own strict
-	// no-store / immutable-cache / CSP headers; every other request — the API
-	// subtree, unknown paths, and every LAN bootstrap variant — falls through
-	// to srv.Handler(), which keeps the generic 403, request-id and Origin
+	// The shell/assets handler answers only the exact root and the
+	// build-referenced assets and sets its own strict no-store /
+	// immutable-cache / CSP headers; every other request — the API subtree,
+	// unknown paths, and every LAN bootstrap variant — falls through to
+	// srv.Handler(), which keeps the generic 403, request-id and Origin
 	// priority exactly as accepted.
-	lanHandler := composeLAN(webui.New(webuiassets.DistFS()), srv.Handler())
+	lanHandler := composeLAN(shell, srv.Handler())
 
 	lanLn, err := net.Listen("tcp", cfg.ManagementListen)
 	if err != nil {
@@ -183,14 +208,6 @@ func serve(cfg authhttp.Config, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer lanLn.Close()
-	localLn, err := listenLocalSocket(cfg.UnixSocketDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "raylane serve: %v\n", err)
-		return 1
-	}
-	sockPath := localLn.Addr().String()
-	defer os.Remove(sockPath)
-	defer localLn.Close()
 
 	httpsLn, err := tlsListener(lanLn, cfg.TLSCertPath, cfg.TLSKeyPath)
 	if err != nil {

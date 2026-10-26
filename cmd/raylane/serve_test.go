@@ -786,12 +786,17 @@ func extractAsset(t *testing.T, html, ext string) string {
 func TestT009ComposeLANRouting(t *testing.T) {
 	bundle := fstest.MapFS{
 		"index.html":              &fstest.MapFile{Data: []byte("<shell/>")},
+		".vite/manifest.json":     &fstest.MapFile{Data: []byte(`{"index.html":{"file":"assets/index-Ab3.js","css":["assets/index-Ab3.css"]}}`)},
 		"assets/index-Ab3.js":     &fstest.MapFile{Data: []byte("bundle")},
 		"assets/index-Ab3.css":    &fstest.MapFile{Data: []byte("css")},
 		"assets/index-Ab3.js.map": &fstest.MapFile{Data: []byte("{}")},
 		"assets/leaked.db":        &fstest.MapFile{Data: []byte("SQLite")},
+		"assets/stray-unref.js":   &fstest.MapFile{Data: []byte("x")},
 	}
-	shell := webui.New(bundle)
+	shell, err := webui.New(bundle)
+	if err != nil {
+		t.Fatalf("webui.New: %v", err)
+	}
 	var apiHits int
 	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		apiHits++
@@ -811,8 +816,10 @@ func TestT009ComposeLANRouting(t *testing.T) {
 		t.Fatalf("api hits=%d, want 0 for shell/asset requests", apiHits)
 	}
 
-	// Disallowed-under-assets are a webui 404 (handled, NOT fall-through 403).
-	for _, target := range []string{"/assets/index-Ab3.js.map", "/assets/leaked.db"} {
+	// Disallowed-under-assets are a webui 404 (handled, NOT fall-through 403):
+	// source maps, databases, and UNREFERENCED allowlisted-extension files (the
+	// build manifest is the membership, not the extension).
+	for _, target := range []string{"/assets/index-Ab3.js.map", "/assets/leaked.db", "/assets/stray-unref.js"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
 		if rec.Code != http.StatusNotFound {

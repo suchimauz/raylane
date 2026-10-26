@@ -326,9 +326,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; official tag->commit metadata verified 2026-10-23
         with:
+          # Include the content explicitly, including the hidden .vite/ dir:
+          # web/dist/.vite/manifest.json is the declared artifact membership the
+          # embedded Go bundle validates at startup. upload-artifact's default
+          # single-path form skips dot-directories, which would deliver an
+          # incomplete dist and fail the downstream Go build/embed.
           name: web-dist-${{ github.sha }}
           path: ${{ github.workspace }}/web/dist
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 7
 
   # ---------------------------------------------------------------------------

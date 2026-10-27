@@ -103,6 +103,17 @@ func authEligible(f capability.Field, wantType string) bool {
 	return f.Type == wantType
 }
 
+// authCredentialNames are the ONLY field names that may act as credential
+// companions. FR-007 companion authority is deliberately limited to the named
+// username/password pair: an unrelated secret declaration (e.g. apiToken) is
+// INERT — it neither creates a userpass demand nor changes absent-selector
+// inference, and an arbitrary SecretPresence key or plaintext/quarantine name
+// never counts. Each name participates ONLY when it is independently declared
+// as an eligible credential (a supported-not-false SECRET STRING); an
+// undeclared / wrong-type / known / unsupported name is never an invented
+// target.
+var authCredentialNames = []string{"username", "password"}
+
 // authEligibleCredential reports whether a declared field counts as a
 // credential companion: a SECRET STRING that is supported-not-false. Only such
 // fields are legitimate username/password companions; a wrong-type / known /
@@ -118,16 +129,22 @@ func authEligibleCredential(f capability.Field) bool {
 	return f.Type == "string"
 }
 
-// authCredentialPresence returns, for every ELIGIBLE credential companion
-// (sorted for determinism), whether it has trusted sealed presence. Companions
-// are looked up by declaration, never by submitted map keys or arbitrary
-// presence names.
+// authCredentialPresence returns, for each NAMED credential companion that is
+// declared AND eligible (username/password, in that fixed order for
+// determinism), whether it has trusted sealed presence. A named companion that
+// is undeclared or declared ineligible (wrong type / known / unsupported) is
+// EXCLUDED from the companion set — it never becomes a demand target and never
+// counts as an absent credential. An unrelated secret declaration is never
+// consulted. Presence is read ONLY for the named eligible companions, never
+// from submitted map keys or arbitrary presence names.
 func authCredentialPresence(declared map[string]capability.Field, presence map[string]bool) []bool {
-	var out []bool
-	for _, n := range sortedKeysOf(declared) {
-		if authEligibleCredential(declared[n]) {
-			out = append(out, presence[n])
+	out := make([]bool, 0, len(authCredentialNames))
+	for _, n := range authCredentialNames {
+		f, isDecl := declared[n]
+		if !isDecl || !authEligibleCredential(f) {
+			continue // not an eligible named companion: excluded entirely
 		}
+		out = append(out, presence[n])
 	}
 	return out
 }

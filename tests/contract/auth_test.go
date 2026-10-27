@@ -354,3 +354,106 @@ func presenceLabel(m map[string]bool) string {
 		return "none"
 	}
 }
+
+// --- V4-FR007-CREDENTIAL-COMPANION-AUTHORITY maintained regressions ---
+//
+// Companion authority is limited to the NAMED username/password pair ONLY. An
+// unrelated secret declaration (apiToken) is INERT: it neither creates a
+// userpass demand nor changes absent-selector inference. These cases were RED
+// on 6d6b7a3 (the faulty helper counted every eligible declared secret string)
+// and are GREEN with the corrected named-companion authority.
+
+// credsWith returns a trusted presence map with exactly the named keys true.
+func credsWith(names ...string) map[string]bool {
+	m := map[string]bool{}
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+// threeCredDecls declares the real username/password pair PLUS an unrelated
+// secret apiToken, so the unrelated secret's inertness is exercised.
+const threeCredDecls = twoCreds + `,"apiToken":{"type":"string","classification":"secret","secret":true}`
+
+// TestAuthUnrelatedSecretInertThirdSecret: adding an unrelated secret
+// declaration AND its trusted presence must NOT change any auth outcome. With
+// both real credentials present (explicit userpass / absent) it stays Valid;
+// apiToken presence is irrelevant.
+func TestAuthUnrelatedSecretInertThirdSecret(t *testing.T) {
+	p := authGuardProfile(t, fullAuthMode, threeCredDecls)
+	for _, pres := range []map[string]bool{
+		credsWith("username", "password", "apiToken"),
+		credsWith("username", "password"),
+	} {
+		// explicit userpass: both real credentials sealed => Valid regardless of apiToken.
+		res := authValidate(t, p, "p", map[string]any{"server": "x", "authMode": "userpass"}, nil, pres)
+		expectAuthOK(t, "unrelated/userpass/"+presenceLabel(pres), res)
+		// absent selector: both real credentials => coherent userpass regardless of apiToken.
+		resAbsent := authValidate(t, p, "p", map[string]any{"server": "x"}, nil, pres)
+		expectAuthOK(t, "unrelated/absent-both/"+presenceLabel(pres), resAbsent)
+	}
+}
+
+// TestAuthUnrelatedSecretOnlyNoSpuriousDemand: a profile with ONLY an
+// unrelated secret declaration (apiToken) and NO named username/password has
+// ZERO eligible named companions. An eligible selector + zero eligible NAMED
+// companions invents NO demand: explicit userpass and absent selector are both
+// simply coherent (none), never a spurious missing from the unrelated secret.
+func TestAuthUnrelatedSecretOnlyNoSpuriousDemand(t *testing.T) {
+	onlyUnrelatedDecl := `"apiToken":{"type":"string","classification":"secret","secret":true}`
+	p := authGuardProfile(t, fullAuthMode, onlyUnrelatedDecl)
+	onlyUnrelated := credsWith("apiToken")
+	res := authValidate(t, p, "p", map[string]any{"server": "x", "authMode": "userpass"}, nil, onlyUnrelated)
+	expectAuthOK(t, "unrelated-only/userpass", res)
+	resAbsent := authValidate(t, p, "p", map[string]any{"server": "x"}, nil, onlyUnrelated)
+	expectAuthOK(t, "unrelated-only/absent", resAbsent)
+	// explicit none stays coherent with the unrelated presence too.
+	resNone := authValidate(t, p, "p", map[string]any{"server": "x", "authMode": "none"}, nil, onlyUnrelated)
+	expectAuthOK(t, "unrelated-only/none", resNone)
+}
+
+// TestAuthAbsentNeitherRealCredUnrelatedPresentStillNone: with neither real
+// credential present but the unrelated apiToken present, the absent selector
+// still infers NONE (the unrelated secret never changes inference).
+func TestAuthAbsentNeitherRealCredUnrelatedPresentStillNone(t *testing.T) {
+	p := authGuardProfile(t, fullAuthMode, threeCredDecls)
+	res := authValidate(t, p, "p", map[string]any{"server": "x"}, nil, credsWith("apiToken"))
+	expectAuthOK(t, "absent-neither-real/unrelated-present", res)
+}
+
+// TestAuthGenuinePartialPairInvalidRegardlessUnrelated: a legacy PARTIAL pair
+// (exactly one real credential, no selector) stays an invalid retainable draft
+// whether or not the unrelated apiToken is present — the unrelated secret never
+// rescues it to valid, and never turns it into a different demand.
+func TestAuthGenuinePartialPairInvalidRegardlessUnrelated(t *testing.T) {
+	p := authGuardProfile(t, fullAuthMode, threeCredDecls)
+	for _, pres := range []map[string]bool{
+		credsWith("username", "apiToken"),
+		credsWith("username"),
+		credsWith("password", "apiToken"),
+	} {
+		res := authValidate(t, p, "p", map[string]any{"server": "x"}, nil, pres)
+		expectAuthIssue(t, "genuine-partial/"+presenceLabel(pres), res, nodes.IssueDependencyMissing)
+	}
+}
+
+// TestAuthPartialNamedCompanionCountsOnlyEligibleNamed: an ineligible NAMED
+// declaration (password declared KNOWN, not secret) is excluded from the
+// companion set — only the eligible named username counts. So username-only is
+// a coherent single-credential userpass, NOT a spurious partial-pair missing;
+// and the unrelated apiToken still does not count.
+func TestAuthPartialNamedCompanionCountsOnlyEligibleNamed(t *testing.T) {
+	oneNamedPlusUnrelated := `"username":{"type":"string","classification":"secret","secret":true},"password":{"type":"string","classification":"known"},"apiToken":{"type":"string","classification":"secret","secret":true}`
+	p := authGuardProfile(t, fullAuthMode, oneNamedPlusUnrelated)
+	// explicit userpass with the one eligible named credential => Valid.
+	res := authValidate(t, p, "p", map[string]any{"server": "x", "authMode": "userpass"}, nil, credsWith("username", "apiToken"))
+	expectAuthOK(t, "partial-named/userpass-useronly", res)
+	// absent selector: the one eligible named credential present => coherent.
+	resAbsent := authValidate(t, p, "p", map[string]any{"server": "x"}, nil, credsWith("username", "apiToken"))
+	expectAuthOK(t, "partial-named/absent-useronly", resAbsent)
+	// explicit userpass with NO eligible named credential => missing (the known
+	// password and unrelated apiToken are not credential targets).
+	resMiss := authValidate(t, p, "p", map[string]any{"server": "x", "authMode": "userpass"}, nil, credsWith("apiToken"))
+	expectAuthIssue(t, "partial-named/userpass-missing", resMiss, nodes.IssueDependencyMissing)
+}

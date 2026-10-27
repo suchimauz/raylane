@@ -144,12 +144,14 @@ type Input struct {
 // Result is the validation outcome. Status is domain.ValidationValid or
 // domain.ValidationInvalid. Applicable is false when the node cannot be
 // validated as a usable configuration (unknown protocol, an unresolved
-// capability, an unsupported protocol, or any invalid finding) — an
-// inapplicable node is never presented as valid. Issues are deterministic and
-// value-free. Secrets lists the DECLARED secret field names (never values).
-// Unknown lists attacker-controlled unknown names under the generic bucket
-// path, never the raw name. ProjectedActive/Inactive are the allowlisted,
-// value-copied safe projection for the valid subset.
+// capability, an unsupported protocol, any invalid finding, OR a check that
+// could not run — ChainCheckNotRun / StructuredCheckNotRun). A node can be
+// structurally Valid yet NOT applicable: NotRun is "could not verify", never a
+// pass, so such a node is never presented as apply-ready. Issues are
+// deterministic and value-free. Secrets lists the DECLARED secret field names
+// (never values). Unknown lists attacker-controlled unknown names under the
+// generic bucket path, never the raw name. ProjectedActive/Inactive are the
+// allowlisted, value-copied safe projection for the valid subset.
 type Result struct {
 	Status     Validity
 	Applicable bool
@@ -163,6 +165,55 @@ type Result struct {
 	// run for lack of trusted context — NOT a pass; the node is then not
 	// applicable for apply even though it may be structurally Valid.
 	ChainCheck ChainCheckStatus
+	// StructuredCheck is the honest aggregate readiness status of the FR-003
+	// structured-object targets (xhttpExtra/finalMask). StructuredCheckNotRun
+	// means an ACTIVE eligible opaque object has no real engine-compatibility
+	// checker — it is structurally Valid but NOT applicable for apply (Ready is
+	// reserved for a future real compat checker and is never produced here).
+	// Failed means a real structured incompatibility was decided (the wrong-xhttp
+	// mode). It is deliberately separate from ChainCheck and does NOT overlap it.
+	StructuredCheck StructuredCheckStatus
+}
+
+// StructuredCheckStatus is the honest aggregate outcome of the FR-003
+// structured-object readiness check for one node. It is deliberately NOT a
+// boolean and deliberately separate from ChainCheckStatus so a caller can never
+// read "Valid" as "structured content checked for engine compatibility":
+// NotRun and NotRequired are distinct, and Ready is reserved for a future real
+// compatibility checker that this increment does not ship.
+type StructuredCheckStatus int
+
+const (
+	// StructuredCheckNotRequired: the node declares no ACTIVE eligible structured
+	// object target (no xhttpExtra/finalMask active, or only ineligible
+	// declarations). The structured readiness rule does not gate this node.
+	StructuredCheckNotRequired StructuredCheckStatus = iota
+	// StructuredCheckReady: reserved for a future REAL engine-compatibility
+	// checker. It is UNREACHABLE in this increment: no shipped path produces it.
+	StructuredCheckReady
+	// StructuredCheckFailed: a structured check RAN and produced an issue (the
+	// wrong-xhttp mode). The node is Invalid and not applicable.
+	StructuredCheckFailed
+	// StructuredCheckNotRun: an ACTIVE eligible structured object exists but the
+	// real engine-compatibility checker is not implemented. The object is
+	// structurally Valid but NOT applicable for apply — this is NOT a pass and
+	// NOT engine/handshake/network proof.
+	StructuredCheckNotRun
+)
+
+// String returns a stable, value-free label for logs/tests.
+func (s StructuredCheckStatus) String() string {
+	switch s {
+	case StructuredCheckNotRequired:
+		return "not_required"
+	case StructuredCheckReady:
+		return "ready"
+	case StructuredCheckFailed:
+		return "failed"
+	case StructuredCheckNotRun:
+		return "not_run"
+	}
+	return "unknown"
 }
 
 // Validity is the two-way validation verdict produced by an explicit Validate
@@ -373,6 +424,19 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// localAddresses); no map mutation, no secret read, no new IssueCode.
 	checkWireGuardTypedRules(&res, in.Protocol, declared, active)
 
+	// FR-003 structured-object readiness (D-014/D-015/D-016/D-050). Runs after
+	// the per-field shape checks: a real non-nil JSON object is a valid shape for
+	// an eligible declared object field, but an ACTIVE opaque object with no real
+	// engine-compat checker must never become apply-ready. Sets res.StructuredCheck
+	// honestly (NotRequired / NotRun / Failed; Ready is reserved for a future real
+	// checker and is unreachable here) and, on a NotRun/Failed, reduces
+	// applicability below. Protocol-scoped by the ACTUAL input protocol to
+	// vless.xhttpExtra / vless.finalMask / wireguard.finalMask so the readiness
+	// and xhttp-mode rules never leak into other protocols. One static value-free
+	// issue (dependencyIncompatible@xhttpExtra) on the decided wrong-xhttp mode;
+	// no map mutation, no secret read, no new IssueCode.
+	checkStructuredRules(&res, in.Protocol, declared, active)
+
 	if len(res.Issues) > 0 {
 		res.Status = Invalid
 		// An invalid node is not applicable as a usable configuration.
@@ -451,6 +515,19 @@ func valueOK(f capability.Field, val any) (bool, IssueCode) {
 			return false, IssueTypeMismatch
 		}
 		return true, ""
+	case "object":
+		// FR-003 object SHAPE: a real, non-nil JSON object is a valid shape.
+		// Both a nonempty nested map and a real empty {} are valid; a typed-nil
+		// map (DIRECT seam) or a JSON null (canonical) is NOT an object and fails
+		// typeMismatch like any wrong type. Emptiness is never rejected (no
+		// len(m)==0 gate): an empty object is a legitimate structured value. The
+		// CONTENT of an opaque object is not validated here — readiness for the
+		// product targets (xhttpExtra/finalMask) is a separate honest aggregate
+		// reported in Result.StructuredCheck (see structured_rules.go).
+		if m, ok := val.(map[string]any); ok && m != nil {
+			return true, ""
+		}
+		return false, IssueTypeMismatch
 	case "enum":
 		s, ok := val.(string)
 		if !ok {

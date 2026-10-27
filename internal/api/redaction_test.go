@@ -24,8 +24,8 @@ func authoredProfile(t *testing.T) *api.Profile {
 	if err != nil {
 		t.Fatalf("ParseCapabilityProfile(authored): %v", err)
 	}
-	if p.Version() != 3 {
-		t.Fatalf("profile version = %d, want 3", p.Version())
+	if p.Version() != 4 {
+		t.Fatalf("profile version = %d, want 4", p.Version())
 	}
 	return p
 }

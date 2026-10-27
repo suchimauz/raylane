@@ -1,5 +1,5 @@
 {
-  "profileVersion": 3,
+  "profileVersion": 4,
   "protocols": {
     "vless": {
       "fields": {
@@ -186,6 +186,11 @@
           "classification": "known",
           "maxLength": 64
         },
+        "chainInterface": {
+          "type": "string",
+          "classification": "known",
+          "maxLength": 64
+        },
         "dnsMode": {
           "type": "enum",
           "classification": "known",
@@ -287,6 +292,11 @@
           ]
         },
         "chainNodeId": {
+          "type": "string",
+          "classification": "known",
+          "maxLength": 64
+        },
+        "chainInterface": {
           "type": "string",
           "classification": "known",
           "maxLength": 64
@@ -435,6 +445,11 @@
           ]
         },
         "chainNodeId": {
+          "type": "string",
+          "classification": "known",
+          "maxLength": 64
+        },
+        "chainInterface": {
           "type": "string",
           "classification": "known",
           "maxLength": 64

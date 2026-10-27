@@ -92,6 +92,19 @@ func envelopeRejected(doc domain.Document, code IssueCode) (AdapterResult, error
 // presence is the store-supplied sealed-secret map (trusted), never a client
 // boolean. The adapter performs no store write and no transport.
 func ValidateDocument(profile *capability.Profile, original []byte, presence map[string]bool) (AdapterResult, error) {
+	return ValidateDocumentWithContext(profile, original, presence, nil)
+}
+
+// ValidateDocumentWithContext is the explicit-context form of
+// ValidateDocument. The supplied chain context is the TRUSTED reference /
+// interface inventory (from the store boundary), never parsed from the
+// document; a nil context means no inventory is available, so the chain
+// reference/interface rules run honestly as NotRun (the node is then not
+// applicable for apply) rather than silently passing. The syntax gate, the
+// closed envelope/bucket decode, the exact-raw preservation, and the value-
+// free result are IDENTICAL to ValidateDocument — only the trusted chain
+// context differs.
+func ValidateDocumentWithContext(profile *capability.Profile, original []byte, presence map[string]bool, chain *ChainContext) (AdapterResult, error) {
 	// Syntax gate first: a malformed payload is not a Document at all.
 	doc, err := domain.ParseDocument(original)
 	if err != nil {
@@ -137,6 +150,7 @@ func ValidateDocument(profile *capability.Profile, original []byte, presence map
 		Inactive:       inactive,
 		Unknown:        unknown,
 		SecretPresence: presence,
+		Chain:          chain,
 	})
 	if res.Status == Valid {
 		doc.Validation = domain.ValidationValid

@@ -133,6 +133,12 @@ type Input struct {
 	// invalid/not applicable (generic value-free issue). It exists so the
 	// adapter can hand the whole submission over without laundering it.
 	Unknown map[string]any
+	// Chain is the trusted chain/reference context assembled by the store
+	// boundary from the saved/active node inventory. nil or HasInventory=false
+	// means no reference inventory is available: the reference rules are then
+	// NOT RUN (honest ChainCheckNotRun + inapplicable), never a silent PASS.
+	// It is read, never echoed, and never derived from the submitted document.
+	Chain *ChainContext
 }
 
 // Result is the validation outcome. Status is domain.ValidationValid or
@@ -152,6 +158,11 @@ type Result struct {
 	Secrets []string
 	// Unknown attacker-controlled names, reported only under the bucket path.
 	Unknown []string
+	// ChainCheck is the honest aggregate status of the FR-006 chain/reference
+	// and interface checks. ChainCheckNotRun means a required check could not
+	// run for lack of trusted context — NOT a pass; the node is then not
+	// applicable for apply even though it may be structurally Valid.
+	ChainCheck ChainCheckStatus
 }
 
 // Validity is the two-way validation verdict produced by an explicit Validate
@@ -318,6 +329,13 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// value. The independent HE rule is not gated on a usable mode selector.
 	mode, modeUsable := dnsModeState(declared, active)
 	checkDNSRules(&res, declared, active, inactive, mode, modeUsable)
+
+	// FR-006 one-layer chain validation (D-022/D-023/D-047). Runs after the
+	// per-field shape checks, keyed on the effective active chainMode and the
+	// TRUSTED chain context (never the submitted document). Sets res.ChainCheck
+	// honestly (NotRequired/NotRun/Passed/Failed) and, on a chain issue or a
+	// NotRun, adjusts applicability below.
+	checkChainRules(&res, declared, active, inactive, in.Chain, profile)
 
 	if len(res.Issues) > 0 {
 		res.Status = Invalid

@@ -152,6 +152,16 @@ func statNoFollow(t *testing.T, p string) os.FileInfo {
 	return fi
 }
 
+// dirEntries returns the immediate entries of a directory (for count checks).
+func dirEntries(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", dir, err)
+	}
+	return entries
+}
+
 // writeSentinel writes a marker file with fixed bytes and returns its path.
 func writeSentinel(t *testing.T, dir, name string) string {
 	t.Helper()
@@ -240,34 +250,66 @@ func TestInitFixtureRootRejectsRootSymlink(t *testing.T) {
 	}
 }
 
-// TestInitFixtureRootRejectsWritableAncestor: a compliant root under a
-// group/world-writable ANCESTOR is rejected. (The root itself is fine; the
-// chain is not.) RED proves validation happens BEFORE any use of the root.
+// TestInitFixtureRootRejectsWritableAncestor: prepareFixtureRoot (the ACTUAL
+// operation used by homeFixtureBase) must read-validate the PARENT chain
+// BEFORE any Lstat/mkdir/use, so an absent root under a group/world-writable
+// ancestor is rejected with NO root created and NO mutation of the ancestor.
+// This is the composed-entry regression residual B lacked (the old test called
+// validateFixtureChain directly, never the real preparation ordering).
 func TestInitFixtureRootRejectsWritableAncestor(t *testing.T) {
-	// This exercises homeFixtureBase's chain walk, not just the root. We build
-	// an own isolated chain with a writable ancestor and call the chain check
-	// via a helper seam.
 	grand := t.TempDir()
 	badAncestor := filepath.Join(grand, "badparent")
 	if err := os.Mkdir(badAncestor, 0o777); err != nil {
 		t.Fatalf("mkdir writable ancestor: %v", err)
 	}
 	os.Chmod(badAncestor, 0o777)
-	root := filepath.Join(badAncestor, "root")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatalf("mkdir root: %v", err)
-	}
-	os.Chmod(root, 0o700)
+	root := filepath.Join(badAncestor, "root") // ABSENT beneath the writable ancestor
 	ancestorBefore := statNoFollow(t, badAncestor).Mode().Perm()
 
-	// initFixtureRoot validates the root in isolation (it is compliant), so the
-	// ANCESTOR rejection is a homeFixtureBase chain-walk concern; verify the walk
-	// rejects without mutating the ancestor.
-	if err := validateFixtureChain(root); err == nil {
-		t.Fatalf("writable ancestor should make the chain non-compliant")
+	if err := prepareFixtureRoot(root); err == nil {
+		t.Fatalf("absent root under writable ancestor was not rejected")
+	}
+	// The root must NOT have been created through the untrusted ancestor.
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Fatalf("root %s was created through a writable ancestor (must be rejected BEFORE creation): %v", root, err)
 	}
 	if got := statNoFollow(t, badAncestor).Mode().Perm(); got != ancestorBefore {
 		t.Fatalf("writable ancestor mode mutated: %o -> %o", ancestorBefore, got)
+	}
+}
+
+// TestInitFixtureRootRejectsSymlinkAncestor: prepareFixtureRoot must reject an
+// absent root whose path goes through a symlink intermediate BEFORE creating
+// anything, and must NOT write the root INTO the symlink target.
+func TestInitFixtureRootRejectsSymlinkAncestor(t *testing.T) {
+	grand := t.TempDir()
+	target := filepath.Join(grand, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("mkdir symlink target: %v", err)
+	}
+	os.Chmod(target, 0o700)
+	targetSentinel := writeSentinel(t, target, "sentinel.txt")
+	targetBefore := statNoFollow(t, target).Mode().Perm()
+	targetEntriesBefore := len(dirEntries(t, target))
+
+	link := filepath.Join(grand, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	root := filepath.Join(link, "root") // path goes THROUGH the symlink intermediate
+
+	if err := prepareFixtureRoot(root); err == nil {
+		t.Fatalf("absent root through symlink ancestor was not rejected")
+	}
+	// Nothing may have been created inside the symlink target.
+	if got := len(dirEntries(t, target)); got != targetEntriesBefore {
+		t.Fatalf("symlink target gained entries (root written through link): %d -> %d", targetEntriesBefore, got)
+	}
+	if got := statNoFollow(t, target).Mode().Perm(); got != targetBefore {
+		t.Fatalf("symlink target mode mutated: %o -> %o", targetBefore, got)
+	}
+	if got := readSentinelBytes(t, targetSentinel); got != "sentinel-bytes" {
+		t.Fatalf("symlink target sentinel bytes changed: %q", got)
 	}
 }
 
@@ -303,27 +345,47 @@ func TestInitFixtureRootReusesSafeExistingRootNoChmod(t *testing.T) {
 	}
 }
 
+// freshOwnedContainer creates an EXCLUSIVELY-owned unique 0700 control
+// directory under the given validated trusted parent, registers removal ONLY
+// after fresh ownership is established, and returns its path. It never chmods
+// or removes a pre-existing basename: os.MkdirTemp yields a unique name, so it
+// cannot collide with or claim an existing directory.
+func freshOwnedContainer(t *testing.T, parent string) string {
+	t.Helper()
+	d, err := os.MkdirTemp(parent, "ctl-") // unique, exclusively created, 0700
+	if err != nil {
+		t.Fatalf("create owned control container: %v", err)
+	}
+	if err := os.Chmod(d, 0o700); err != nil { // fresh, empty, exclusively ours
+		os.RemoveAll(d)
+		t.Fatalf("chmod fresh control container: %v", err)
+	}
+	// Register removal ONLY now that fresh ownership is proven.
+	t.Cleanup(func() {
+		if err := os.RemoveAll(d); err != nil {
+			t.Errorf("remove owned control container %s: %v", d, err)
+		}
+	})
+	return d
+}
+
 // TestInitFixtureRootFreshCreateOpensWithProductionCtor: a fresh root created
-// by initFixtureRoot accepts a synthetic key via the REAL production
-// NewKeyStore (positive control that the new exclusive-0700 creation is
-// production-compliant). The root is placed under a compliant 0700 chain (NOT
-// world-writable /tmp) so the production "/"-anchored walk accepts it.
+// by prepareFixtureRoot accepts a synthetic key via the REAL production
+// NewKeyStore (positive control that exclusive-0700 creation is production-
+// compliant). The control container is EXCLUSIVELY owned (unique, freshly
+// created) under a validated trusted parent — never a fixed reusable path that
+// could overwrite pre-existing data.
 func TestInitFixtureRootFreshCreateOpensWithProductionCtor(t *testing.T) {
-	// Build a private 0700 chain the production walk accepts. Anchor at an
-	// existing compliant ancestor (the module dir) and go down with 0700 dirs.
+	// Anchor at the module's trusted .hyper/tmp parent and make a uniquely
+	// owned control container; never a fixed basename we might re-claim.
 	modRoot, err := projectFixtureRoot() // .../.hyper/tmp/store-fixtures
 	if err != nil {
 		t.Fatalf("project root: %v", err)
 	}
-	// Use a sibling of the real store-fixtures root for this isolated control.
-	base := filepath.Join(filepath.Dir(modRoot), "fresh-create-probe")
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		t.Fatalf("mkdir base: %v", err)
-	}
-	os.Chmod(base, 0o700) // fresh private dir we own
-	t.Cleanup(func() { os.RemoveAll(base) })
-	root := filepath.Join(base, "store-fixtures")
-	if err := initFixtureRoot(root); err != nil {
+	trustedParent := filepath.Dir(modRoot) // .../.hyper/tmp (validated below)
+	container := freshOwnedContainer(t, trustedParent)
+	root := filepath.Join(container, "store-fixtures")
+	if err := prepareFixtureRoot(root); err != nil {
 		t.Fatalf("fresh create: %v", err)
 	}
 	if got := statNoFollow(t, root).Mode().Perm(); got != 0o700 {
@@ -333,6 +395,73 @@ func TestInitFixtureRootFreshCreateOpensWithProductionCtor(t *testing.T) {
 	key := writeKeyFile(t, sub, "master.key", validTestKey(), 0o600)
 	if _, err := store.NewKeyStore(key); err != nil {
 		t.Fatalf("production NewKeyStore on fresh root rejected: %v", err)
+	}
+}
+
+// TestFreshControlContainerPreservesPreexisting: a pre-existing directory at a
+// would-be control path is NOT chmodded or removed — freshOwnedContainer uses a
+// unique exclusively-created name, and prepareFixtureRoot on a pre-existing
+// unsafe root fails closed WITHOUT mutating it. Pre-existing data survives.
+func TestFreshControlContainerPreservesPreexisting(t *testing.T) {
+	parent := t.TempDir()
+	// Pre-existing unsafe dir with sentinel, simulating residual A's victim.
+	pre := filepath.Join(parent, "preexisting")
+	if err := os.Mkdir(pre, 0o777); err != nil {
+		t.Fatalf("mkdir preexisting: %v", err)
+	}
+	os.Chmod(pre, 0o777)
+	sentinel := writeSentinel(t, pre, "sentinel.txt")
+	beforeMode := statNoFollow(t, pre).Mode().Perm()
+	beforeIno := statNoFollow(t, pre).Sys().(*syscall.Stat_t).Ino
+
+	// prepareFixtureRoot on the pre-existing unsafe root must fail closed with
+	// NO chmod and NO removal.
+	if err := prepareFixtureRoot(pre); err == nil {
+		t.Fatalf("pre-existing unsafe root accepted (should fail closed)")
+	}
+	if got := statNoFollow(t, pre).Mode().Perm(); got != beforeMode {
+		t.Fatalf("pre-existing root mode mutated: %o -> %o", beforeMode, got)
+	}
+	if got := statNoFollow(t, pre).Sys().(*syscall.Stat_t).Ino; got != beforeIno {
+		t.Fatalf("pre-existing root identity changed")
+	}
+	if got := readSentinelBytes(t, sentinel); got != "sentinel-bytes" {
+		t.Fatalf("pre-existing sentinel bytes changed: %q", got)
+	}
+}
+
+// TestFreshOwnedContainerNeverClaimsPreexistingSibling: a fresh-owned control
+// container is uniquely named, so a pre-existing sibling (even one whose name
+// starts with the same prefix) is never chmodded or removed. This is the
+// maintained residual-A control over the ACTUAL container mechanism used by
+// both the positive control and the parent cleanup probe.
+func TestFreshOwnedContainerNeverClaimsPreexistingSibling(t *testing.T) {
+	parent := t.TempDir()
+	// Pre-existing sibling with a same-prefix name and a sentinel, as residual
+	// A's deleted victim.
+	victim := filepath.Join(parent, "ctl-victim")
+	if err := os.Mkdir(victim, 0o777); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	os.Chmod(victim, 0o777)
+	sentinel := writeSentinel(t, victim, "sentinel.txt")
+	victimBefore := statNoFollow(t, victim).Mode().Perm()
+
+	// Create a fresh-owned container alongside the victim.
+	created := freshOwnedContainer(t, parent)
+	if created == victim {
+		t.Fatalf("fresh-owned container collided with the pre-existing sibling")
+	}
+	// The victim must be untouched: same mode, same sentinel bytes.
+	if got := statNoFollow(t, victim).Mode().Perm(); got != victimBefore {
+		t.Fatalf("pre-existing sibling mode mutated: %o -> %o", victimBefore, got)
+	}
+	if got := readSentinelBytes(t, sentinel); got != "sentinel-bytes" {
+		t.Fatalf("pre-existing sibling sentinel bytes changed: %q", got)
+	}
+	// And the created container is a distinct, freshly-owned 0700 dir.
+	if got := statNoFollow(t, created).Mode().Perm(); got != 0o700 {
+		t.Fatalf("fresh-owned container mode = %o, want 0700", got)
 	}
 }
 
@@ -350,16 +479,11 @@ func homeFixtureBase(t *testing.T) string {
 			homeBaseOnce.err = err
 			return
 		}
-		// Prepare the root WITHOUT mutating any pre-existing root/symlink (a
-		// fresh root is created 0700 exclusively; an unsafe existing one fails
-		// closed before any use). Then read-validate the chain from the root up
-		// to "/": every ancestor must be non-group/world-writable, matching the
-		// production walk. Read-only; never a chmod of a shared ancestor.
-		if err := initFixtureRoot(root); err != nil {
-			homeBaseOnce.err = err
-			return
-		}
-		if err := validateFixtureChain(root); err != nil {
+		// Prepare the root via the shared preparation operation: validate the
+		// parent chain FIRST (so nothing is created through an untrusted
+		// intermediate ancestor), then initialize the root WITHOUT mutating any
+		// pre-existing root/symlink. Read-only w.r.t. shared paths.
+		if err := prepareFixtureRoot(root); err != nil {
 			homeBaseOnce.err = err
 			return
 		}
@@ -390,6 +514,24 @@ func validateFixtureChain(root string) error {
 			return nil
 		}
 	}
+}
+
+// prepareFixtureRoot is the single test-only preparation operation used by
+// homeFixtureBase AND the maintained initializer controls. It establishes
+// ownership before ANY write: the PARENT chain is read-validated FIRST (so an
+// unsafe/writable/symlink intermediate ancestor is rejected BEFORE any Lstat/
+// mkdir/use could create through it), then the root itself is initialized
+// without mutating a pre-existing root/symlink. Read-only w.r.t. shared paths;
+// never chmods a shared ancestor.
+func prepareFixtureRoot(root string) error {
+	// 1. Validate the parent chain BEFORE touching the root, so no directory is
+	// created through an untrusted intermediate ancestor.
+	if err := validateFixtureChain(filepath.Dir(root)); err != nil {
+		return err
+	}
+	// 2. Initialize the root (validate pre-existing without chmod, or exclusive
+	// 0700 create; create-race fails closed). The parent is now known-trusted.
+	return initFixtureRoot(root)
 }
 
 // trustedDir returns a fresh fixture directory (0700, euid-owned, empty at
@@ -859,15 +1001,19 @@ func TestFixtureCleanupChildProbe(t *testing.T) {
 // unrelated pre-existing sentinel must survive. The outer test is GREEN only
 // when the expected child failure AND the cleanup are both observed.
 func TestTrustedFixtureCleanupRunsOnFailure(t *testing.T) {
-	// Unrelated sentinel outside the fixture root: must survive untouched.
-	sentinel := filepath.Join(homeFixtureBase(t), "unrelated-sentinel-do-not-remove")
+	// The unrelated sentinel and the child marker live in an EXCLUSIVELY created
+	// per-run owned container (unique name) under the fixture base — never a
+	// fixed/predictable basename that could overwrite-then-delete a pre-existing
+	// file. The container's removal is registered only after fresh ownership is
+	// established, and a pre-existing file at any of these paths is preserved by
+	// construction (we never address it).
+	probeDir := freshOwnedContainer(t, homeFixtureBase(t))
+	// Unrelated sentinel OUTSIDE the child's owned fixture dir: must survive.
+	sentinel := filepath.Join(probeDir, "unrelated-sentinel-do-not-remove")
 	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
 		t.Fatalf("write unrelated sentinel: %v", err)
 	}
-	defer os.Remove(sentinel) // own probe sentinel, removed by us only
-
-	marker := filepath.Join(homeFixtureBase(t), "child-marker-"+t.Name())
-	defer os.Remove(marker)
+	marker := filepath.Join(probeDir, "child-marker") // unique per-run dir basename
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestFixtureCleanupChildProbe$")
 	cmd.Env = append(os.Environ(), fixtureCleanupChildEnv+"="+marker)

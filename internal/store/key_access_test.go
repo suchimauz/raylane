@@ -345,20 +345,139 @@ func TestInitFixtureRootReusesSafeExistingRootNoChmod(t *testing.T) {
 	}
 }
 
+// TestCreateOwnedContainerRejectsWritableParent: the SAME operation that
+// creates positive-control containers (createOwnedContainer) must reject a
+// group/world-writable parent BEFORE any ctl-* creation, leaving the parent
+// entries/mode/inode/ctime/sentinel unchanged. This closes the R3 boundary:
+// no container is created through an unvalidated parent.
+func TestCreateOwnedContainerRejectsWritableParent(t *testing.T) {
+	// Host the writable parent inside an OWN trusted project fixture dir so the
+	// rejection proves the LOCAL writable reason, not an unrelated /tmp chain.
+	host := trustedDir(t)
+	parent := filepath.Join(host, "writable-parent")
+	if err := os.Mkdir(parent, 0o777); err != nil {
+		t.Fatalf("mkdir writable parent: %v", err)
+	}
+	os.Chmod(parent, 0o777)
+	sentinel := writeSentinel(t, parent, "sentinel.txt")
+	entriesBefore := len(dirEntries(t, parent))
+	modeBefore := statNoFollow(t, parent).Mode().Perm()
+	inoBefore := statNoFollow(t, parent).Sys().(*syscall.Stat_t).Ino
+	ctimeBefore := statNoFollow(t, parent).Sys().(*syscall.Stat_t).Ctim
+
+	d, err := createOwnedContainer(parent)
+	if err == nil {
+		// Should be unreachable; clean up defensively if it ever returns a dir.
+		os.RemoveAll(d)
+		t.Fatalf("writable parent accepted (should fail closed before creation)")
+	}
+	// The actual local reason must be the writable chain, not something else.
+	if !strings.Contains(err.Error(), "group/world writable") {
+		t.Fatalf("unexpected rejection reason: %v", err)
+	}
+	// No ctl-* created through the unvalidated parent; state fully unchanged.
+	if got := len(dirEntries(t, parent)); got != entriesBefore {
+		t.Fatalf("writable parent gained entries: %d -> %d (container created before validation)", entriesBefore, got)
+	}
+	if got := statNoFollow(t, parent).Mode().Perm(); got != modeBefore {
+		t.Fatalf("writable parent mode mutated: %o -> %o", modeBefore, got)
+	}
+	if got := statNoFollow(t, parent).Sys().(*syscall.Stat_t).Ino; got != inoBefore {
+		t.Fatalf("writable parent inode changed")
+	}
+	if got := statNoFollow(t, parent).Sys().(*syscall.Stat_t).Ctim; got != ctimeBefore {
+		t.Fatalf("writable parent ctime changed (a container was created+removed before validation)")
+	}
+	if got := readSentinelBytes(t, sentinel); got != "sentinel-bytes" {
+		t.Fatalf("writable parent sentinel bytes changed: %q", got)
+	}
+}
+
+// TestCreateOwnedContainerRejectsSymlinkParent: createOwnedContainer must
+// reject a parent path that goes through a symlink intermediate BEFORE any
+// target entry or metadata change, leaving link/target/sentinel unchanged.
+func TestCreateOwnedContainerRejectsSymlinkParent(t *testing.T) {
+	host := trustedDir(t)
+	target := filepath.Join(host, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("mkdir symlink target: %v", err)
+	}
+	os.Chmod(target, 0o700)
+	targetSentinel := writeSentinel(t, target, "sentinel.txt")
+	targetEntriesBefore := len(dirEntries(t, target))
+	targetModeBefore := statNoFollow(t, target).Mode().Perm()
+	targetInoBefore := statNoFollow(t, target).Sys().(*syscall.Stat_t).Ino
+
+	link := filepath.Join(host, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	linkModeBefore := statNoFollow(t, link).Mode()
+	parent := filepath.Join(link, "via-link") // container would be created INTO target
+
+	d, err := createOwnedContainer(parent)
+	if err == nil {
+		os.RemoveAll(d)
+		t.Fatalf("symlink-intermediate parent accepted (should fail closed)")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("unexpected rejection reason: %v", err)
+	}
+	// Nothing created inside the symlink target; target fully unchanged.
+	if got := len(dirEntries(t, target)); got != targetEntriesBefore {
+		t.Fatalf("symlink target gained entries (container written through link): %d -> %d", targetEntriesBefore, got)
+	}
+	if got := statNoFollow(t, target).Mode().Perm(); got != targetModeBefore {
+		t.Fatalf("symlink target mode mutated: %o -> %o", targetModeBefore, got)
+	}
+	if got := statNoFollow(t, target).Sys().(*syscall.Stat_t).Ino; got != targetInoBefore {
+		t.Fatalf("symlink target inode changed")
+	}
+	if got := statNoFollow(t, link).Mode(); got != linkModeBefore {
+		t.Fatalf("symlink link itself mutated: %v -> %v", linkModeBefore, got)
+	}
+	if got := readSentinelBytes(t, targetSentinel); got != "sentinel-bytes" {
+		t.Fatalf("symlink target sentinel bytes changed: %q", got)
+	}
+}
+
+// createOwnedContainer is the single test-only operation that actually calls
+// os.MkdirTemp. It read-validates the ENTIRE parent chain no-follow BEFORE any
+// creation, so no ctl-* container can be created through an unvalidated
+// (writable or symlink) parent. It returns an error (rather than t.Fatal) so
+// maintained rejection controls can inspect parent/target state after the
+// failure instead of aborting. On success the container is exclusively owned,
+// uniquely named, and 0700; the caller registers removal only after ownership
+// is established.
+func createOwnedContainer(parent string) (string, error) {
+	// Validate the full parent chain FIRST: an unsafe/writable/symlink ancestor
+	// is rejected BEFORE any MkdirTemp could create through it.
+	if err := validateFixtureChain(parent); err != nil {
+		return "", err
+	}
+	d, err := os.MkdirTemp(parent, "ctl-") // unique, exclusively created, 0700
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(d, 0o700); err != nil { // fresh, empty, exclusively ours
+		os.RemoveAll(d) // only the dir we just created
+		return "", err
+	}
+	return d, nil
+}
+
 // freshOwnedContainer creates an EXCLUSIVELY-owned unique 0700 control
-// directory under the given validated trusted parent, registers removal ONLY
-// after fresh ownership is established, and returns its path. It never chmods
+// directory under a validated trusted parent, registers removal ONLY after
+// fresh ownership is established, and returns its path. Creation itself
+// enforces the parent validation (via createOwnedContainer), so callers cannot
+// accidentally create a container through an untrusted parent. It never chmods
 // or removes a pre-existing basename: os.MkdirTemp yields a unique name, so it
 // cannot collide with or claim an existing directory.
 func freshOwnedContainer(t *testing.T, parent string) string {
 	t.Helper()
-	d, err := os.MkdirTemp(parent, "ctl-") // unique, exclusively created, 0700
+	d, err := createOwnedContainer(parent)
 	if err != nil {
 		t.Fatalf("create owned control container: %v", err)
-	}
-	if err := os.Chmod(d, 0o700); err != nil { // fresh, empty, exclusively ours
-		os.RemoveAll(d)
-		t.Fatalf("chmod fresh control container: %v", err)
 	}
 	// Register removal ONLY now that fresh ownership is proven.
 	t.Cleanup(func() {
@@ -436,7 +555,11 @@ func TestFreshControlContainerPreservesPreexisting(t *testing.T) {
 // maintained residual-A control over the ACTUAL container mechanism used by
 // both the positive control and the parent cleanup probe.
 func TestFreshOwnedContainerNeverClaimsPreexistingSibling(t *testing.T) {
-	parent := t.TempDir()
+	// Host under an OWN trusted project fixture dir (never world-writable /tmp),
+	// so the container creation succeeds for the intended reason and the
+	// preservation assertion is about the sibling, not an unrelated /tmp chain
+	// rejection.
+	parent := trustedDir(t)
 	// Pre-existing sibling with a same-prefix name and a sentinel, as residual
 	// A's deleted victim.
 	victim := filepath.Join(parent, "ctl-victim")
@@ -502,6 +625,16 @@ func validateFixtureChain(root string) error {
 	for dir := root; ; dir = filepath.Dir(dir) {
 		fi, err := os.Lstat(dir)
 		if err != nil {
+			// A not-yet-existing LEAF is fine: it is the directory about to be
+			// created, and its own compliance is enforced after creation
+			// (initFixtureRoot). Any other missing component, or a missing
+			// intermediate, is still an error — we cannot create through a hole.
+			if errors.Is(err, os.ErrNotExist) && dir == root {
+				if dir == "/" {
+					return nil
+				}
+				continue
+			}
 			return err
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {

@@ -1,5 +1,5 @@
 {
-  "profileVersion": 4,
+  "profileVersion": 5,
   "protocols": {
     "vless": {
       "fields": {
@@ -251,6 +251,14 @@
           "secret": true,
           "maxLength": 256
         },
+        "authMode": {
+          "type": "enum",
+          "classification": "known",
+          "allowedValues": [
+            "none",
+            "userpass"
+          ]
+        },
         "udpAssociate": {
           "type": "boolean",
           "classification": "known",
@@ -360,6 +368,14 @@
           "classification": "secret",
           "secret": true,
           "maxLength": 256
+        },
+        "authMode": {
+          "type": "enum",
+          "classification": "known",
+          "allowedValues": [
+            "none",
+            "userpass"
+          ]
         },
         "tls": {
           "type": "boolean",

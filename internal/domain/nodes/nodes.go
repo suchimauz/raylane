@@ -337,6 +337,18 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// NotRun, adjusts applicability below.
 	checkChainRules(&res, declared, active, inactive, in.Chain, profile)
 
+	// FR-007 credential-intent / trusted-sealed-presence rule (D-016/D-043).
+	// Runs after the per-field shape checks: it reads the EFFECTIVE ACTIVE
+	// authMode selector and the TRUSTED sealed-presence booleans (never submitted
+	// bytes). It certifies presence compatibility ONLY (explicit none accepts any
+	// presence; explicit userpass requires every eligible credential sealed; a
+	// truly-absent selector resolves none/userpass from the eligible companion
+	// split and flags a legacy PARTIAL pair as an invalid, retainable draft —
+	// never a silent no-auth). An ineligible/undeclared selector and an
+	// inactive-only selector run no demands. No map mutation, no secret value
+	// read, no new IssueCode.
+	checkAuthRules(&res, declared, active, inactive, in.SecretPresence)
+
 	if len(res.Issues) > 0 {
 		res.Status = Invalid
 		// An invalid node is not applicable as a usable configuration.

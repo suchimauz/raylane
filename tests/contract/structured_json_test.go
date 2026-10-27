@@ -64,7 +64,9 @@ func assertStructuredValidNotRun(t *testing.T, res nodes.Result, label string) {
 
 // TestStructuredObjectShape: real non-nil objects (nonempty nested + empty {})
 // are valid shape; typed-nil DIRECT and JSON null canonical / wrong top-level
-// scalar/string/array/bool/number are generic typeMismatch only.
+// scalar/string/array/bool/number are generic typeMismatch only, and the
+// eligible ACTIVE target's own-bad-shape aggregate is StructuredCheckFailed
+// (generic-first: NO duplicate issue, Failed is NOT a second finding).
 func TestStructuredObjectShape(t *testing.T) {
 	p := loadProfile(t)
 	pres := trustedPresenceFor("vless")
@@ -82,28 +84,30 @@ func TestStructuredObjectShape(t *testing.T) {
 	res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
 	assertStructuredValidNotRun(t, res, "empty finalMask {}")
 
-	// Typed-nil DIRECT map: NOT an object -> generic typeMismatch only.
+	// Typed-nil DIRECT map: NOT an object -> generic typeMismatch only (one
+	// issue) + StructuredCheckFailed (eligible ACTIVE own-bad-shape).
 	var nilMap map[string]any
 	a = minValid("vless")
 	a["xhttpExtra"] = nilMap
 	res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
 	if !hasIssue(res, nodes.IssueTypeMismatch, "xhttpExtra") || len(res.Issues) != 1 {
-		t.Fatalf("typed-nil: want one typeMismatch@xhttpExtra, got %+v", res.Issues)
+		t.Fatalf("typed-nil: want one typeMismatch@xhttpExtra (no duplicate), got %+v", res.Issues)
 	}
-	if res.Status != nodes.Invalid || res.Applicable || res.StructuredCheck != nodes.StructuredCheckNotRequired {
-		t.Fatalf("typed-nil: want Invalid+notApplicable+NotRequired, got %v/%v/%v", res.Status, res.Applicable, res.StructuredCheck)
+	if res.Status != nodes.Invalid || res.Applicable || res.StructuredCheck != nodes.StructuredCheckFailed {
+		t.Fatalf("typed-nil: want Invalid+notApplicable+Failed, got %v/%v/%v", res.Status, res.Applicable, res.StructuredCheck)
 	}
 
-	// Wrong top-level scalar/string/array/bool/number: generic typeMismatch only.
+	// Wrong top-level scalar/string/array/bool/number: generic typeMismatch only
+	// (one issue) + StructuredCheckFailed (eligible ACTIVE own-bad-shape).
 	for _, bad := range []any{"text", []any{1.0}, true, 1.5} {
 		a = minValid("vless")
 		a["xhttpExtra"] = bad
 		res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
-		if !hasIssue(res, nodes.IssueTypeMismatch, "xhttpExtra") {
-			t.Fatalf("xhttpExtra=%v: want typeMismatch@xhttpExtra, got %+v", bad, res.Issues)
+		if !hasIssue(res, nodes.IssueTypeMismatch, "xhttpExtra") || len(res.Issues) != 1 {
+			t.Fatalf("xhttpExtra=%v: want one typeMismatch@xhttpExtra, got %+v", bad, res.Issues)
 		}
-		if res.StructuredCheck != nodes.StructuredCheckNotRequired {
-			t.Fatalf("xhttpExtra=%v: bad shape must stay NotRequired (generic-first), got %v", bad, res.StructuredCheck)
+		if res.StructuredCheck != nodes.StructuredCheckFailed {
+			t.Fatalf("xhttpExtra=%v: eligible ACTIVE own-bad-shape must be Failed (generic-first, no duplicate), got %v", bad, res.StructuredCheck)
 		}
 	}
 
@@ -113,8 +117,11 @@ func TestStructuredObjectShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("null envelope refused: %v", err)
 	}
-	if !hasIssue(ar.Result, nodes.IssueTypeMismatch, "xhttpExtra") {
-		t.Fatalf("JSON null xhttpExtra: want typeMismatch, got %+v", ar.Result.Issues)
+	if !hasIssue(ar.Result, nodes.IssueTypeMismatch, "xhttpExtra") || len(ar.Result.Issues) != 1 {
+		t.Fatalf("JSON null xhttpExtra: want one typeMismatch@xhttpExtra, got %+v", ar.Result.Issues)
+	}
+	if ar.Result.StructuredCheck != nodes.StructuredCheckFailed {
+		t.Fatalf("JSON null xhttpExtra: eligible ACTIVE own-bad-shape must be Failed, got %v", ar.Result.StructuredCheck)
 	}
 }
 
@@ -336,6 +343,69 @@ func TestStructuredAggregation(t *testing.T) {
 	res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
 	if res.Status != nodes.Valid || !res.Applicable || res.StructuredCheck != nodes.StructuredCheckNotRequired {
 		t.Fatalf("no target: want Valid+applicable+NotRequired, got %v/%v/%v", res.Status, res.Applicable, res.StructuredCheck)
+	}
+}
+
+// TestStructuredBadShapeAggregate: each actual-protocol-scoped eligible ACTIVE
+// target whose OWN shape failed is StructuredCheckFailed (generic-first: only
+// its one existing typeMismatch, no duplicate), Failed dominates NotRun in
+// BOTH mix directions, both-bad yields exactly two existing typeMismatch
+// findings, and a wireguard finalMask bad shape is Failed.
+func TestStructuredBadShapeAggregate(t *testing.T) {
+	p := loadProfile(t)
+	pres := trustedPresenceFor("vless")
+
+	// bad xhttpExtra (wrong type) + valid finalMask object -> Failed dominates.
+	a := minValid("vless")
+	a["xhttpExtra"] = "not-an-object"
+	a["finalMask"] = map[string]any{}
+	res := nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
+	if res.StructuredCheck != nodes.StructuredCheckFailed || res.Status != nodes.Invalid || res.Applicable {
+		t.Fatalf("badExtra+validMask: want Failed+Invalid+notApplicable, got %v/%v/%v", res.StructuredCheck, res.Status, res.Applicable)
+	}
+	if len(res.Issues) != 1 || !hasIssue(res, nodes.IssueTypeMismatch, "xhttpExtra") {
+		t.Fatalf("badExtra+validMask: want one typeMismatch@xhttpExtra only, got %+v", res.Issues)
+	}
+
+	// valid xhttpExtra object + bad finalMask (typed-nil) -> Failed dominates.
+	var nilMap map[string]any
+	a = minValid("vless")
+	a["transport"] = "xhttp"
+	a["xhttpExtra"] = map[string]any{"k": 1.0}
+	a["finalMask"] = nilMap
+	res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
+	if res.StructuredCheck != nodes.StructuredCheckFailed || res.Status != nodes.Invalid {
+		t.Fatalf("validExtra+badMask: want Failed+Invalid, got %v/%v", res.StructuredCheck, res.Status)
+	}
+	if len(res.Issues) != 1 || !hasIssue(res, nodes.IssueTypeMismatch, "finalMask") {
+		t.Fatalf("validExtra+badMask: want one typeMismatch@finalMask only, got %+v", res.Issues)
+	}
+
+	// BOTH bad targets -> Failed with EXACTLY two existing typeMismatch findings.
+	a = minValid("vless")
+	a["xhttpExtra"] = "bad"
+	a["finalMask"] = 123.0
+	res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
+	if res.StructuredCheck != nodes.StructuredCheckFailed {
+		t.Fatalf("bothBad: want Failed, got %v", res.StructuredCheck)
+	}
+	if len(res.Issues) != 2 || !hasIssue(res, nodes.IssueTypeMismatch, "xhttpExtra") || !hasIssue(res, nodes.IssueTypeMismatch, "finalMask") {
+		t.Fatalf("bothBad: want exactly two typeMismatch findings, got %+v", res.Issues)
+	}
+
+	// wireguard finalMask bad shape -> Failed (one typeMismatch@finalMask).
+	wa := minValid("wireguard")
+	wa["finalMask"] = "not-an-object"
+	res = nodes.Validate(p, nodes.Input{Protocol: "wireguard", Active: wa, SecretPresence: trustedPresenceFor("wireguard")})
+	if res.StructuredCheck != nodes.StructuredCheckFailed || len(res.Issues) != 1 || !hasIssue(res, nodes.IssueTypeMismatch, "finalMask") {
+		t.Fatalf("wg badMask: want Failed + one typeMismatch@finalMask, got %v issues=%+v", res.StructuredCheck, res.Issues)
+	}
+
+	// Missing/inactive targets remain NotRequired (no promotion into Failed).
+	a = minValid("vless")
+	res = nodes.Validate(p, nodes.Input{Protocol: "vless", Active: a, SecretPresence: pres})
+	if res.StructuredCheck != nodes.StructuredCheckNotRequired {
+		t.Fatalf("no targets: want NotRequired, got %v", res.StructuredCheck)
 	}
 }
 

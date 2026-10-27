@@ -68,16 +68,19 @@ func structuredEligible(f capability.Field) bool {
 }
 
 // checkStructuredRules applies the FR-003 structured-object readiness rule.
-// It consumes ONLY the effective ACTIVE values (each independently eligible and
-// shape-valid) and the ACTIVE transport selector for the xhttp mode decision;
-// it never mutates the maps, never reads a secret value, and never echoes a
-// byte. protocol is the ACTUAL input protocol (hard scope guard).
+// It consumes ONLY the effective ACTIVE values (each independently eligible)
+// and the ACTIVE transport selector for the xhttp mode decision; it never
+// mutates the maps, never reads a secret value, and never echoes a byte.
+// protocol is the ACTUAL input protocol (hard scope guard).
 //
-// Aggregate (F): StructuredCheckFailed dominates StructuredCheckNotRun when
-// both an eligible target has a bad shape/decided conflict and another is an
-// active opaque object. Any NotRun/Failed only reduces APPLICABILITY (below);
-// it NEVER resets Status to Valid when issues exist, and NEVER overwrites a
-// prior ChainCheck outcome (the two aggregates are independent).
+// Aggregate (F): each eligible ACTIVE target is classified by its OWN shape —
+// an own-bad-shape target (typed-nil/JSON null/wrong top type) is
+// StructuredCheckFailed (its single generic typeMismatch already fired, no
+// duplicate issue), and a valid-shape opaque object is StructuredCheckNotRun
+// unless a decided wrong-xhttp mode conflict set Failed. StructuredCheckFailed
+// dominates StructuredCheckNotRun. Any NotRun/Failed only reduces APPLICABILITY
+// (below); it NEVER resets Status to Valid when issues exist, and NEVER
+// overwrites a prior ChainCheck outcome (the two aggregates are independent).
 func checkStructuredRules(res *Result, protocol string, declared map[string]capability.Field, active map[string]any) {
 	res.StructuredCheck = StructuredCheckNotRequired
 
@@ -110,23 +113,43 @@ func checkStructuredRules(res *Result, protocol string, declared map[string]capa
 		}
 	}
 
-	// Readiness aggregate over the eligible ACTIVE shape-valid targets. Each
-	// such opaque object lacks a real engine-compat checker -> NotRun. FinalMask
-	// (vless/wireguard) never fabricates a mode pairing and never emits an issue.
+	// Aggregate over ALL actual-protocol-scoped eligible ACTIVE targets. For each
+	// eligible ACTIVE-present target, classify by its OWN object shape:
+	//   - own shape BAD (typed-nil / JSON null / wrong top type) -> the generic
+	//     per-field loop already produced exactly ONE typeMismatch@field; this
+	//     aggregate reports StructuredCheckFailed (generic-first: NO duplicate
+	//     issue, NO mode conflict is manufactured for a bad shape).
+	//   - own shape VALID (real non-nil {} or nested map) -> an opaque object
+	//     with no real engine-compat checker -> StructuredCheckNotRun, UNLESS the
+	//     decided xhttp mode conflict already set Failed.
+	// FinalMask (vless/wireguard) never fabricates a mode pairing and never emits
+	// an issue. Failed dominates NotRun (F); NotRun dominates NotRequired.
+	anyFailed := false
 	anyNotRun := false
-	if vlessXHTTPExtra && hasVlessXHTTPExtra && activeObjectShapeOK(declared, active, "xhttpExtra") && !xhttpConflict {
-		anyNotRun = true // eligible active valid-shape opaque object, no real checker
+	classify := func(eligible, present bool, name string) {
+		if !eligible || !present {
+			return // missing/inactive/ineligible target contributes nothing
+		}
+		if activeObjectShapeOK(declared, active, name) {
+			anyNotRun = true // eligible active valid-shape opaque object
+		} else {
+			anyFailed = true // eligible active own-bad-shape (generic issue already emitted)
+		}
 	}
-	if vlessFinalMask && hasVlessFinalMask && activeObjectShapeOK(declared, active, "finalMask") {
-		anyNotRun = true
-	}
-	if wgFinalMask && hasWGFinalMask && activeObjectShapeOK(declared, active, "finalMask") {
-		anyNotRun = true
+	classify(vlessXHTTPExtra, hasVlessXHTTPExtra, "xhttpExtra")
+	classify(vlessFinalMask, hasVlessFinalMask, "finalMask")
+	classify(wgFinalMask, hasWGFinalMask, "finalMask")
+
+	// An eligible active VALID-shape xhttpExtra plus a decided wrong-xhttp mode is
+	// a Failed conflict (the one issue was added above); it dominates NotRun.
+	if xhttpConflict {
+		anyFailed = true
 	}
 
 	switch {
-	case xhttpConflict:
-		// A decided structured conflict dominates NotRun (F).
+	case anyFailed:
+		// A decided structured failure (own-bad-shape or the wrong-xhttp mode)
+		// dominates NotRun (F). Never resets Status/Applicable/ChainCheck.
 		res.StructuredCheck = StructuredCheckFailed
 	case anyNotRun:
 		res.StructuredCheck = StructuredCheckNotRun

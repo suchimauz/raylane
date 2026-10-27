@@ -353,7 +353,7 @@ func TestAdapterMalformedJSON(t *testing.T) {
 // not mutate or default anything.
 func TestAdapterPreservesOriginalBytes(t *testing.T) {
 	p := loadProfile(t)
-	original := []byte(`{"protocol":"socks5","fields":{"active":{"server":"s.example","serverPort":70000}}}`)
+	original := []byte(`{"protocol":"socks5","fields":{"active":{"server":"s.example","serverPort":70000},"inactive":{},"unknown":{}}}`)
 	got, err := nodes.ValidateDocument(p, original, nil)
 	if err != nil {
 		t.Fatalf("envelope should decode (semantic invalid, not parse error): %v", err)
@@ -398,7 +398,7 @@ func TestAdapterMalformedNeverReplaces(t *testing.T) {
 // TestParseDocumentStillNotRun: the existing syntax-only gate still returns
 // ValidationNotRun — validation is never implied by parsing.
 func TestParseDocumentStillNotRun(t *testing.T) {
-	doc, err := domain.ParseDocument([]byte(`{"protocol":"socks5","fields":{"active":{}}}`))
+	doc, err := domain.ParseDocument([]byte(`{"protocol":"socks5","fields":{"active":{},"inactive":{},"unknown":{}}}`))
 	if err != nil {
 		t.Fatalf("ParseDocument: %v", err)
 	}

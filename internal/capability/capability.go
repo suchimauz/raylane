@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+
+	"github.com/suchimauz/raylane/internal/jsonscan"
 )
 
 // ErrProfileRejected reports malformed, missing or unsupported profile
@@ -143,62 +145,24 @@ type rawProfileDoc struct {
 	Protocols      map[string]rawProtocolProfile `json:"protocols"`
 }
 
-// rejectDuplicateKeys re-scans the raw profile bytes with encoding/json's
-// token stream and rejects any JSON object whose keys repeat. Only the
-// structural verdict is produced; key and value bytes are never retained or
-// echoed. This is the strict-authority rule behind "duplicate keys" in Parse.
+// rejectDuplicateKeys re-scans the raw profile bytes with the neutral
+// structural scanner (internal/jsonscan) and rejects any JSON object whose
+// keys repeat, at every nesting level, plus anything that is not exactly one
+// JSON value. The scanner yields only a structural verdict — key and value
+// bytes are never retained or echoed — which this boundary maps to its own
+// static sentinel. This is the strict-authority rule behind "duplicate keys"
+// in Parse, and it is the SAME scanner the node envelope adapter uses: one
+// mechanism, no second copy.
 func rejectDuplicateKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	return scanUniqueKeys(dec)
-}
-
-// scanUniqueKeys walks the value at the decoder's current position. For each
-// object it collects the level's keys and fails on a repeat, then descends
-// into values. Arrays recurse into elements. The decoder stream is
-// single-pass; nothing is buffered beyond one level's key set.
-func scanUniqueKeys(dec *json.Decoder) error {
-	tok, err := dec.Token()
-	if err != nil {
+	serr := jsonscan.FullValue(raw)
+	switch {
+	case serr == nil:
+		return nil
+	case errors.Is(serr, jsonscan.ErrDuplicateKey):
+		return fmt.Errorf("%w: duplicate json key", ErrProfileRejected)
+	default:
 		return fmt.Errorf("%w: malformed json", ErrProfileRejected)
 	}
-	delim, ok := tok.(json.Delim)
-	if !ok {
-		return nil // scalar at this position
-	}
-	switch delim {
-	case '{':
-		seen := map[string]bool{}
-		for dec.More() {
-			kt, err := dec.Token()
-			if err != nil {
-				return fmt.Errorf("%w: malformed json", ErrProfileRejected)
-			}
-			key, ok := kt.(string)
-			if !ok {
-				return fmt.Errorf("%w: malformed json", ErrProfileRejected)
-			}
-			if seen[key] {
-				return fmt.Errorf("%w: duplicate json key", ErrProfileRejected)
-			}
-			seen[key] = true
-			if err := scanUniqueKeys(dec); err != nil {
-				return err
-			}
-		}
-		if _, err := dec.Token(); err != nil { // consume '}'
-			return fmt.Errorf("%w: malformed json", ErrProfileRejected)
-		}
-	case '[':
-		for dec.More() {
-			if err := scanUniqueKeys(dec); err != nil {
-				return err
-			}
-		}
-		if _, err := dec.Token(); err != nil { // consume ']'
-			return fmt.Errorf("%w: malformed json", ErrProfileRejected)
-		}
-	}
-	return nil
 }
 
 // Parse validates the authored capability-profile bytes and indexes them for

@@ -39,12 +39,14 @@ func sortedKeysBool(m map[string]bool) []string {
 	return out
 }
 
-// addIssue appends one deterministic, value-free issue.
+// addIssue appends one deterministic, value-free issue. The shown path comes
+// from bucketIssueField, which forces a fixed generic path for structural
+// bucket issues and passes through declared names for name-scoped codes only.
 func addIssue(res *Result, code IssueCode, field string) {
 	if !code.valid() {
 		return
 	}
-	res.Issues = append(res.Issues, Issue{Code: code, Field: field, Reason: issueReason[code]})
+	res.Issues = append(res.Issues, Issue{Code: code, Field: bucketIssueField(code, field), Reason: issueReason[code]})
 }
 
 // sortIssues orders issues by field then code so results are byte-stable.
@@ -81,4 +83,30 @@ func asInt(v any) (int64, bool) {
 // package owns the compiled regexp; nodes asks it to evaluate one string.
 func matchFieldPattern(f capability.Field, s string) bool {
 	return capability.MatchPattern(f, s)
+}
+
+// envelopeBucketsOverlap reports whether any name appears in more than one of
+// the three submitted buckets. Only the boolean verdict leaves this function —
+// the colliding names are attacker-controlled and never returned.
+func envelopeBucketsOverlap(active, inactive, unknown map[string]any) bool {
+	count := func(m map[string]any) int {
+		hits := 0
+		for n := range m {
+			seen := 0
+			if _, ok := active[n]; ok {
+				seen++
+			}
+			if _, ok := inactive[n]; ok {
+				seen++
+			}
+			if _, ok := unknown[n]; ok {
+				seen++
+			}
+			if seen > 1 {
+				hits++
+			}
+		}
+		return hits
+	}
+	return count(active)+count(inactive)+count(unknown) > 0
 }

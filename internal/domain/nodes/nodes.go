@@ -56,23 +56,49 @@ const (
 	// outside 0..255 (narrow documented domain semantic for the 0-or-3 byte
 	// list; the profile schema has no per-item bound key).
 	IssueReservedByteRange IssueCode = "reservedByteRange"
+	// IssueSecretPlaintextSubmitted: a declared secret FIELD NAME was submitted
+	// as a key with a value in the active or inactive map. Secret material
+	// travels only through the sealed store with trusted presence; the key is
+	// refused regardless of the value (any type, including null) and
+	// regardless of sealed presence. Declared field name only — never a value.
+	IssueSecretPlaintextSubmitted IssueCode = "secretPlaintextSubmitted"
+	// IssueQuarantineBucketNotEmpty: the explicit unknown bucket carries any
+	// entry. Quarantine data is preserved but the node is not applicable until
+	// the source fixes the submission. Generic bucket path, value-free.
+	IssueQuarantineBucketNotEmpty IssueCode = "quarantineBucketNotEmpty"
+	// IssueMalformedEnvelope: the submission is well-formed JSON but does not
+	// match the CLOSED canonical envelope exactly (missing/null/non-object
+	// member, non-string or empty protocol, unknown member at any level, or a
+	// duplicate key at any level). Fixed path, static reason, never input
+	// bytes; carried together with the typed ErrNotANodeEnvelope.
+	IssueMalformedEnvelope IssueCode = "malformedEnvelope"
+	// IssueEnvelopeMemberConflict: a name appears in two submitted buckets at
+	// once (active vs inactive vs quarantine). The buckets must be disjoint or
+	// the stored node is ambiguous about which view owns the name. Fixed
+	// generic path "fields", static reason — the colliding NAME is attacker-
+	// controlled and never echoes.
+	IssueEnvelopeMemberConflict IssueCode = "envelopeMemberConflict"
 )
 
 // issueReason maps each code to ONE static, value-free reason. It is the only
 // source of outward issue text.
 var issueReason = map[IssueCode]string{
-	IssueRequiredMissing:        "a required field is missing",
-	IssueRequiredSecretMissing:  "a required secret has no stored value",
-	IssueTypeMismatch:           "a field has the wrong type",
-	IssueEnumViolation:          "a field value is not an allowed choice",
-	IssueBoundsViolation:        "a field value is outside its allowed range",
-	IssuePatternViolation:       "a field value has an invalid format",
-	IssueArrayItemViolation:     "an array element is invalid",
-	IssueDependencyMissing:      "a required companion field is missing",
-	IssueDependencyIncompatible: "a field conflicts with another present field",
-	IssueUnsupportedField:       "a declared field is not supported here",
-	IssueUnknownField:           "a field is not recognized",
-	IssueReservedByteRange:      "a reserved byte is outside 0..255",
+	IssueRequiredMissing:          "a required field is missing",
+	IssueRequiredSecretMissing:    "a required secret has no stored value",
+	IssueTypeMismatch:             "a field has the wrong type",
+	IssueEnumViolation:            "a field value is not an allowed choice",
+	IssueBoundsViolation:          "a field value is outside its allowed range",
+	IssuePatternViolation:         "a field value has an invalid format",
+	IssueArrayItemViolation:       "an array element is invalid",
+	IssueDependencyMissing:        "a required companion field is missing",
+	IssueDependencyIncompatible:   "a field conflicts with another present field",
+	IssueUnsupportedField:         "a declared field is not supported here",
+	IssueUnknownField:             "a field is not recognized",
+	IssueReservedByteRange:        "a reserved byte is outside 0..255",
+	IssueSecretPlaintextSubmitted: "a secret value must be stored as a secret, not submitted as a field value",
+	IssueQuarantineBucketNotEmpty: "unrecognized data is quarantined and must be corrected before the node applies",
+	IssueMalformedEnvelope:        "the payload does not match the canonical node envelope",
+	IssueEnvelopeMemberConflict:   "a field is submitted in more than one bucket",
 }
 
 func (c IssueCode) valid() bool { _, ok := issueReason[c]; return ok }
@@ -101,6 +127,12 @@ type Input struct {
 	// SecretPresence maps declared secret field names to whether a sealed
 	// value exists, from the store's trusted HasValue.
 	SecretPresence map[string]bool
+	// Unknown holds the entries of the explicit client "unknown" bucket, kept
+	// QUARANTINED: they are never merged into Active, never satisfy required
+	// or dependency presence, and any nonempty Unknown makes the node
+	// invalid/not applicable (generic value-free issue). It exists so the
+	// adapter can hand the whole submission over without laundering it.
+	Unknown map[string]any
 }
 
 // Result is the validation outcome. Status is domain.ValidationValid or
@@ -195,6 +227,22 @@ func Validate(profile *capability.Profile, in Input) Result {
 			addIssue(&res, IssueUnknownField, "unknown")
 		}
 	}
+	// Buckets must be disjoint: a name submitted in two buckets at once (for
+	// instance BOTH in active and in quarantine) is ambiguous — which view
+	// owns it? — and is refused once under a fixed generic path, never the
+	// colliding name. Checked before per-field rules so no bucket can launder
+	// the duplicate into a normal value check.
+	if envelopeBucketsOverlap(active, inactive, in.Unknown) {
+		addIssue(&res, IssueEnvelopeMemberConflict, "fields")
+	}
+	// The explicit quarantine bucket is never promoted: its entries — declared
+	// names, secret names or new ones — do not participate in presence,
+	// dependencies or values. ANY entry in it invalidates the node with one
+	// generic, value-free issue (reported once regardless of entry count).
+	if len(in.Unknown) > 0 {
+		res.Unknown = append(res.Unknown, "unknown")
+		addIssue(&res, IssueQuarantineBucketNotEmpty, "unknown")
+	}
 
 	// Per-field validation, in sorted declaration order for determinism.
 	for _, n := range sortedKeysOf(declared) {
@@ -210,6 +258,14 @@ func Validate(profile *capability.Profile, in Input) Result {
 		// active map is a submitted VALUE (possibly a plaintext smuggle), never
 		// presence, and must not satisfy the requirement.
 		if f.Classification == "secret" {
+			// A secret key submitted WITH a value in either bucket is plaintext
+			// smuggling: refused regardless of the value or trusted sealed
+			// presence, because the store — not the submitter — owns secret
+			// material. The declared name is reported; the value is never read.
+			if hasActive || hasInactive {
+				addIssue(&res, IssueSecretPlaintextSubmitted, n)
+			}
+			// Required-secrecy is satisfied ONLY by trusted sealed presence.
 			if f.Required && !in.SecretPresence[n] {
 				addIssue(&res, IssueRequiredSecretMissing, n)
 			}
@@ -220,13 +276,16 @@ func Validate(profile *capability.Profile, in Input) Result {
 		// Secret presence for an optional-but-present secret is trusted-state
 		// only; a missing sealed value on an optional secret is not an error,
 		// it is simply absent (presence drives apply later, not validity here).
+		// The secret plaintext-key refusal above already fired for any such key.
 
 		// Active declared fields are validated for shape. Inactive declared
 		// fields are PRESERVED, not corrected: they stay in the caller's raw
 		// draft for a possible later return and are not shape-gated here (a
 		// collapsed/off option keeps its value; reactivation must not lose it).
 		// An invalid ACTIVE value is what makes the node invalid/inapplicable.
-		if hasActive {
+		// A secret never has its submitted value checked — the key itself was
+		// refused above; checkValue fails closed on a secret regardless.
+		if hasActive && f.Classification != "secret" {
 			checkValue(&res, n, f, inActive)
 		}
 
@@ -264,9 +323,11 @@ func Validate(profile *capability.Profile, in Input) Result {
 // value-free issues on failure.
 func checkValue(res *Result, name string, f capability.Field, val any) {
 	if f.Classification == "secret" {
-		// A secret's active VALUE is never inspected; only trusted presence
-		// (handled by the caller) matters. A submitted plaintext secret value
-		// is not accepted as a normal value.
+		// Fail closed: a secret's submitted value is never inspected and never
+		// treated as a normal value. Validate refuses the plaintext key before
+		// calling this; reaching here with a secret is a programming error and
+		// still produces the value-free refusal, never a value echo.
+		addIssue(res, IssueSecretPlaintextSubmitted, name)
 		return
 	}
 	// supported=false declared fields are not applicable for active use.
@@ -384,4 +445,45 @@ func valueOK(f capability.Field, val any) (bool, IssueCode) {
 // helper rather than recompiling an attacker-influenced pattern.
 func matchString(f capability.Field, s string) bool {
 	return capability.MatchPattern(f, s)
+}
+
+// bucketIssueField documents the invariant that keeps a verdict renderable
+// without echoing submission bytes: a path is either structural vocabulary
+// ("fields"/"unknown"/"envelope", see fixedIssuePath) or a DECLARED profile
+// name from the closed capability vocabulary — never a submitted key. addIssue
+// rejects the one combination that would break it: a fixed structural code
+// naming something other than structural vocabulary. Name-scoped codes are
+// emitted only from the declared-field loop, so their name is declared by
+// construction.
+func bucketIssueField(c IssueCode, n string) string {
+	if fixedIssuePath(c) && !isStructuralPath(n) {
+		// Unreachable for package call sites; fail closed to the fixed word
+		// rather than surface a name an attacker chose.
+		if c == IssueUnknownField {
+			return "unknown"
+		}
+		return "fields"
+	}
+	return n
+}
+
+// isStructuralPath reports the closed set of non-field paths a verdict may use.
+func isStructuralPath(n string) bool {
+	switch n {
+	case "fields", "unknown", "envelope", "protocol":
+		return true
+	}
+	return false
+}
+
+// fixedIssuePath reports the codes whose path is structural vocabulary rather
+// than a field name. Their call sites pass one of the constants above.
+func fixedIssuePath(c IssueCode) bool {
+	switch c {
+	case IssueEnvelopeMemberConflict, IssueQuarantineBucketNotEmpty,
+		IssueMalformedEnvelope, IssueUnknownField:
+		return true
+	default:
+		return false
+	}
 }

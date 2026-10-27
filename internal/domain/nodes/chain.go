@@ -85,7 +85,11 @@ type ChainNodeSummary struct {
 	// Protocol is the referenced node's protocol. It must be a protocol the
 	// authored profile declares (R9'/target-protocol rule).
 	Protocol string
-	// ChainMode is the referenced node's ACTIVE chain mode ("" = absent).
+	// ChainMode is the referenced node's ACTIVE chain mode value. It is
+	// meaningful ONLY when HasChainMode is true; a true (HasChainMode=true)
+	// EMPTY value is a malformed ACTIVE mode and fails closed — it is NOT
+	// "absent". Absence/inactive-retention is expressed solely by
+	// HasChainMode=false, independent of this value.
 	ChainMode string
 	// HasChainMode reports whether the referenced node has an ACTIVE chain mode
 	// present. An inactive retained chain mode does NOT count as active.
@@ -462,24 +466,53 @@ func runReferenceChecks(res *Result, nodeID chainFieldView, chain *ChainContext,
 		addIssue(res, IssueDependencyIncompatible, "chainNodeId")
 		return chainRefFailed
 	}
-	// R9' one-layer: the referenced node must itself be a TERMINAL target — an
-	// ACTIVE non-off chain mode on the referenced node would close a cycle, so
-	// it is rejected. A referenced node with an ACTIVE chain mode outside the
-	// target profile's AllowedValues also fails closed (not treated as off).
+	// R9' one-layer: the referenced node must itself be a TERMINAL target. The
+	// trusted summary's HasChainMode is the ABSENCE authority: false means the
+	// target has no ACTIVE chain mode (absent or inactive-retained) and is
+	// terminal without consulting any declaration (no invented default). true
+	// means an ACTIVE mode exists: it must be nonempty AND a member of the
+	// target protocol's ACTUAL chainMode declaration (declared, eligible, enum)
+	// allowedValues, and only an actually declared "off" is terminal — an
+	// ACTIVE malformed/empty/out-of-subset mode fails closed, never silently
+	// reclassified as absent/off.
 	if sum.HasChainMode {
-		targetMode := sum.ChainMode
-		if targetMode != "" && targetMode != "off" {
+		if !targetDeclaredTerminal(profile, sum.Protocol, sum.ChainMode) {
 			addIssue(res, IssueDependencyIncompatible, "chainNodeId")
 			return chainRefFailed
 		}
-		// ACTIVE but off/absent: terminal, acceptable. (An inactive retained
-		// chain mode does not set HasChainMode, so it never reaches here.)
+		// Declared terminal (genuine "off" in the target's real allowedValues):
+		// one-layer holds. An inactive retained chain mode does not set
+		// HasChainMode, so it never reaches here.
 	}
 
 	if !ok {
 		return chainRefFailed
 	}
 	return chainRefRan
+}
+
+// targetDeclaredTerminal reports whether a TRUSTED target summary's ACTIVE
+// chainMode value is an actually declared terminal: the target protocol must
+// really declare chainMode as a chain-eligible enum (known/nonsecret,
+// supported not false — the same chainEligible authority used everywhere),
+// and the value must be a member of that declaration's ACTUAL allowedValues
+// equal to the declared terminal "off". An empty value, an out-of-subset
+// value, a missing/ineligible declaration and an unknown protocol all report
+// false (fail closed); nothing is invented and no bytes are echoed.
+func targetDeclaredTerminal(profile *capability.Profile, protocol, mode string) bool {
+	if profile == nil || mode == "" {
+		return false
+	}
+	f, ok := profile.Field(protocol, "chainMode")
+	if !ok || !chainEligible(f, "enum") {
+		return false
+	}
+	for _, v := range f.AllowedValues {
+		if v == mode {
+			return mode == "off"
+		}
+	}
+	return false
 }
 
 // runInterfaceChecks applies the interface SHAPE (always, no inventory) and

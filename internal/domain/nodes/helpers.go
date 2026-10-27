@@ -68,6 +68,64 @@ const (
 	numOutOfRange                 // mathematically an integer but beyond int64
 )
 
+// validJSONNumberLexeme reports whether s is a syntactically valid JSON number
+// lexeme (RFC 8259 §6): optional leading '-', an integer part that is either
+// "0" or [1-9][0-9]* (no leading zeros, no bare '+'), an optional fraction that
+// is '.' followed by at least one digit, and an optional exponent that is
+// [eE][+-]? followed by at least one digit. No whitespace, no trailing
+// material, no NaN/Inf/hex/underscore. It is a single bounded O(len) pass and
+// allocates nothing. Malformed spellings (empty, "+", "-", ".", "+0", "-.",
+// ".0", "0.", "00", "-00", "01", "1.", "+443", "0443", "0e", "1e+") are rejected
+// here, BEFORE any mathematical or zero classification, so a malformed lexeme
+// can never be mistaken for a valid zero or integer. Leading zeros are allowed
+// in the EXPONENT digits ("0E+000" is valid); only the integer part restricts
+// them.
+func validJSONNumberLexeme(s string) bool {
+	i := 0
+	n := len(s)
+	if i < n && s[i] == '-' {
+		i++
+	}
+	// Integer part: "0" alone, or [1-9][0-9]*. No leading zeros.
+	if i >= n || s[i] < '0' || s[i] > '9' {
+		return false // missing integer part (covers "", "+", "-", ".", "+0", "-.")
+	}
+	if s[i] == '0' {
+		i++
+		if i < n && s[i] >= '0' && s[i] <= '9' {
+			return false // leading zero: "00", "01", "0443", "-00"
+		}
+	} else {
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	// Optional fraction: '.' followed by >= 1 digit.
+	if i < n && s[i] == '.' {
+		i++
+		if i >= n || s[i] < '0' || s[i] > '9' {
+			return false // ".", "0.", "1.", "-."
+		}
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	// Optional exponent: [eE][+-]? >= 1 digit.
+	if i < n && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < n && (s[i] == '-' || s[i] == '+') {
+			i++
+		}
+		if i >= n || s[i] < '0' || s[i] > '9' {
+			return false // "0e", "0e+", "0e-", "1e+", "--1"
+		}
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	return i == n // reject trailing whitespace/garbage (" 0", "0 ", "1_0", "0x1")
+}
+
 // classifyJSONNumber parses a json.Number with EXACT decimal semantics — no
 // float64 conversion anywhere — and reports whether it is fractional, an
 // in-int64 integer, or an out-of-int64 integer. It distinguishes equivalent
@@ -76,10 +134,14 @@ const (
 // the 2^53 neighbourhood without precision loss, and is resource-safe: it does
 // a single bounded left-to-right pass over the digit text and never expands
 // 10^exponent, allocates digits proportional to the input, or overflows an
-// exponent counter. The input comes from the scanner/parser, so it is already
-// a syntactically valid JSON number; a malformed form is rejected, not
-// silently accepted.
+// exponent counter. The DIRECT validation boundary accepts json.Number values
+// that bypass the canonical scanner, so the strict JSON-number lexical grammar
+// (validJSONNumberLexeme) is enforced FIRST: a malformed lexeme is rejected as
+// fractional (typeMismatch) before any mathematical or zero classification.
 func classifyJSONNumber(s string) (int64, numClass) {
+	if !validJSONNumberLexeme(s) {
+		return 0, numFractional // malformed JSON number lexeme: reject, never a valid zero/integer
+	}
 	i := 0
 	neg := false
 	if i < len(s) && (s[i] == '-' || s[i] == '+') {

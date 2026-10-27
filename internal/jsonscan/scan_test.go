@@ -49,6 +49,49 @@ func TestFullValue(t *testing.T) {
 	}
 }
 
+// TestNumericAgnostic is QA2-F2: the scanner is STRUCTURE-ONLY and never
+// converts a number to float64. Syntactically valid numbers that exceed
+// float64 range (1E400, 1E309 — json.Valid accepts them) must NOT be
+// mislabeled malformed, at any nesting level. Genuine structural defects
+// (unterminated, bad tokens, trailing content) stay ErrMalformed, and
+// duplicate keys stay ErrDuplicateKey.
+func TestNumericAgnostic(t *testing.T) {
+	big := []string{
+		`1E400`,
+		`1e309`,
+		`-1E400`,
+		`{"a":1E400}`,
+		`[1E309]`,
+		`{"a":[1,{"b":2E500}]}`,
+		`{"a":1E400,"b":[2E999,{"c":3E1}]}`,
+	}
+	for _, s := range big {
+		if err := FullValue([]byte(s)); err != nil {
+			t.Errorf("FullValue(%q) = %v, want nil (structure-only, big numbers are valid JSON)", s, err)
+		}
+		if err := UniqueKeys([]byte(s)); err != nil {
+			t.Errorf("UniqueKeys(%q) = %v, want nil (structure-only)", s, err)
+		}
+	}
+	// Normal-range numbers, including those that happen to hold integer
+	// values, keep working unchanged.
+	for _, s := range []string{`1`, `1.5`, `{"a":255}`, `[0,255]`, `{"a":[1,2,3]}`} {
+		if err := FullValue([]byte(s)); err != nil {
+			t.Errorf("FullValue(%q) = %v, want nil", s, err)
+		}
+	}
+	// Structure defects still fail closed; trailing content still malformed.
+	for _, s := range []string{`1E400 2`, `{"a":1E400} x`, `[1E309`, `{"a":1E400,}`} {
+		if err := FullValue([]byte(s)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("FullValue(%q) = %v, want ErrMalformed", s, err)
+		}
+	}
+	// Big-number document with a duplicate key still reports the duplicate.
+	if err := FullValue([]byte(`{"a":1E400,"a":2}`)); !errors.Is(err, ErrDuplicateKey) {
+		t.Errorf("duplicate with big number must be ErrDuplicateKey: %v", err)
+	}
+}
+
 func TestErrorsCarryNoInputBytes(t *testing.T) {
 	canary := "CANARY-9f"
 	for _, err := range []error{

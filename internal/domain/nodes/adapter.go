@@ -112,13 +112,16 @@ func ValidateDocument(profile *capability.Profile, original []byte, presence map
 	}
 	// Decode the envelope over RAW members (UseNumber preserves integer
 	// fidelity). Map decode is permissive by construction; the closed shape
-	// is enforced explicitly below with exact key comparison.
+	// is enforced explicitly below with exact key comparison. The document
+	// already passed the syntax hard gate, so if the ROOT is not a JSON object
+	// (array/scalar) the decode fails here — that is a non-canonical ENVELOPE
+	// (semantic), never malformed JSON: the exact original bytes are preserved
+	// and the caller maps it to an invalid draft.
 	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(doc.Raw))
 	dec.UseNumber()
 	if err := dec.Decode(&raw); err != nil {
-		doc.Validation = domain.ValidationInvalid
-		return AdapterResult{}, domain.ErrMalformedJSON
+		return envelopeRejected(doc, IssueMalformedEnvelope)
 	}
 	protocol, fields, ok := canonicalEnvelope(raw)
 	if !ok {

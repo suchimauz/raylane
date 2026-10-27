@@ -369,6 +369,11 @@ func valueOK(f capability.Field, val any) (bool, IssueCode) {
 	case "integer":
 		n, ok := asInt(val)
 		if !ok {
+			// A syntactically valid number that is integral but beyond the
+			// representable range is OUT OF RANGE, not the wrong type.
+			if numberOutOfRange(val) {
+				return false, IssueBoundsViolation
+			}
 			return false, IssueTypeMismatch
 		}
 		if f.HasMinimum && n < f.Minimum {

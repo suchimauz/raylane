@@ -30,8 +30,13 @@ var ErrMalformed = errors.New("jsonscan: malformed json")
 // the same key compare equal because tokens are unescaped), or ErrMalformed if
 // the stream is not walkable. Memory stays bounded by one object level's key
 // set; nothing is buffered or echoed.
+//
+// The decoder runs with UseNumber: the scanner is structure-only and never
+// converts a number to float64, so a syntactically valid number that exceeds
+// float64 range (e.g. 1E400) is walked as an opaque token rather than
+// mislabeled malformed.
 func UniqueKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec := newScanner(raw)
 	return scanValue(dec)
 }
 
@@ -39,7 +44,7 @@ func UniqueKeys(raw []byte) error {
 // complete JSON value: trailing content is ErrMalformed. Combined with a
 // caller's own structural checks it closes the "input fully consumed" gate.
 func FullValue(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec := newScanner(raw)
 	if err := scanValue(dec); err != nil {
 		return err
 	}
@@ -47,6 +52,15 @@ func FullValue(raw []byte) error {
 		return ErrMalformed
 	}
 	return nil
+}
+
+// newScanner returns the shared structural decoder: UseNumber keeps the walk
+// numeric-agnostic (structure only, no float conversion), so big valid
+// numbers never trip the scanner.
+func newScanner(raw []byte) *json.Decoder {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec
 }
 
 // scanValue walks the value at the decoder's current position: objects check

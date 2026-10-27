@@ -382,6 +382,72 @@ func TestAdapterNotEnvelope(t *testing.T) {
 	}
 }
 
+// TestAdapterNonObjectRootsEnvelope is QA2-F1: a syntactically valid JSON
+// value whose ROOT is not an object (array, empty array, string, number,
+// bool) still passed the syntax hard gate, so it is a non-canonical ENVELOPE
+// — never malformed JSON. It must map to ErrNotANodeEnvelope with
+// ValidationInvalid, not applicable, and the EXACT original bytes preserved
+// (the draft survives for a possible later fix); it must NOT lose its bytes
+// to ErrMalformedJSON.
+func TestAdapterNonObjectRootsEnvelope(t *testing.T) {
+	p := loadProfile(t)
+	roots := []string{
+		`[1,2,3]`,
+		`[]`,
+		`"hello"`,
+		`5`,
+		`true`,
+		`null`,
+	}
+	for _, raw := range roots {
+		t.Run("root="+raw, func(t *testing.T) {
+			original := []byte(raw)
+			got, err := nodes.ValidateDocument(p, original, nil)
+			if !errors.Is(err, nodes.ErrNotANodeEnvelope) {
+				t.Fatalf("root %s: want ErrNotANodeEnvelope, got %v", raw, err)
+			}
+			if errors.Is(err, domain.ErrMalformedJSON) {
+				t.Fatalf("root %s: valid non-object JSON must NOT be malformed", raw)
+			}
+			if got.Validation != domain.ValidationInvalid {
+				t.Fatalf("root %s: want ValidationInvalid, got %v", raw, got.Validation)
+			}
+			if got.Result.Applicable {
+				t.Fatalf("root %s: non-envelope must not be applicable", raw)
+			}
+			if !bytes.Equal(got.Document.Raw, original) {
+				t.Fatalf("root %s: exact original bytes not preserved:\n got=%s\nwant=%s", raw, got.Document.Raw, original)
+			}
+		})
+	}
+}
+
+// TestAdapterBigNumbersNotMalformed is QA2-F2 at the adapter boundary: a
+// canonical envelope carrying a syntactically valid number that exceeds
+// float64 (serverPort:1E400) passed the syntax gate, so it must be validated
+// semantically (a value-free finding) — never mislabeled malformed and never
+// losing its bytes. The node is invalid on the out-of-range port, with the
+// exact original preserved.
+func TestAdapterBigNumbersNotMalformed(t *testing.T) {
+	p := loadProfile(t)
+	raw := `{"protocol":"socks5","fields":{"active":{"server":"s.example","serverPort":1E400},"inactive":{},"unknown":{}}}`
+	original := []byte(raw)
+	got, err := nodes.ValidateDocument(p, original, nil)
+	if errors.Is(err, domain.ErrMalformedJSON) {
+		t.Fatalf("big number must not be malformed: %v", err)
+	}
+	if got.Validation != domain.ValidationInvalid {
+		t.Fatalf("want ValidationInvalid for out-of-range port, got %v", got.Validation)
+	}
+	if !bytes.Equal(got.Document.Raw, original) {
+		t.Fatalf("exact original bytes not preserved:\n got=%s\nwant=%s", got.Document.Raw, original)
+	}
+	// The out-of-range port must surface as a real semantic finding.
+	if !hasIssue(got.Result, nodes.IssueBoundsViolation, "serverPort") {
+		t.Fatalf("want boundsViolation on serverPort, got %+v", got.Result.Issues)
+	}
+}
+
 // TestAdapterMalformedNeverReplaces: a malformed payload never replaces a
 // previously saved state — the adapter returns no Document at all.
 func TestAdapterMalformedNeverReplaces(t *testing.T) {

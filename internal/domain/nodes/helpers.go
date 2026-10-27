@@ -79,6 +79,31 @@ func asInt(v any) (int64, bool) {
 	return 0, false
 }
 
+// numberOutOfRange reports whether v is a JSON number (json.Number) that is
+// integral in form but exceeds the representable integer range. It lets the
+// integer rule distinguish "not a number at all" (typeMismatch) from "a
+// number too large to represent" (boundsViolation), so a syntactically valid
+// huge value like 1E400 is honestly reported as out of range rather than as
+// the wrong type. Only the boolean leaves; the value is never echoed.
+func numberOutOfRange(v any) bool {
+	n, ok := v.(json.Number)
+	if !ok {
+		return false
+	}
+	if _, err := n.Int64(); err == nil {
+		return false // fits: not out of range
+	}
+	// It is a number but Int64 failed: either non-integral or out of range.
+	// A non-integral number (e.g. 1.5) is a type problem for an integer field,
+	// not a range problem; detect that via the float form.
+	if f, err := n.Float64(); err == nil {
+		// Non-integral (has a fractional part within range) → type, not range.
+		return f == float64(int64(f)) // integral but overflowed → out of range
+	}
+	// Float64 also failed → magnitude beyond float64: definitively out of range.
+	return true
+}
+
 // matchFieldPattern delegates pattern matching to the profile. The capability
 // package owns the compiled regexp; nodes asks it to evaluate one string.
 func matchFieldPattern(f capability.Field, s string) bool {

@@ -53,6 +53,15 @@ func dnsServerUrlOK(s string) bool {
 	if strings.ContainsAny(s, "\\\t\n\r ") {
 		return false
 	}
+	// Raw delimiter check: this grammar forbids ANY query or fragment, so a
+	// raw '?' or '#' — including the empty "https://h/p?" and "https://h/p#"
+	// markers that net/url would otherwise normalize away — is rejected before
+	// parsing. Percent-encoded %3F/%23 in a legal path are path data, not raw
+	// markers, and pass. This keeps the precise layer correct even under a
+	// pattern-free profile with no regex gate.
+	if strings.ContainsAny(s, "?#") {
+		return false
+	}
 	u, err := url.Parse(s)
 	if err != nil {
 		return false
@@ -60,12 +69,20 @@ func dnsServerUrlOK(s string) bool {
 	if u.Scheme != "https" {
 		return false
 	}
-	// No userinfo, query or fragment (including empty ? / # markers).
-	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	// No userinfo (authority 'user@' / 'user:pass@'). Query and fragment are
+	// forbidden entirely and were already rejected by the raw delimiter check
+	// above (which catches the empty '?' / '#' markers net/url would drop).
+	if u.User != nil {
 		return false
 	}
 	host := u.Hostname()
 	if host == "" {
+		return false
+	}
+	// Explicit empty authority port: "https://host:/path". net/url's Port()
+	// returns "" for it, losing the bare ':' — detect it in the authority
+	// ourselves, distinguishing it from the colons in a bracketed IPv6 literal.
+	if bareEmptyPort(u.Host) {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -79,6 +96,34 @@ func dnsServerUrlOK(s string) bool {
 		return false
 	}
 	return true
+}
+
+// bareEmptyPort reports whether the URL authority carries an explicit empty
+// port (a bare ':' with nothing after it, e.g. "host:" or "[v6]:").
+// net/url's Port() returns "" for this case, losing the presence of the
+// delimiter, so we inspect the authority text directly. The colon(s) inside a
+// bracketed IPv6 literal are not a port delimiter and are ignored.
+func bareEmptyPort(authority string) bool {
+	host := authority
+	if i := strings.LastIndex(authority, "@"); i >= 0 {
+		host = authority[i+1:]
+	}
+	// Bracketed IPv6: only a ':' AFTER the closing bracket is a port delimiter.
+	if strings.HasPrefix(host, "[") {
+		end := strings.Index(host, "]")
+		if end < 0 {
+			return false // unbalanced; dnsHostOK rejects elsewhere
+		}
+		rest := host[end+1:]
+		return rest == ":" // "[v6]:" => empty port; "[v6]:853" => not empty
+	}
+	// Non-bracketed: a trailing ':' means an empty port ("host:"). A ':'
+	// followed by digits is a real port; multiple colons mean an unbracketed
+	// IPv6, which dnsHostOK rejects as a host anyway.
+	if strings.Count(host, ":") == 1 {
+		return strings.HasSuffix(host, ":")
+	}
+	return false
 }
 
 // dnsHostOK validates a bare host with no port and no brackets: hostname

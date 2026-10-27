@@ -461,6 +461,41 @@ func TestAdapterMalformedNeverReplaces(t *testing.T) {
 	}
 }
 
+// TestAdapterTrailingClosersStayMalformed is a QA3-A1 regression guard for the
+// NODE ADAPTER path. The adapter's syntax gate (domain.ParseDocument →
+// json.Valid) already rejects trailing closers, and the shared-scanner EOF
+// fix must not silently weaken that: a canonical-looking envelope followed by
+// a trailing closer is malformed JSON with NO Document, never an envelope and
+// never a preserved draft. This pins the adapter independently of the
+// capability-side EOF fix.
+func TestAdapterTrailingClosersStayMalformed(t *testing.T) {
+	p := loadProfile(t)
+	base := `{"protocol":"socks5","fields":{"active":{"server":"s.example","serverPort":1080},"inactive":{},"unknown":{}}}`
+	for _, suf := range []string{"}", "]", "}}", "]}", " {}", " 5"} {
+		t.Run("suffix="+suf, func(t *testing.T) {
+			res, err := nodes.ValidateDocument(p, []byte(base+suf), nil)
+			if err == nil || !errors.Is(err, domain.ErrMalformedJSON) {
+				t.Fatalf("envelope+%q must be ErrMalformedJSON, got %v", suf, err)
+			}
+			if errors.Is(err, nodes.ErrNotANodeEnvelope) {
+				t.Fatalf("envelope+%q must NOT be demoted to a non-envelope", suf)
+			}
+			if len(res.Document.Raw) != 0 {
+				t.Fatalf("trailing closer must produce no Document bytes, got %d", len(res.Document.Raw))
+			}
+		})
+	}
+	// The same envelope WITHOUT trailing content still parses as an envelope
+	// (semantic validation runs, not a syntax refusal).
+	got, err := nodes.ValidateDocument(p, []byte(base), nil)
+	if err != nil {
+		t.Fatalf("clean envelope must decode (semantic, not parse error): %v", err)
+	}
+	if got.Validation != domain.ValidationValid {
+		t.Fatalf("clean minimal socks5 envelope must be valid, got %v", got.Validation)
+	}
+}
+
 // TestParseDocumentStillNotRun: the existing syntax-only gate still returns
 // ValidationNotRun — validation is never implied by parsing.
 func TestParseDocumentStillNotRun(t *testing.T) {

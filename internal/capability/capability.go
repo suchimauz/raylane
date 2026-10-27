@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 
 	"github.com/suchimauz/raylane/internal/jsonscan"
@@ -184,8 +185,15 @@ func Parse(raw []byte) (*Profile, error) {
 		// Reason-only: the decoder message (which may quote bytes) goes nowhere.
 		return nil, fmt.Errorf("%w: malformed json", ErrProfileRejected)
 	}
-	// Trailing content after the top-level value is a malformed profile.
-	if dec.More() {
+	// Trailing content after the top-level value is a malformed profile. The
+	// probe is an ACTUAL EOF read on this decoder, not dec.More(): More() only
+	// reports whether the next token COULD START a value, so a trailing closer
+	// (} or ]) is invisible to it and a malformed profile would be accepted as
+	// an authority. A second Decode that does not return io.EOF means bytes
+	// follow the first value. This guard is independent of the later shared
+	// scanner (rejectDuplicateKeys uses its own decoder).
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("%w: trailing data", ErrProfileRejected)
 	}
 	// Strict duplicate-key rejection. encoding/json silently keeps the LAST

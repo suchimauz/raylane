@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 )
 
 // ErrDuplicateKey reports that some object in the document repeats a key. The
@@ -43,12 +44,18 @@ func UniqueKeys(raw []byte) error {
 // FullValue walks raw and additionally requires that NOTHING follows the first
 // complete JSON value: trailing content is ErrMalformed. Combined with a
 // caller's own structural checks it closes the "input fully consumed" gate.
+//
+// The consumption probe is an ACTUAL EOF read, not dec.More(): More() only
+// reports whether the next token COULD START a value, so a trailing closer
+// (} or ]) is invisible to it. Only a real token read that returns io.EOF
+// proves the input ended exactly after the first value; any token or any
+// syntax error after it is trailing content.
 func FullValue(raw []byte) error {
 	dec := newScanner(raw)
 	if err := scanValue(dec); err != nil {
 		return err
 	}
-	if dec.More() {
+	if _, err := dec.Token(); err != io.EOF {
 		return ErrMalformed
 	}
 	return nil

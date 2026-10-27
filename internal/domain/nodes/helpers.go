@@ -59,8 +59,179 @@ func sortIssues(issues []Issue) {
 	})
 }
 
+// numClass is the exact mathematical classification of a JSON number.
+type numClass int
+
+const (
+	numFractional numClass = iota // has a nonzero fractional part (e.g. 1.5, 1e-400)
+	numIntegral                   // mathematically an integer within int64
+	numOutOfRange                 // mathematically an integer but beyond int64
+)
+
+// classifyJSONNumber parses a json.Number with EXACT decimal semantics — no
+// float64 conversion anywhere — and reports whether it is fractional, an
+// in-int64 integer, or an out-of-int64 integer. It distinguishes equivalent
+// integral spellings (443, 443.0, 443e0, 4.43e2, 4430e-1) from true fractions
+// and from genuinely huge magnitudes, handles the exact int64 boundaries and
+// the 2^53 neighbourhood without precision loss, and is resource-safe: it does
+// a single bounded left-to-right pass over the digit text and never expands
+// 10^exponent, allocates digits proportional to the input, or overflows an
+// exponent counter. The input comes from the scanner/parser, so it is already
+// a syntactically valid JSON number; a malformed form is rejected, not
+// silently accepted.
+func classifyJSONNumber(s string) (int64, numClass) {
+	i := 0
+	neg := false
+	if i < len(s) && (s[i] == '-' || s[i] == '+') {
+		neg = s[i] == '-'
+		i++
+	}
+	// Collect the mantissa digits (integer part + fraction concatenated). The
+	// value is D * 10^(exp - fracDigits) where D is these digits as an integer.
+	// Trailing zeros are stripped from D and folded into the exponent, so D
+	// holds only significant digits and overflow is genuine (significant digits
+	// alone exceed int64), which keeps every later path exact.
+	var digits []byte
+	fracDigits := 0
+	readDigits := func() int {
+		start := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			digits = append(digits, s[i])
+			i++
+		}
+		return i - start
+	}
+	_ = readDigits() // integer part
+	if i < len(s) && s[i] == '.' {
+		i++
+		fracDigits = readDigits() // fractional part
+	}
+	// Exponent (bounded; never expanded into digits).
+	expNeg := false
+	var exp uint64
+	expOverflow := false
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '-' || s[i] == '+') {
+			expNeg = s[i] == '-'
+			i++
+		}
+		es := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			dig := uint64(s[i] - '0')
+			if !expOverflow {
+				if exp > (1e18-dig)/10 {
+					expOverflow = true // clamp: any exponent this large dominates
+				} else {
+					exp = exp*10 + dig
+				}
+			}
+			i++
+		}
+		if i == es {
+			return 0, numFractional // "e" with no digits: malformed, reject
+		}
+	}
+	if i != len(s) {
+		return 0, numFractional // trailing garbage: malformed, reject
+	}
+
+	// Strip trailing zeros; fold them into the fractional-digit count (a trailing
+	// zero in the mantissa divides the value by 10 exactly once, the same as one
+	// fewer fractional digit). Leading zeros are harmless for the accumulator.
+	trail := 0
+	for len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		trail++
+	}
+	// Zero mantissa is integral zero regardless of exponent spelling (0, 0.0,
+	// 0e5, 0e-999999, 0.000e999999 all equal zero and are in range).
+	if len(digits) == 0 {
+		return 0, numIntegral
+	}
+
+	if expOverflow {
+		if expNeg {
+			// Huge negative exponent: a nonzero value is a vanishingly small
+			// fraction, never integral.
+			return 0, numFractional
+		}
+		// Huge positive exponent: a nonzero value is far beyond int64.
+		return 0, numOutOfRange
+	}
+
+	// Accumulate significant digits exactly, capping past int64 magnitude.
+	const umax = uint64(1) << 63 // magnitude bound for int64 (|min| = 2^63)
+	var d uint64
+	overflow := false
+	for _, c := range digits {
+		dig := uint64(c - '0')
+		if !overflow {
+			if d > (umax-dig)/10 {
+				overflow = true
+			} else {
+				d = d*10 + dig
+			}
+		}
+	}
+
+	// value = D * 10^scale with scale = ±exp - (fracDigits - trailingZeros).
+	effFrac := int64(fracDigits) - int64(trail)
+	var scale int64
+	if expNeg {
+		scale = -int64(exp) - effFrac
+	} else {
+		scale = int64(exp) - effFrac
+	}
+	return finishIntegral(d, neg, scale, overflow)
+}
+
+// finishIntegral converts an accumulated significant-digit mantissa D (possibly
+// capped with overflow set) plus base-10 exponent scale into an int64 with
+// exact classification. The mathematical value is D * 10^scale. overflow means
+// the significant digits alone exceeded the int64 magnitude during
+// accumulation. Trailing zeros were already folded into scale by the caller, so
+// D has no trailing zeros: a negative scale can only be integral when scale
+// cancels leading... it cannot — D has no trailing zeros, so D * 10^scale with
+// scale < 0 is integral only if the division removes nothing, i.e. it is never
+// integral for scale < 0 (D not divisible by 10). No float64 is used.
+func finishIntegral(d uint64, neg bool, scale int64, overflow bool) (int64, numClass) {
+	const umax = uint64(1) << 63
+	if scale < 0 {
+		// D has no trailing zeros (they were folded into scale), so D * 10^scale
+		// has a nonzero fractional part whenever scale < 0 — unless D == 0, which
+		// the caller already handled. A capped D is likewise nonzero.
+		return 0, numFractional
+	}
+	// scale >= 0 now: value = D * 10^scale.
+	if overflow {
+		return 0, numOutOfRange
+	}
+	lim := umax - 1 // max int64 = 2^63 - 1
+	if neg {
+		lim = umax // |min int64| = 2^63
+	}
+	val := d
+	for k := int64(0); k < scale; k++ {
+		if val > lim/10 {
+			return 0, numOutOfRange
+		}
+		val *= 10
+	}
+	if val > lim {
+		return 0, numOutOfRange
+	}
+	if neg {
+		return -int64(val), numIntegral // val <= 2^63, so -val >= min int64
+	}
+	return int64(val), numIntegral
+}
+
 // asInt accepts an integral JSON number (float64 from encoding/json, or
-// json.Number/int64) and refuses non-integers.
+// json.Number/int64) and refuses non-integers. json.Number values are parsed
+// with EXACT decimal semantics (classifyJSONNumber): equivalent integral
+// spellings (443.0, 443e0, 4.43e2) are accepted and fractional spellings are
+// refused, with no float64 fallback.
 func asInt(v any) (int64, bool) {
 	switch n := v.(type) {
 	case float64:
@@ -73,35 +244,25 @@ func asInt(v any) (int64, bool) {
 	case int:
 		return int64(n), true
 	case json.Number:
-		i, err := n.Int64()
-		return i, err == nil
+		i, cls := classifyJSONNumber(string(n))
+		return i, cls == numIntegral
 	}
 	return 0, false
 }
 
 // numberOutOfRange reports whether v is a JSON number (json.Number) that is
 // integral in form but exceeds the representable integer range. It lets the
-// integer rule distinguish "not a number at all" (typeMismatch) from "a
-// number too large to represent" (boundsViolation), so a syntactically valid
-// huge value like 1E400 is honestly reported as out of range rather than as
-// the wrong type. Only the boolean leaves; the value is never echoed.
+// integer rule distinguish "not a number at all / fractional" (typeMismatch)
+// from "a number too large to represent" (boundsViolation), so a syntactically
+// valid huge value like 1E400 is honestly reported as out of range rather than
+// as the wrong type. Only the boolean leaves; the value is never echoed.
 func numberOutOfRange(v any) bool {
 	n, ok := v.(json.Number)
 	if !ok {
 		return false
 	}
-	if _, err := n.Int64(); err == nil {
-		return false // fits: not out of range
-	}
-	// It is a number but Int64 failed: either non-integral or out of range.
-	// A non-integral number (e.g. 1.5) is a type problem for an integer field,
-	// not a range problem; detect that via the float form.
-	if f, err := n.Float64(); err == nil {
-		// Non-integral (has a fractional part within range) → type, not range.
-		return f == float64(int64(f)) // integral but overflowed → out of range
-	}
-	// Float64 also failed → magnitude beyond float64: definitively out of range.
-	return true
+	_, cls := classifyJSONNumber(string(n))
+	return cls == numOutOfRange
 }
 
 // matchFieldPattern delegates pattern matching to the profile. The capability

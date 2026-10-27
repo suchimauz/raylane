@@ -363,13 +363,15 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// FR-008 typed public WireGuard key/address rule (D-049, FR-009/019). Runs
 	// after the per-field shape checks: it content-checks the two independently
 	// eligible declared known/non-secret/supported ACTIVE fields publicKey
-	// (string) and localAddresses (array of string) for the wireguard protocol
-	// ONLY (vless.publicKey is REALITY and untouched). Each field is gated on
+	// (string) and localAddresses (array of string) — for the wireguard
+	// protocol ONLY, guarded by the ACTUAL input protocol (an unguarded rule
+	// would leak the WireGuard key shape onto vless.publicKey, the REALITY key,
+	// which follows its own metadata and is untouched). Each field is gated on
 	// its OWN generic valueOK passing (no duplicate ordinary issue) and the two
 	// are independent (no early-return coupling). One static value-free issue per
 	// offending field (patternViolation@publicKey / arrayItemViolation@
 	// localAddresses); no map mutation, no secret read, no new IssueCode.
-	checkWireGuardTypedRules(&res, declared, active)
+	checkWireGuardTypedRules(&res, in.Protocol, declared, active)
 
 	if len(res.Issues) > 0 {
 		res.Status = Invalid

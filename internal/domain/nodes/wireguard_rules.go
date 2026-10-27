@@ -7,8 +7,15 @@ package nodes
 // fields — publicKey (string) and localAddresses (array of string) — that the
 // generic type/bounds/pattern/array rules cannot express.
 //
-// It is protocol-scoped to wireguard ONLY: vless.publicKey is the REALITY key
-// and is untouched. It reuses the closed IssueCode vocabulary (no new codes):
+// The rule is HARD protocol-scoped to wireguard by the ACTUAL input protocol
+// string: checkWireGuardTypedRules returns immediately unless protocol ==
+// "wireguard". This guard is load-bearing, not cosmetic — vless also declares
+// a publicKey field (the REALITY key), and without the guard the WireGuard
+// 32-byte key shape would leak onto vless.publicKey and wrongly reject a
+// legitimate REALITY value. vless.publicKey follows its OWN metadata and is
+// untouched here.
+//
+// It reuses the closed IssueCode vocabulary (no new codes):
 //   - publicKey       -> IssuePatternViolation  ("a field value has an invalid format")
 //   - localAddresses  -> IssueArrayItemViolation ("an array element is invalid")
 // Each field is checked INDEPENDENTLY: an ineligible/invalid publicKey never
@@ -106,13 +113,18 @@ func wgTypedEligible(f capability.Field, wantType string) bool {
 }
 
 // checkWireGuardTypedRules applies the FR008 typed public-field rule to the
-// effective ACTIVE values of publicKey and localAddresses. It runs after the
-// per-field generic checks; for each field it first confirms the SAME field's
-// generic valueOK passed (so no duplicate ordinary issue), then applies the
-// typed content check. The two fields are independent — one never gates the
-// other — and neither is gated by any unrelated field's validity. It never
-// mutates the maps and never echoes a byte.
-func checkWireGuardTypedRules(res *Result, declared map[string]capability.Field, active map[string]any) {
+// effective ACTIVE values of publicKey and localAddresses — ONLY when the
+// ACTUAL input protocol is "wireguard". For any other protocol (e.g. vless,
+// which declares its own publicKey) the rule is inert, so the WireGuard key
+// shape never leaks across protocols. When active it runs each field
+// INDEPENDENTLY: declaration guard (declared known/non-secret/supported/
+// correct type), ACTIVE-only (no inactive promotion), and SAME-field generic
+// valueOK gate first (no duplicate ordinary issue; the other eligible field is
+// still checked). It never mutates the maps and never echoes a byte.
+func checkWireGuardTypedRules(res *Result, protocol string, declared map[string]capability.Field, active map[string]any) {
+	if protocol != "wireguard" {
+		return // hard protocol guard: WG key/address shape applies to wireguard only
+	}
 	checkKey(res, declared, active)
 	checkAddrs(res, declared, active)
 }

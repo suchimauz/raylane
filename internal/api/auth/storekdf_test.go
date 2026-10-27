@@ -253,11 +253,106 @@ func TestT008StoreKDFAdapterValidationAndNoAliasing(t *testing.T) {
 		sv.Argon2Version != argon2Version || sv.Parallelism != parallelism {
 		t.Fatal("N-2: record conversion metadata wrong")
 	}
+	// No-alias oracle with a GUARANTEED value-changing marker. The previous
+	// fixed 0xFF canary collided with the original byte whenever the random
+	// salt[0] happened to be 0xFF (~1/256), making a CORRECT fresh copy look
+	// aliased. Mutating to (before ^ 0xFF) always differs from the original for
+	// every byte, so a genuine fresh copy is observed correctly.
 	before := sv.Salt[0]
-	sv.Salt[0] = 0xFF
+	marker := before ^ 0xFF
+	sv.Salt[0] = marker
 	sv2 := storeVerifierRecord(rec)
-	if sv2.Salt[0] == 0xFF || sv2.Salt[0] != before {
+	if sv2.Salt[0] == marker || sv2.Salt[0] != before {
 		t.Fatal("N-2: record conversion handed out an aliased buffer")
+	}
+}
+
+// TestT008StoreVerifierRecordNoAliasOracleDeterministic is the deterministic,
+// collision-free companion to the random-entropy conversion check above. It
+// exercises the REAL storeVerifierRecord conversion for the exact original
+// byte (0xFF) that made the old fixed-canary predicate false-positive, plus an
+// ordinary non-FF byte, AND proves the corrected oracle is non-vacuous by
+// rejecting a deliberately aliased buffer. Constructing the private record
+// value directly (same package) keeps this instant and deterministic; the
+// random constructor/KDF execution remains covered by the test above and the
+// hostile-store bridge run.
+func TestT008StoreVerifierRecordNoAliasOracleDeterministic(t *testing.T) {
+	mk := func(firstSalt byte) adminVerifierRecord {
+		var rec adminVerifierRecord
+		rec.formatVersion = formatVersion
+		rec.argon2Version = argon2Version
+		rec.timeCost = timeCost
+		rec.memoryKiB = memoryKiB
+		rec.parallelism = parallelism
+		for i := range rec.salt {
+			rec.salt[i] = byte(i + 1) // distinct, deterministic, non-FF after [0]
+		}
+		rec.salt[0] = firstSalt
+		for i := range rec.derivedKey {
+			rec.derivedKey[i] = byte(i)
+		}
+		return rec
+	}
+
+	// Corrected oracle: fresh conversion must EQUAL the original and DIFFER from
+	// the (guaranteed value-changing) mutated buffer, for both the 0xFF and the
+	// non-FF original. This is exactly where the old predicate failed.
+	for _, orig := range []byte{0xFF, 0x00} {
+		rec := mk(orig)
+		sv := storeVerifierRecord(rec)
+		if len(sv.Salt) != saltBytes || len(sv.DerivedKey) != derivedKeyByte {
+			t.Fatalf("orig %#02x: conversion lengths wrong: %d/%d", orig, len(sv.Salt), len(sv.DerivedKey))
+		}
+		before := sv.Salt[0]
+		if before != orig {
+			t.Fatalf("orig %#02x: fresh conversion did not preserve original byte: %#02x", orig, before)
+		}
+		marker := before ^ 0xFF
+		if marker == before {
+			t.Fatalf("orig %#02x: marker collides with original (oracle would be vacuous)", orig)
+		}
+		sv.Salt[0] = marker // mutate the returned copy
+		sv2 := storeVerifierRecord(rec)
+		if sv2.Salt[0] == marker {
+			t.Fatalf("orig %#02x: fresh conversion saw the mutation (aliased buffer)", orig)
+		}
+		if sv2.Salt[0] != before {
+			t.Fatalf("orig %#02x: fresh conversion did not reproduce the original byte: %#02x != %#02x", orig, sv2.Salt[0], before)
+		}
+	}
+
+	// Non-vacuous NEGATIVE control: prove the corrected oracle is actually
+	// capable of detecting an aliased buffer, not just unconditionally passing.
+	// We model the defect with a conversion that returns a slice backed by the
+	// CALLER's record array (precisely what storeVerifierRecord must NEVER do —
+	// it must hand out a fresh copy). Mutating that returned slice then corrupts
+	// the record, and the SAME no-alias predicate must reject it. The pointer
+	// indirection makes the alias real (a by-value copy would break it).
+	rec := mk(0xFF) // use the colliding original too: oracle must still catch alias
+	aliasingConversion := func(r *adminVerifierRecord) store.AdminVerifier {
+		return store.AdminVerifier{
+			FormatVersion: r.formatVersion,
+			Argon2Version: r.argon2Version,
+			TimeCost:      r.timeCost,
+			MemoryKiB:     r.memoryKiB,
+			Parallelism:   r.parallelism,
+			Salt:          r.salt[:],       // ALIAS: shares the caller's record array
+			DerivedKey:    r.derivedKey[:], // ALIAS: shares the caller's record array
+		}
+	}
+	sv := aliasingConversion(&rec)
+	before := sv.Salt[0]
+	marker := before ^ 0xFF
+	if marker == before {
+		t.Fatalf("negative control: marker collides with original")
+	}
+	sv.Salt[0] = marker // mutating the aliased returned slice corrupts the record
+	sv2 := aliasingConversion(&rec)
+	// The corrected predicate: an aliased buffer yields sv2 == marker (the
+	// mutation leaked through). The oracle must flag this as aliasing.
+	aliasedDetected := sv2.Salt[0] == marker || sv2.Salt[0] != before
+	if !aliasedDetected {
+		t.Fatal("negative control: corrected no-alias oracle failed to detect a deliberately aliased buffer")
 	}
 }
 

@@ -312,11 +312,12 @@ func Validate(profile *capability.Profile, in Input) Result {
 
 	// FR-004 value-conditional DNS / Happy Eyeballs cross-field rules. These
 	// run after the per-field shape checks and reuse the closed IssueCode
-	// vocabulary. They read the effective active dnsMode and the active-valid /
-	// active-invalid / inactive resolver split, and never mutate the maps or
-	// echo a value.
-	modeVal, modeOK := dnsModeState(declared, active)
-	checkDNSRules(&res, declared, active, inactive, modeVal, modeOK)
+	// vocabulary. They read the effective active dnsMode (membership by the
+	// field's ACTUAL declared AllowedValues) and the active-valid / active-
+	// invalid / inactive resolver split, and never mutate the maps or echo a
+	// value. The independent HE rule is not gated on a usable mode selector.
+	mode, modeUsable := dnsModeState(declared, active)
+	checkDNSRules(&res, declared, active, inactive, mode, modeUsable)
 
 	if len(res.Issues) > 0 {
 		res.Status = Invalid

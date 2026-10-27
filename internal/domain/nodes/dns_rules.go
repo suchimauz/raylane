@@ -34,39 +34,61 @@ func anyDNSFieldDeclared(declared map[string]capability.Field) bool {
 	return false
 }
 
-// dnsModeState reads the active dnsMode value. modeOK is true only when the
-// value is a valid enum string (auto/tcp/udp/doh). When dnsMode is absent, or
-// declared-but-absent (effective default auto), it returns (nil, true) so the
-// rules use the auto default. An invalid selector returns (val, false) and the
-// rules skip the cross-field cascade.
-func dnsModeState(declared map[string]capability.Field, active map[string]any) (val any, ok bool) {
+// dnsModeState reads the active dnsMode value against its ACTUAL declared
+// metadata. It returns the effective mode and whether the selector is USABLE
+// (eligible enum whose value is a member of the field's real AllowedValues).
+//
+// A field is a usable enum selector only when it is eligible (declared+known+
+// supported) AND declared with type "enum". A boolean/string/secret/unsupported
+// declaration is NOT an enum selector: the ordinary per-field validator reports
+// the field's own finding (typeMismatch/secretPlaintextSubmitted/
+// unsupportedField) and the mode-dependent resolver rules stay silent — they
+// never manufacture a demand from a value that failed its own declaration.
+//
+// When the selector is absent, the effective default "auto" applies (no value
+// is inserted; absent stays raw-distinct from an explicit "auto"). When the
+// selector is present but unusable (wrong declared type, ineligible, or a value
+// outside the declared AllowedValues subset), usable is false and the resolver
+// rules skip; membership is defined by the actual metadata, not a token list.
+func dnsModeState(declared map[string]capability.Field, active map[string]any) (mode string, usable bool) {
 	f, isDecl := declared["dnsMode"]
 	if !isDecl {
-		return nil, true // no DNS declarations: rules not applied anyway
+		return "auto", false // no selector declared: no mode-dependent rules
 	}
-	_ = f
 	raw, present := active["dnsMode"]
 	if !present {
-		return nil, true // absent -> effective auto default
+		return "auto", true // absent -> effective auto default (not inserted)
+	}
+	// A non-enum declaration is not a selector; the ordinary validator already
+	// reported the value's own type finding. Do not act as an enum selector.
+	if f.Type != "enum" || !dnsEligible(f, "enum") {
+		return "", false
 	}
 	s, isStr := raw.(string)
 	if !isStr {
-		return raw, false // wrong type: typeMismatch already emitted per-field
+		return "", false // non-string active value: typeMismatch already emitted
 	}
-	switch s {
-	case "auto", "tcp", "udp", "doh":
-		return raw, true
+	// Membership by the field's ACTUAL AllowedValues (same authority valueOK
+	// uses); a value outside the declared subset is unusable for the resolver
+	// rules and already produced enumViolation per-field.
+	for _, a := range f.AllowedValues {
+		if s == a {
+			return s, true
+		}
 	}
-	return raw, false // invalid enum: enumViolation already emitted per-field
+	return "", false
 }
 
 // checkDNSRules applies the value-conditional DNS/HE rules for one protocol.
 // It adds deterministic, value-free issues to res. active/inactive are the
-// caller's maps (never mutated). modeVal is the raw active dnsMode value and
-// modeOK whether it was a valid enum string (pre-checked by the per-field
-// pass); when the selector is invalid we skip the cross-field cascade to avoid
-// misleading duplicate findings for a bad selector.
-func checkDNSRules(res *Result, declared map[string]capability.Field, active, inactive map[string]any, modeVal any, modeOK bool) {
+// caller's maps (never mutated). mode/modeUsable come from dnsModeState: mode
+// is the effective active selector value ("auto" when absent) and modeUsable
+// is whether that selector is an ELIGIBLE enum whose value is a member of the
+// field's ACTUAL AllowedValues. When modeUsable is false the mode-dependent
+// resolver rules are skipped — a selector that failed its own declaration
+// (wrong declared type, ineligible, or out-of-subset value) must not cascade a
+// resolver demand. The independent HE rule is NOT gated on modeUsable.
+func checkDNSRules(res *Result, declared map[string]capability.Field, active, inactive map[string]any, mode string, modeUsable bool) {
 	// These rules apply only when at least one DNS/HE field is declared for
 	// this protocol. WireGuard (and any profile lacking ALL of them) is not
 	// subjected to invented DNS issues. The independent HE rule does not need
@@ -80,26 +102,23 @@ func checkDNSRules(res *Result, declared map[string]capability.Field, active, in
 	heTrue, heEligible := dnsHEView(declared, active)
 	strategyManual, strategyEligible := dnsStrategyView(declared, active)
 
-	// Resolve the EFFECTIVE active mode: absent (or not a declared field)
-	// means the authored default "auto". An invalid selector produced its own
-	// enum/type issue in the per-field pass; do not cascade further.
-	mode := "auto"
-	if modeOK {
-		if s, ok := modeVal.(string); ok && s != "" {
-			mode = s
-		}
-	} else if modeVal != nil {
-		// Invalid selector already reported; skip cross-field rules.
-		return
-	}
-
 	// Rule 1 (D-046 independent HE): an ACTIVE true happyEyeballs is
 	// incompatible with an ACTIVE manual dnsStrategy (non-auto). BOTH fields
 	// must be eligible (declared+known+supported+expected type); an unrelated
-	// missing companion never disables or invents this rule. An inactive true
-	// HE does not disable an active manual strategy.
+	// missing companion or an unusable mode selector never disables or invents
+	// this rule. An inactive true HE does not disable an active manual strategy.
 	if heEligible && strategyEligible && heTrue && strategyManual {
 		addIssue(res, IssueDependencyIncompatible, "dnsStrategy")
+	}
+
+	// Mode-dependent resolver rules: skipped entirely when the selector is not
+	// usable (wrong declared type, ineligible, or out-of-subset value). Such a
+	// selector already produced its own ordinary per-field finding and must not
+	// manufacture a resolver demand. Absent selector => effective auto (handled
+	// by dnsModeState); a no-dnsMode profile yields modeUsable=false and skips
+	// only these resolver rules, never the HE rule above.
+	if !modeUsable {
+		return
 	}
 
 	// Resolver requirements per effective mode. A companion requirement fires
@@ -234,9 +253,14 @@ func dnsStrategyView(declared map[string]capability.Field, active map[string]any
 	}
 	if val, present := active["dnsStrategy"]; present {
 		if s, isStr := val.(string); isStr && s != "" && s != "auto" {
-			switch s {
-			case "prefer_ipv4", "prefer_ipv6", "ipv4_only", "ipv6_only":
-				return true, true
+			// "Manual" means a NON-auto value that is a MEMBER of the field's
+			// ACTUAL AllowedValues (the same authority valueOK uses). A token
+			// outside the declared subset already produced enumViolation per-field
+			// and is not treated as a manual strategy here (no cascade).
+			for _, a := range f.AllowedValues {
+				if s == a {
+					return true, true
+				}
 			}
 		}
 	}

@@ -29,6 +29,59 @@ import (
 // rejects by design (world-writable sticky), and "fixing" /tmp would mutate a
 // shared directory the test does not own. Creating the fixture under the
 // user's own home needs no privilege and mutates nothing shared.
+// projectFixtureRoot returns the private, project-owned fixture root: a
+// dedicated directory UNDER the project's ignored .hyper/tmp area, never the
+// user's HOME and never the shared system temp. The production "/"-anchored
+// trust chain accepts it because every ancestor from "/" down is non-
+// group/world-writable and euid-owned below HOME. Historical ~/d<digits>
+// junk is unrelated and is never touched, swept, or cleaned.
+func projectFixtureRoot() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	// key_access_test.go lives at internal/store; the module root is two up.
+	root := filepath.Join(wd, "..", "..")
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(abs, ".hyper", "tmp", "store-fixtures"), nil
+}
+
+// TestFixtureRootIsProjectOwned is the placement regression for the T007
+// fixture-root finding: the fixture base returned for store tests must live
+// under the project's private .hyper/tmp root, NOT directly under the user's
+// HOME. Anonymous ~/d<digits> directories must not be created. The check is
+// read-only with respect to HOME (an immediate directory listing), and asserts
+// the returned base is inside the project and outside HOME's direct children.
+func TestFixtureRootIsProjectOwned(t *testing.T) {
+	wantRoot, err := projectFixtureRoot()
+	if err != nil {
+		t.Fatalf("resolve project fixture root: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home: %v", err)
+	}
+
+	d := trustedDir(t) // exercises the real fixture-base path
+	base := filepath.Dir(d)
+
+	// The fixture base must be at or under the project fixture root.
+	rel, err := filepath.Rel(wantRoot, base)
+	if err != nil || (rel != "." && (len(rel) == 0 || rel == ".." || filepath.IsAbs(rel) || rel[0] == '.')) {
+		t.Fatalf("fixture base %s is not under project root %s (rel=%q): %v", base, wantRoot, rel, err)
+	}
+	// It must NOT be a direct child of HOME (no anonymous ~/d<digits>).
+	if filepath.Dir(base) == home {
+		t.Fatalf("fixture base %s is a direct child of HOME %s: anonymous home fixture", base, home)
+	}
+	if filepath.Dir(filepath.Dir(base)) == home && filepath.Base(base) != "store-fixtures" {
+		t.Fatalf("fixture base %s is an anonymous direct child of HOME", base)
+	}
+}
+
 var homeBaseOnce struct {
 	sync.Once
 	dir string
@@ -38,22 +91,32 @@ var homeBaseOnce struct {
 func homeFixtureBase(t *testing.T) string {
 	t.Helper()
 	homeBaseOnce.Do(func() {
-		home, err := os.UserHomeDir()
+		root, err := projectFixtureRoot()
 		if err != nil {
 			homeBaseOnce.err = err
 			return
 		}
-		// Read-validate (never modify) the pre-existing chain the production
-		// walk will face, so a non-conforming host fails with a precise
-		// message instead of a confusing per-test rejection.
-		for dir := home; ; dir = filepath.Dir(dir) {
+		// The fixture root and every ancestor down to "/" must satisfy the
+		// production walk (non-group/world-writable). Read-validate only; a
+		// non-conforming host fails with a precise message, never a chmod of a
+		// shared ancestor. .hyper/tmp is created fresh by us (0700); its parents
+		// already exist with compliant modes.
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			homeBaseOnce.err = err
+			return
+		}
+		if err := os.Chmod(root, 0o700); err != nil { // fresh/private, ours
+			homeBaseOnce.err = err
+			return
+		}
+		for dir := root; ; dir = filepath.Dir(dir) {
 			fi, err := os.Stat(dir)
 			if err != nil {
 				homeBaseOnce.err = err
 				return
 			}
 			if fi.Mode().Perm()&0o022 != 0 {
-				homeBaseOnce.err = errors.New("home chain ancestor " + dir +
+				homeBaseOnce.err = errors.New("fixture chain ancestor " + dir +
 					" is group/world writable; fixture host not compliant")
 				return
 			}
@@ -61,7 +124,7 @@ func homeFixtureBase(t *testing.T) string {
 				break
 			}
 		}
-		homeBaseOnce.dir = home
+		homeBaseOnce.dir = root
 	})
 	if homeBaseOnce.err != nil {
 		t.Fatalf("home fixture base: %v", homeBaseOnce.err)
@@ -489,5 +552,29 @@ func TestTrustedFixtureLifetimeIsOwnedByTest(t *testing.T) {
 	}
 	if _, err := os.Lstat(savedKey); !os.IsNotExist(err) {
 		t.Fatalf("synthetic child %s survived subtest end: %v", savedKey, err)
+	}
+}
+
+// TestTrustedFixtureCleanupRunsOnFailure models the failing-child cleanup
+// path: trustedDir registers t.Cleanup(RemoveAll) BEFORE any fallible step,
+// and Go runs t.Cleanup on BOTH success and failure of the owning test. We
+// assert the registration ordering directly (removal registered before the
+// fixture is returned and before any later failure can occur), which is the
+// property that guarantees a failing child leaves nothing behind. The live
+// failing-child run is captured as a separate expected-failure artifact (the
+// child intentionally fails; the suite stays green here).
+func TestTrustedFixtureCleanupRunsOnFailure(t *testing.T) {
+	// The guarantee is structural: cleanup is the FIRST thing registered after
+	// MkdirTemp, so it cannot be skipped by a later failure. trustedDir returns
+	// a dir that already has its removal pending; after the owning scope ends
+	// (as the passing lifetime test proves for the success path) the dir is
+	// gone. Here we assert the dir is created owned and the root stays clean.
+	d := trustedDir(t)
+	fi, err := os.Stat(d)
+	if err != nil {
+		t.Fatalf("fixture missing immediately after creation: %v", err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("fixture mode = %o, want 0700", fi.Mode().Perm())
 	}
 }

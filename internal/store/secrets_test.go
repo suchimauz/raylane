@@ -31,7 +31,13 @@ func keyDir(t *testing.T) string {
 	dirsMu.Lock()
 	defer dirsMu.Unlock()
 	if d, ok := keyDirs[t.Name()]; ok {
-		return d
+		// Reuse the SAME key dir within a single test run (Close/reopen must see
+		// the identical key file). On a repeated run (-count=2) the prior run's
+		// cleanup already removed it, so a stale cache entry must NOT be handed
+		// back: recreate a fresh owned dir instead of writing into a removed one.
+		if _, err := os.Stat(d); err == nil {
+			return d
+		}
 	}
 	d := trustedDir(t) // trusted chain (see key_access_test.go), no /tmp exemption
 	keyDirs[t.Name()] = d

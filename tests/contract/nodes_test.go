@@ -25,6 +25,9 @@ const (
 	unknownCanary = "CANARY-UNKNOWN-FIELD-88"
 	nestedCanary  = "CANARY-NESTED-LEAF-71"
 	urlCredCanary = "https://user:CANARY-URL-PASS@host.example"
+	// validWGHexKey is a valid 32-byte WireGuard public key (64 hex chars) used by
+	// positive validation fixtures. It is NOT a canary and may appear in fixtures.
+	validWGHexKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 )
 
 func loadProfile(t *testing.T) *capability.Profile {
@@ -59,7 +62,7 @@ func minValid(protocol string) map[string]any {
 	case "wireguard":
 		return map[string]any{
 			"endpoint": "w.example", "endpointPort": float64(51820),
-			"publicKey": "pub", "localAddresses": []any{"10.0.0.2/32"},
+			"publicKey": validWGHexKey, "localAddresses": []any{"10.0.0.2/32"},
 		}
 	}
 	return nil

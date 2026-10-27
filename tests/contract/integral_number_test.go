@@ -221,7 +221,7 @@ func TestIntegralNumberWireGuardPorts(t *testing.T) {
 	p := loadProfile(t)
 	base := map[string]any{
 		"endpoint": "w.example", "endpointPort": json.Number("51820"),
-		"publicKey": "pub", "localAddresses": []any{"10.0.0.2/32"},
+		"publicKey": validWGHexKey, "localAddresses": []any{"10.0.0.2/32"},
 	}
 	// Equivalent spellings for endpointPort are all valid.
 	for _, sp := range []string{"51820", "51820.0", "5182e1", "518200e-1", "51820.00"} {
@@ -266,7 +266,7 @@ func TestIntegralNumberArrayIssueVocabulary(t *testing.T) {
 	p := loadProfile(t)
 	base := map[string]any{
 		"endpoint": "w.example", "endpointPort": json.Number("51820"),
-		"publicKey": "pub", "localAddresses": []any{"10.0.0.2/32"},
+		"publicKey": validWGHexKey, "localAddresses": []any{"10.0.0.2/32"},
 	}
 	pres := map[string]bool{"privateKey": true}
 

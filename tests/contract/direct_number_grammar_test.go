@@ -101,7 +101,7 @@ func TestDirectNumberIntegerArrayMalformedItem(t *testing.T) {
 	p := loadProfile(t)
 	base := map[string]any{
 		"endpoint": "w.example", "endpointPort": json.Number("51820"),
-		"publicKey": "pub", "localAddresses": []any{"10.0.0.2/32"},
+		"publicKey": validWGHexKey, "localAddresses": []any{"10.0.0.2/32"},
 	}
 	pres := map[string]bool{"privateKey": true}
 

@@ -90,8 +90,8 @@ func TestParseExistingContractsUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authored profile: %v", err)
 	}
-	if p.Version() != 2 {
-		t.Fatalf("version = %d, want 2", p.Version())
+	if p.Version() != 3 {
+		t.Fatalf("version = %d, want 3", p.Version())
 	}
 	// Duplicate key still rejected.
 	dup := `{"profileVersion":2,"protocols":{"vless":{"fields":{"a":{"type":"string","classification":"known"},"a":{"type":"string","classification":"known"}}}}}`

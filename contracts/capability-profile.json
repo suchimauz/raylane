@@ -1,5 +1,5 @@
 {
-  "profileVersion": 2,
+  "profileVersion": 3,
   "protocols": {
     "vless": {
       "fields": {
@@ -155,8 +155,7 @@
             "prefer_ipv4",
             "prefer_ipv6",
             "ipv4_only",
-            "ipv6_only",
-            "happy_eyeballs"
+            "ipv6_only"
           ]
         },
         "tfo": {
@@ -186,6 +185,36 @@
           "type": "string",
           "classification": "known",
           "maxLength": 64
+        },
+        "dnsMode": {
+          "type": "enum",
+          "classification": "known",
+          "default": "auto",
+          "allowedValues": [
+            "auto",
+            "tcp",
+            "udp",
+            "doh"
+          ]
+        },
+        "dnsServer": {
+          "type": "string",
+          "classification": "known",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?)*\\.?|\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:\\.]+\\])(:[0-9]{1,5})?$"
+        },
+        "dnsServerUrl": {
+          "type": "string",
+          "classification": "known",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^https://([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?)*\\.?|\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:\\.]+\\])(:[0-9]{1,5})?(/[A-Za-z0-9\\-._~%!$&'()*+,;=:@/]*)?$"
+        },
+        "happyEyeballs": {
+          "type": "boolean",
+          "classification": "known",
+          "default": false
         }
       }
     },
@@ -231,8 +260,7 @@
             "prefer_ipv4",
             "prefer_ipv6",
             "ipv4_only",
-            "ipv6_only",
-            "happy_eyeballs"
+            "ipv6_only"
           ]
         },
         "tfo": {
@@ -262,6 +290,36 @@
           "type": "string",
           "classification": "known",
           "maxLength": 64
+        },
+        "dnsMode": {
+          "type": "enum",
+          "classification": "known",
+          "default": "auto",
+          "allowedValues": [
+            "auto",
+            "tcp",
+            "udp",
+            "doh"
+          ]
+        },
+        "dnsServer": {
+          "type": "string",
+          "classification": "known",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?)*\\.?|\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:\\.]+\\])(:[0-9]{1,5})?$"
+        },
+        "dnsServerUrl": {
+          "type": "string",
+          "classification": "known",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^https://([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?)*\\.?|\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:\\.]+\\])(:[0-9]{1,5})?(/[A-Za-z0-9\\-._~%!$&'()*+,;=:@/]*)?$"
+        },
+        "happyEyeballs": {
+          "type": "boolean",
+          "classification": "known",
+          "default": false
         }
       }
     },
@@ -350,8 +408,7 @@
             "prefer_ipv4",
             "prefer_ipv6",
             "ipv4_only",
-            "ipv6_only",
-            "happy_eyeballs"
+            "ipv6_only"
           ]
         },
         "tfo": {
@@ -381,6 +438,36 @@
           "type": "string",
           "classification": "known",
           "maxLength": 64
+        },
+        "dnsMode": {
+          "type": "enum",
+          "classification": "known",
+          "default": "auto",
+          "allowedValues": [
+            "auto",
+            "tcp",
+            "udp",
+            "doh"
+          ]
+        },
+        "dnsServer": {
+          "type": "string",
+          "classification": "known",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?)*\\.?|\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:\\.]+\\])(:[0-9]{1,5})?$"
+        },
+        "dnsServerUrl": {
+          "type": "string",
+          "classification": "known",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^https://([A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9\\-]{0,61}[A-Za-z0-9])?)*\\.?|\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9A-Fa-f:\\.]+\\])(:[0-9]{1,5})?(/[A-Za-z0-9\\-._~%!$&'()*+,;=:@/]*)?$"
+        },
+        "happyEyeballs": {
+          "type": "boolean",
+          "classification": "known",
+          "default": false
         }
       }
     },

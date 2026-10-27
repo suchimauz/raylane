@@ -310,6 +310,14 @@ func Validate(profile *capability.Profile, in Input) Result {
 		}
 	}
 
+	// FR-004 value-conditional DNS / Happy Eyeballs cross-field rules. These
+	// run after the per-field shape checks and reuse the closed IssueCode
+	// vocabulary. They read the effective active dnsMode and the active-valid /
+	// active-invalid / inactive resolver split, and never mutate the maps or
+	// echo a value.
+	modeVal, modeOK := dnsModeState(declared, active)
+	checkDNSRules(&res, declared, active, inactive, modeVal, modeOK)
+
 	if len(res.Issues) > 0 {
 		res.Status = Invalid
 		// An invalid node is not applicable as a usable configuration.

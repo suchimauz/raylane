@@ -337,6 +337,17 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// NotRun, adjusts applicability below.
 	checkChainRules(&res, declared, active, inactive, in.Chain, profile)
 
+	// FR-002 structural REALITY/transport compatibility (D-009..D-012/D-016).
+	// Runs after the per-field shape checks: it reads the EFFECTIVE ACTIVE values
+	// of BOTH the transport and security selectors (each independently eligible
+	// enum whose value is a member of its own ACTUAL AllowedValues). When
+	// security=reality and transport is one of the structurally refused canonical
+	// choices {mkcp,ws,httpupgrade}, it adds ONE static value-free
+	// dependencyIncompatible on the declared transport path. An ineligible /
+	// absent / out-of-subset selector keeps the rule silent (ordinary generic
+	// issues remain ordinary). No map mutation, no secret read, no new IssueCode.
+	checkTransportRules(&res, declared, active)
+
 	// FR-007 credential-intent / trusted-sealed-presence rule (D-016/D-043).
 	// Runs after the per-field shape checks: it reads the EFFECTIVE ACTIVE
 	// authMode selector and the TRUSTED sealed-presence booleans (never submitted

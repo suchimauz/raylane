@@ -398,3 +398,119 @@ func TestDoHPreciseGrammar_DoesNotLeakMarkers(t *testing.T) {
 		t.Fatalf("raw query-only URL accepted")
 	}
 }
+
+// --- Absent selector under ineligible declaration (V4-T011B1 absent-selector-R3) ---
+//
+// Residual V4-T011B1-DNS-DECLARATION-GUARD branch: dnsModeState used to check
+// `!present -> ("auto", true)` BEFORE eligibility. An ABSENT dnsMode under an
+// INELIGIBLE declaration (unsupported enum / known string / boolean / secret
+// string) was therefore turned into an Auto controller, and an ACTIVE ELIGIBLE
+// resolver then wrongly got dependencyIncompatible. Eligibility must be decided
+// BEFORE the absent/default branch: only an ELIGIBLE enum declaration may use
+// the preserved absent effective Auto.
+
+// ineligibleModeDecls are dnsMode declarations that are NOT eligible enum
+// selectors. For each, an ABSENT mode must not drive mode-dependent resolver
+// rules, even with an active eligible resolver present.
+var ineligibleModeDecls = map[string]string{
+	"unsupported_enum": `"dnsMode":{"type":"enum","classification":"known","supported":false,"allowedValues":["auto","tcp","udp","doh"]}`,
+	"known_string":     `"dnsMode":{"type":"string","classification":"known","minLength":1,"maxLength":16}`,
+	"boolean":          `"dnsMode":{"type":"boolean","classification":"known"}`,
+	"secret_string":    `"dnsMode":{"type":"string","classification":"secret","secret":true}`,
+}
+
+// TestAbsentSelector_IneligibleDeclNoAutoController: mode ABSENT under each
+// ineligible declaration, with an ACTIVE ELIGIBLE dnsServer and dnsServerUrl.
+// None may emit dependencyIncompatible/dependencyMissing from the mode rules —
+// an ineligible declaration cannot become an Auto controller by absence.
+func TestAbsentSelector_IneligibleDeclNoAutoController(t *testing.T) {
+	resolvers := `"dnsServer":{"type":"string","classification":"known","minLength":1,"maxLength":253},` +
+		`"dnsServerUrl":{"type":"string","classification":"known","minLength":1,"maxLength":2048}`
+	for name, decl := range ineligibleModeDecls {
+		p := partialProfile(t, decl+`,`+resolvers)
+		// Mode ABSENT; both eligible resolvers ACTIVE and valid.
+		res := Validate(p, Input{Protocol: "probe", Active: map[string]any{
+			"dnsServer":    "resolver.example",
+			"dnsServerUrl": "https://resolver.example/dns-query",
+		}})
+		if hasIssueCode(res, IssueDependencyIncompatible) {
+			t.Fatalf("%s: absent mode under ineligible decl must not emit dependencyIncompatible (wrong Auto controller): %+v", name, res.Issues)
+		}
+		if hasIssueCode(res, IssueDependencyMissing) {
+			t.Fatalf("%s: absent mode under ineligible decl must not emit dependencyMissing: %+v", name, res.Issues)
+		}
+	}
+}
+
+// TestAbsentSelector_EligibleEnumAbsentStillAutoConflicts: positive control.
+// An ELIGIBLE enum selector that is ABSENT uses the effective Auto default, so
+// an ACTIVE ELIGIBLE resolver IS incompatible. Absent + no resolver stays valid
+// with no default insertion.
+func TestAbsentSelector_EligibleEnumAbsentStillAutoConflicts(t *testing.T) {
+	resolvers := `"dnsServer":{"type":"string","classification":"known","minLength":1,"maxLength":253},` +
+		`"dnsServerUrl":{"type":"string","classification":"known","minLength":1,"maxLength":2048}`
+	p := partialProfile(t,
+		`"dnsMode":{"type":"enum","classification":"known","allowedValues":["auto","tcp","udp","doh"]},`+resolvers)
+	// Absent + active dnsServer -> incompatible (Auto rejects active resolver).
+	res := Validate(p, Input{Protocol: "probe", Active: map[string]any{"dnsServer": "resolver.example"}})
+	if !hasIssueOnField(res, IssueDependencyIncompatible, "dnsServer") {
+		t.Fatalf("eligible enum absent + active dnsServer: want dependencyIncompatible:dnsServer, got %+v", res.Issues)
+	}
+	// Absent + active dnsServerUrl -> incompatible.
+	res = Validate(p, Input{Protocol: "probe", Active: map[string]any{"dnsServerUrl": "https://resolver.example/dns-query"}})
+	if !hasIssueOnField(res, IssueDependencyIncompatible, "dnsServerUrl") {
+		t.Fatalf("eligible enum absent + active dnsServerUrl: want dependencyIncompatible:dnsServerUrl, got %+v", res.Issues)
+	}
+	// Absent + no resolver -> valid, no default insertion.
+	res = Validate(p, Input{Protocol: "probe", Active: map[string]any{}})
+	if res.Status != Valid {
+		t.Fatalf("eligible enum absent + no resolver: want valid (no default insertion), got %+v", res.Issues)
+	}
+}
+
+// TestAbsentSelector_PresentIneligibleStaysSilent: present ineligible/invalid
+// selector controls remain silent for mode rules (preserved from R2), even
+// with an active eligible resolver — no wrong Auto, no demand.
+func TestAbsentSelector_PresentIneligibleStaysSilent(t *testing.T) {
+	resolvers := `"dnsServer":{"type":"string","classification":"known","minLength":1,"maxLength":253},` +
+		`"dnsServerUrl":{"type":"string","classification":"known","minLength":1,"maxLength":2048}`
+	for name, decl := range ineligibleModeDecls {
+		p := partialProfile(t, decl+`,`+resolvers)
+		// Present value under an ineligible declaration + active resolver.
+		res := Validate(p, Input{Protocol: "probe", Active: map[string]any{
+			"dnsMode":      "tcp",
+			"dnsServer":    "resolver.example",
+			"dnsServerUrl": "https://resolver.example/dns-query",
+		}})
+		if hasIssueCode(res, IssueDependencyIncompatible) || hasIssueCode(res, IssueDependencyMissing) {
+			t.Fatalf("%s: present ineligible selector + active resolver must not drive mode rules: %+v", name, res.Issues)
+		}
+	}
+	// Present INVALID enum value (out of subset) + active resolver -> no demand.
+	p := partialProfile(t,
+		`"dnsMode":{"type":"enum","classification":"known","allowedValues":["auto","doh"]},`+resolvers)
+	res := Validate(p, Input{Protocol: "probe", Active: map[string]any{
+		"dnsMode":   "tcp",
+		"dnsServer": "resolver.example",
+	}})
+	if hasIssueCode(res, IssueDependencyIncompatible) || hasIssueCode(res, IssueDependencyMissing) {
+		t.Fatalf("present out-of-subset selector + active resolver must not drive mode rules: %+v", res.Issues)
+	}
+}
+
+// TestAbsentSelector_HEIndependentOfAbsentMode: the independent HE conflict is
+// preserved whether the mode is absent, ineligible, or invalid.
+func TestAbsentSelector_HEIndependentOfAbsentMode(t *testing.T) {
+	resolvers := `"dnsServer":{"type":"string","classification":"known","minLength":1,"maxLength":253}`
+	heStrategy := `"happyEyeballs":{"type":"boolean","classification":"known"},` +
+		`"dnsStrategy":{"type":"enum","classification":"known","allowedValues":["auto","prefer_ipv4"]}`
+	// Ineligible (unsupported enum) mode ABSENT + HE + manual strategy -> conflict.
+	p := partialProfile(t,
+		`"dnsMode":{"type":"enum","classification":"known","supported":false,"allowedValues":["auto","tcp","udp","doh"]},`+heStrategy+`,`+resolvers)
+	res := Validate(p, Input{Protocol: "probe", Active: map[string]any{
+		"happyEyeballs": true, "dnsStrategy": "prefer_ipv4", "dnsServer": "resolver.example",
+	}})
+	if !hasIssueOnField(res, IssueDependencyIncompatible, "dnsStrategy") {
+		t.Fatalf("HE conflict must survive absent-ineligible mode: want dependencyIncompatible:dnsStrategy, got %+v", res.Issues)
+	}
+}

@@ -55,14 +55,18 @@ func dnsModeState(declared map[string]capability.Field, active map[string]any) (
 	if !isDecl {
 		return "auto", false // no selector declared: no mode-dependent rules
 	}
-	raw, present := active["dnsMode"]
-	if !present {
-		return "auto", true // absent -> effective auto default (not inserted)
-	}
-	// A non-enum declaration is not a selector; the ordinary validator already
-	// reported the value's own type finding. Do not act as an enum selector.
+	// Eligibility is decided BEFORE the absent/default branch: only an ELIGIBLE
+	// enum declaration may act as a selector at all. An ineligible declaration
+	// (unsupported, secret, or non-enum boolean/string) must NOT become an Auto
+	// controller merely because the value is absent — the ordinary validator
+	// reports the field's own finding only when a value is submitted, and the
+	// mode-dependent resolver rules stay silent either way.
 	if f.Type != "enum" || !dnsEligible(f, "enum") {
 		return "", false
+	}
+	raw, present := active["dnsMode"]
+	if !present {
+		return "auto", true // ELIGIBLE selector absent -> effective auto default
 	}
 	s, isStr := raw.(string)
 	if !isStr {
@@ -70,7 +74,8 @@ func dnsModeState(declared map[string]capability.Field, active map[string]any) (
 	}
 	// Membership by the field's ACTUAL AllowedValues (same authority valueOK
 	// uses); a value outside the declared subset is unusable for the resolver
-	// rules and already produced enumViolation per-field.
+	// rules and already produced enumViolation per-field. A present invalid/null
+	// value is NOT defaulted to Auto.
 	for _, a := range f.AllowedValues {
 		if s == a {
 			return s, true

@@ -336,19 +336,30 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 		if err := json.Unmarshal(labelRaw, &labelStr); err != nil {
 			return NodeOutcome{}, errNodeComponent("label") // non-string
 		}
-		// Strict raw UTF-8 scalar validity on the DECODED inner string bytes:
-		// Go's JSON decoder lossily replaces invalid UTF-8 (including the CESU-8-
-		// style surrogate encodings) with U+FFFD, so the decoded string alone can
-		// look valid. Validating the inner bytes catches the original invalid
-		// sequences and refuses them — a typed label is never silently coerced.
-		// A legal U+FFFD literal, an escaped \ufffd, and a valid surrogate PAIR (a
-		// real scalar such as U+10000) all remain acceptable: this is a scalar-
-		// validity check on the wire bytes, not a blanket replacement-char ban.
+		// Strict PRE-DECODE string-content validity, BEFORE the lossy Go decode.
+		//
+		// (1) Raw UTF-8 scalar validity on the wire bytes: Go's JSON decoder
+		// lossily replaces invalid UTF-8 (including the CESU-8-style surrogate
+		// encodings) with U+FFFD, so the decoded string alone can look valid.
+		// Validating the inner bytes catches the original invalid sequences and
+		// refuses them — a typed label is never silently coerced. A legal U+FFFD
+		// literal and a valid surrogate PAIR (a real scalar such as U+10000) are
+		// both ordinary valid-UTF-8 here and remain acceptable.
 		inner := labelRaw
 		if len(inner) >= 2 && inner[0] == '"' && inner[len(inner)-1] == '"' {
 			inner = inner[1 : len(inner)-1]
 		}
 		if !utf8.Valid(inner) {
+			return NodeOutcome{}, errNodeComponent("label")
+		}
+		// (2) Raw JSON STRING-ESCAPE scan on the same wire bytes. ASCII escape
+		// sequences such as \ud800 are VALID UTF-8 bytes but encode an UNPAIRED
+		// UTF-16 surrogate — not a valid Unicode scalar — and the Go decoder
+		// would lossily map them to U+FFFD. This smallest store-private scan
+		// (scoped ONLY to the typed label component; it does NOT expand jsonscan
+		// or touch any other path) enforces surrogate pairing and well-formed
+		// escapes before the lossy decode, and catches raw control bytes.
+		if !validJSONStringContent(string(inner)) {
 			return NodeOutcome{}, errNodeComponent("label")
 		}
 		if utf8.RuneCountInString(labelStr) > 256 {
@@ -951,6 +962,101 @@ func buildDerivedDoc(ar nodes.AdapterResult, prof *capability.Profile, presence 
 		return `{"version":1,"protocol":"","active":{},"inactive":{}}`
 	}
 	return string(b)
+}
+
+// validJSONStringContent reports whether s — the QUOTED-STripped inner content
+// of a JSON string — is well-formed string content on the wire bytes. It is
+// the store-private scalar-integrity scan scoped ONLY to the typed label
+// component; it does NOT expand the dependency-neutral jsonscan package or
+// affect any other path.
+//
+// It enforces:
+//   - every `\` introduces a RECOGNIZED two-char escape (" \ / b f n r t) or a
+//     well-formed \uXXXX escape (exactly four hex digits);
+//   - every UTF-16 surrogate escape is PART of a valid high+low PAIR (an
+//     unpaired or wrongly-ordered surrogate encodes an invalid scalar, which
+//     the Go decoder would otherwise lossily map to U+FFFD and silently
+//     accept as valid);
+//   - no raw control byte (0x00..0x1F) appears unescaped.
+//
+// A legal literal/escaped U+FFFD (\ufffd), an ordinary \ud83d\ude00 pair,
+// the escaped-backslash form \\ud800 (backslash + "uD800", NOT a surrogate
+// escape), and ordinary BMP content are all valid and accepted.
+func validJSONStringContent(s string) bool {
+	i := 0
+	n := len(s)
+	for i < n {
+		c := s[i]
+		if c < 0x20 {
+			return false // raw control byte must be escaped
+		}
+		if c == '\\' {
+			i++
+			if i >= n {
+				return false // trailing backslash
+			}
+			e := s[i]
+			switch e {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				i++
+			case 'u':
+				if i+5 > n {
+					return false // \\u needs exactly 4 hex digits after 'u'
+				}
+				v, hok := hexQuad(s[i+1 : i+5]) // s[i]=='u'; its 4 digits are s[i+1..i+4]
+				if !hok {
+					return false
+				}
+				if v >= 0xD800 && v <= 0xDBFF { // high surrogate: needs a low half
+					// A following low escape \\uXXXX occupies s[i+5..i+10]; the last
+					// index consumed is i+10, which must be within s (i+10 <= n-1).
+					if i+10 >= n || s[i+5] != '\\' || s[i+6] != 'u' {
+						return false // unpaired high surrogate
+					}
+					lv, lok := hexQuad(s[i+7 : i+11]) // low digits s[i+7..i+10]
+					if !lok || lv < 0xDC00 || lv > 0xDFFF {
+						return false // high not followed by a low surrogate
+					}
+					i += 10 // consume both \\uXXXX escapes (i was at 'u' of high)
+					continue
+				}
+				if v >= 0xDC00 && v <= 0xDFFF {
+					return false // low surrogate without a preceding high
+				}
+				i += 5 // consume \\uXXXX (i was at 'u'; +1 backslash +4 digits)
+			default:
+				return false // unrecognized escape
+			}
+			continue
+		}
+		i++
+	}
+	return true
+}
+
+// hexQuad parses exactly four hex digits into a value; hok=false on a non-hex
+// digit. Each digit is folded into the low nibble of v (shift-then-or), so all
+// four nibbles are preserved.
+func hexQuad(q string) (v int, hok bool) {
+	if len(q) != 4 {
+		return 0, false
+	}
+	for i := 0; i < 4; i++ {
+		d := q[i]
+		var nib int
+		switch {
+		case d >= '0' && d <= '9':
+			nib = int(d - '0')
+		case d >= 'a' && d <= 'f':
+			nib = int(d-'a') + 10
+		case d >= 'A' && d <= 'F':
+			nib = int(d-'A') + 10
+		default:
+			return 0, false
+		}
+		v = v<<4 | nib
+	}
+	return v, true
 }
 
 // decodeProtocolString extracts the protocol string from a canonical envelope

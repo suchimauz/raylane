@@ -143,17 +143,23 @@ func TestCorrect_DuplicateCanonicalFieldsEmptyDerived(t *testing.T) {
 // A label with invalid raw UTF-8 or an UNPAIRED Unicode surrogate is refused
 // (zero writes). Legal U+FFFD, the escaped \ufffd, and a valid surrogate PAIR
 // are accepted. Absence / "" / 256 runes stay accepted exactly; null /
-// non-string / >256 stay refused.
+// non-string / >256 stay refused. ASCII JSON \uXXXX escapes are validated
+// for surrogate pairing BEFORE the lossy decode.
 func TestCorrect_LabelStrictUnicode(t *testing.T) {
 	ctx := context.Background()
-	// Invalid UTF-8 (incl. the CESU-8-style surrogate encodings \xed\xa0\x80,
-	// which are NOT valid UTF-8 and decode to U+FFFD) and wrong-order surrogate
-	// halves are refused. A valid surrogate PAIR is a real scalar (U+10000).
+	// Raw invalid UTF-8 (incl. the CESU-8-style surrogate encodings \xed\xa0\x80,
+	// which are NOT valid UTF-8 and decode to U+FFFD) and ASCII \uXXXX escapes
+	// with an UNPAIRED / wrongly-ordered surrogate are refused. A valid surrogate
+	// PAIR escape (\ud83d\ude00) is a real scalar (U+1F600) and is accepted.
 	refuse := map[string][]byte{
-		"invalid-raw-UTF8":     {'"', 0xff, '"'},
-		"cesu8-high-surrogate": {'"', 0xed, 0xa0, 0x80, '"'},                   // invalid UTF-8 (U+D800 enc)
-		"cesu8-low-surrogate":  {'"', 0xed, 0xb0, 0x80, '"'},                   // invalid UTF-8 (U+DC00 enc)
-		"wrong-pair-order":     {'"', 0xed, 0xa0, 0x80, 0xed, 0xa0, 0x81, '"'}, // two highs, no low
+		"invalid-raw-UTF8":       {'"', 0xff, '"'},
+		"cesu8-high-surrogate":   {'"', 0xed, 0xa0, 0x80, '"'},       // invalid UTF-8 (U+D800 enc)
+		"cesu8-low-surrogate":    {'"', 0xed, 0xb0, 0x80, '"'},       // invalid UTF-8 (U+DC00 enc)
+		"escaped-lone-high":      []byte(`"` + `\ud800` + `"`),       // unpaired high surrogate
+		"escaped-lone-low":       []byte(`"` + `\udc00` + `"`),       // unpaired low surrogate
+		"escaped-high-then-high": []byte(`"` + `\ud800\ud801` + `"`), // no low half
+		"escaped-reversed":       []byte(`"` + `\ude00\ud83d` + `"`), // low before high
+		"escaped-high-then-BMP":  []byte(`"` + `\ud800\u0041` + `"`), // high then non-surrogate
 	}
 	for name, lb := range refuse {
 		t.Run("refuse/"+name, func(t *testing.T) {
@@ -177,7 +183,9 @@ func TestCorrect_LabelStrictUnicode(t *testing.T) {
 	accept := map[string][]byte{
 		"u-fffd-literal":       {'"', 0xef, 0xbf, 0xbd, '"'}, // U+FFFD replacement char
 		"escaped-ufffd":        []byte(`"` + `\ufffd` + `"`),
-		"valid-surrogate-pair": {'"', 0xf0, 0x90, 0x80, 0x80, '"'}, // U+10000 (real scalar)
+		"valid-surrogate-pair": []byte(`"` + `\ud83d\ude00` + `"`), // U+1F600 (real scalar via pair)
+		"literal-non-BMP":      {'"', 0xf0, 0x9f, 0x98, 0x80, '"'}, // U+1F600 literal
+		"escaped-backslash":    []byte(`"` + `\\ud800` + `"`),      // backslash + "ud800", NOT a surrogate escape
 		"empty":                []byte(`""`),
 	}
 	for name, lb := range accept {

@@ -129,13 +129,13 @@ func TestScalarEnvelope_Noncanonical(t *testing.T) {
 
 			// (1) The REAL adapter over the original bytes yields a SEMANTIC
 			// noncanonical Invalid (not a syntax refusal, not a lossy Valid).
-			// Raw invalid UTF-8 bytes are SYNTAX-invalid to encoding/json itself
-			// (verified maintained behavior: the decoder refuses a lone raw 0xFF
-			// inside a string), so those payloads legitimately stop at the
-			// syntax gate with ErrMalformedJSON and the store's static
-			// zero-write — the sealed originals are never rewritten, never
-			// lossily stored. ESCAPE-form non-scalars are syntax-VALID and must
-			// reach the semantic malformedEnvelope Invalid draft below.
+			// The raw invalid UTF-8 cases assert the decoder's ACTUAL behavior
+			// (probe-verified): a raw 0xFF byte inside a string is SYNTAX-invalid
+			// to encoding/json, so those payloads legitimately stop at the syntax
+			// gate with ErrMalformedJSON and the store's static zero-write — the
+			// sealed originals are never rewritten, never lossily stored.
+			// Escape-form non-scalars are syntax-VALID and MUST reach the
+			// semantic malformedEnvelope Invalid draft below.
 			rawSyntax := rawInvalidUTF8Rejected(env)
 			authority, err := store.OpenNodeAuthority(profileBytes(t))
 			if err != nil {

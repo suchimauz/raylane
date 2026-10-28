@@ -318,6 +318,28 @@ func TestScalarEnvelope_LegalControls(t *testing.T) {
 		}
 	})
 
+	// The PROTOCOL scalar guard in decodeProtocolString limits WHICH protocol
+	// value reaches the derived document. The maintained store path cannot
+	// delete that guard alone and still fail: the unrelated unknown-NAME gate
+	// (prof.HasProtocol) refuses the lossily decoded `vl\ud800ess` before the
+	// value is used, so no honest single-guard mutation can surface it (both
+	// gate-removal probes confirmed rc=0). The guard's own behavior is
+	// therefore pinned directly at the store package boundary instead.
+	t.Run("protocol-scalar-guard-unit-boundary", func(t *testing.T) {
+		envelope := `{"protocol":"vless","fields":{"active":{"server":"v.example","serverPort":443,"transport":"ws","security":"tls"},"inactive":{},"unknown":{}}}`
+		if p, ok := store.DecodeProtocolStringForTests([]byte(envelope)); !ok || p != "vless" {
+			t.Fatalf("known scalar protocol must be retained, got %q ok=%v", p, ok)
+		}
+		bad := `{"protocol":"vl\ud800ess","fields":{"active":{"server":"v.example","serverPort":443,"transport":"ws","security":"tls"},"inactive":{},"unknown":{}}}`
+		if p, ok := store.DecodeProtocolStringForTests([]byte(bad)); ok {
+			t.Fatalf("non-scalar protocol must never be retained, got %q", p)
+		}
+		nested := `{"protocol":"vless","fields":{"active":{"server":"a\ud800b","serverPort":443},"inactive":{},"unknown":{}}}`
+		if p, ok := store.DecodeProtocolStringForTests([]byte(nested)); !ok || p != "vless" {
+			t.Fatalf("known protocol on a fields-non-scalar envelope is independently scalar-safe, got %q ok=%v", p, ok)
+		}
+	})
+
 	// Legal unknown bucket (undeclared name) still quarantine-Invalid (NOT
 	// malformedEnvelope) when everything is scalar.
 	t.Run("unknown-bucket-quarantine-not-malformed", func(t *testing.T) {

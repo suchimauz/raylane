@@ -69,6 +69,15 @@ func OpenPreservationForTests(ctx context.Context, s *Store, keyPath, nodeID str
 // the product API surface; callers must not issue schema changes through it.
 func (s *Store) DB() *sql.DB { return s.db }
 
+// DecodeProtocolStringForTests is a TEST-ONLY view of the store-private
+// protocol retention guard in decodeProtocolString: it reports whether the
+// envelope's own protocol token is a scalar (valid UTF-8, well-formed escapes,
+// no unpaired surrogate) and returns the retained value. Production builds
+// exclude it; the maintained scalar-integrity regression uses it to pin the
+// guard itself, which the end-to-end store path cannot exercise in isolation
+// (the unrelated prof.HasProtocol unknown-name gate masks guard removal).
+func DecodeProtocolStringForTests(raw []byte) (string, bool) { return decodeProtocolString(raw) }
+
 // ConnectionInvariants reports the per-connection pragmas actually observed on
 // one live pool connection. Tests call it repeatedly to prove foreign_keys and
 // WAL hold on more than one connection, not just the first opened.

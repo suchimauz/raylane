@@ -103,12 +103,13 @@ func (p *Profile) ProjectNodeFields(protocol string, fields map[string]any, pres
 		case "known":
 			if f.Type == "object" {
 				// Documented fail-closed boundary: no nested leaf allowlist, so no
-				// private content is copied. A REAL submitted object (nonempty map)
-				// and a persisted FIXED name-only marker (empty {}) are both reported
-				// as name-only Unsupported — the historical fact that an EXISTING
-				// active known object was present, never a value. A nil/absent object
-				// (no content and no marker) surfaces nothing.
-				if m, isObj := val.(map[string]any); isObj && (len(m) > 0 || inactive[name]) {
+				// private content is copied. A PRESENT declared known-object field
+				// (any submitted value — {}, null, string, [], or a real object)
+				// yields exactly one name-only Unsupported fact: the historical
+				// truth that the field was present under its own bucket, never a
+				// value and never an assertion that it was a valid object. An
+				// ABSENT object key surfaces nothing.
+				if _, present := fields[name]; present {
 					out.Unsupported = append(out.Unsupported, name)
 				}
 				continue

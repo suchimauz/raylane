@@ -14,6 +14,7 @@ import (
 	"github.com/suchimauz/raylane/internal/capability"
 	"github.com/suchimauz/raylane/internal/domain"
 	"github.com/suchimauz/raylane/internal/domain/nodes"
+	"github.com/suchimauz/raylane/internal/jsonscan"
 )
 
 // This file composes the trusted internal atomic managed-node CREATE and the
@@ -280,9 +281,19 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 			return NodeOutcome{}, err
 		}
 	}
-	// The protocol must be a JSON string; the fields must be a JSON object.
+	// The protocol must be an EXPLICIT JSON string: a JSON null (decoded by the
+	// generic unmarshal into the empty string) or any non-string is a static
+	// zero-write component refusal, never coerced into an empty-string protocol
+	// that would SAVE. A legal unknown / nonempty JSON STRING still flows to the
+	// faithful validator (Invalid SAVE), never this shape gate.
+	var protocolRaw json.RawMessage
+	if err := json.Unmarshal(protocolBytes, &protocolRaw); err != nil ||
+		len(bytes.TrimSpace(protocolRaw)) == 0 ||
+		bytes.Equal(bytes.TrimSpace(protocolRaw), []byte("null")) {
+		return NodeOutcome{}, errNodeComponent("protocol")
+	}
 	var protocolStr string
-	if err := json.Unmarshal(protocolBytes, &protocolStr); err != nil {
+	if err := json.Unmarshal(protocolRaw, &protocolStr); err != nil {
 		return NodeOutcome{}, errNodeComponent("protocol")
 	}
 	// The fields component must be exactly one complete JSON OBJECT, gated
@@ -324,6 +335,21 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 		var labelStr string
 		if err := json.Unmarshal(labelRaw, &labelStr); err != nil {
 			return NodeOutcome{}, errNodeComponent("label") // non-string
+		}
+		// Strict raw UTF-8 scalar validity on the DECODED inner string bytes:
+		// Go's JSON decoder lossily replaces invalid UTF-8 (including the CESU-8-
+		// style surrogate encodings) with U+FFFD, so the decoded string alone can
+		// look valid. Validating the inner bytes catches the original invalid
+		// sequences and refuses them — a typed label is never silently coerced.
+		// A legal U+FFFD literal, an escaped \ufffd, and a valid surrogate PAIR (a
+		// real scalar such as U+10000) all remain acceptable: this is a scalar-
+		// validity check on the wire bytes, not a blanket replacement-char ban.
+		inner := labelRaw
+		if len(inner) >= 2 && inner[0] == '"' && inner[len(inner)-1] == '"' {
+			inner = inner[1 : len(inner)-1]
+		}
+		if !utf8.Valid(inner) {
+			return NodeOutcome{}, errNodeComponent("label")
 		}
 		if utf8.RuneCountInString(labelStr) > 256 {
 			return NodeOutcome{}, errNodeComponent("label")
@@ -751,13 +777,6 @@ func safeProjectionDecoded(prof *capability.Profile, derived derivedDoc, protoco
 	inactive := map[string]bool{}
 	for k, v := range derived.active {
 		merged[k] = v
-		// A persisted FIXED name-only object marker (empty {}) in the ACTIVE
-		// derived map is flagged so the projector surfaces it as name-only
-		// Unsupported (an EXISTING active known object), never promoted and
-		// never a value.
-		if m, isObj := v.(map[string]any); isObj && len(m) == 0 {
-			inactive[k] = true
-		}
 	}
 	for k, v := range derived.inactive {
 		if !allow[k] {
@@ -859,34 +878,65 @@ func buildDerivedDoc(ar nodes.AdapterResult, prof *capability.Profile, presence 
 	if ar.Validation == domain.ValidationValid || ar.Validation == domain.ValidationInvalid {
 		if p, ok := decodeProtocolString(ar.Document.Raw); ok && prof.HasProtocol(p) {
 			protocol = p
-			decActive, decInactive := canonicalDerivedBuckets(ar.Document.Raw)
-			// Non-mutating union: every decoded active/inactive value is offered to
-			// the projector, keyed by its own bucket so placement is authority-
-			// driven (never promoted across buckets).
-			union := make(map[string]any, len(decActive)+len(decInactive))
-			for name, val := range decActive {
-				union[name] = val
-			}
-			inactiveSet := make(map[string]bool, len(decInactive))
-			for name, val := range decInactive {
-				union[name] = val
-				inactiveSet[name] = true
-			}
-			proj, err := prof.ProjectNodeFields(protocol, union, presence, inactiveSet)
-			if err == nil {
-				active, inactive = proj.Active, proj.Inactive
-				// An EXISTING ACTIVE known object renders as a FIXED name-only marker
-				// ({}), never its private leaves and never promoted from inactive.
-				// The marker keeps the historical fact that the object was present
-				// without persisting any nested content in plaintext.
-				for _, name := range proj.Unsupported {
-					if _, wasActive := decActive[name]; wasActive {
-						active[name] = map[string]any{}
+			decActive, decInactive, decUnknown, ok := canonicalDerivedBuckets(ar.Document.Raw)
+			if ok {
+				// Cross-bucket collision: a name present in MORE THAN ONE of the
+				// active/inactive/unknown buckets is ambiguous — its value must
+				// NEVER be laundered into derived plaintext. Every colliding name
+				// is excluded from BOTH derived maps; UNRELATED safe known fields
+				// are preserved.
+				seen := map[string]int{}
+				for name := range decActive {
+					seen[name]++
+				}
+				for name := range decInactive {
+					seen[name]++
+				}
+				for name := range decUnknown {
+					seen[name]++
+				}
+				collide := map[string]bool{}
+				for name, n := range seen {
+					if n > 1 {
+						collide[name] = true
 					}
 				}
+				// Non-mutating union of the UNAMBIGUOUS active/inactive values, keyed
+				// by bucket so placement is authority-driven (never promoted across
+				// buckets).
+				union := make(map[string]any, len(decActive)+len(decInactive))
+				for name, val := range decActive {
+					if collide[name] {
+						continue
+					}
+					union[name] = val
+				}
+				inactiveSet := make(map[string]bool, len(decInactive))
+				for name, val := range decInactive {
+					if collide[name] {
+						continue
+					}
+					union[name] = val
+					inactiveSet[name] = true
+				}
+				proj, err := prof.ProjectNodeFields(protocol, union, presence, inactiveSet)
+				if err == nil {
+					active, inactive = proj.Active, proj.Inactive
+					// An EXISTING ACTIVE known object renders as a FIXED name-only marker
+					// ({}), never its private leaves and never promoted from inactive.
+					// The marker keeps the historical fact that the object was present
+					// without persisting any nested content in plaintext.
+					for _, name := range proj.Unsupported {
+						if _, wasActive := decActive[name]; wasActive && !collide[name] {
+							active[name] = map[string]any{}
+						}
+					}
+				}
+				// On any projection refusal the safe derived maps stay empty: nothing
+				// unsafe is ever persisted in plaintext.
 			}
-			// On any projection refusal the safe derived maps stay empty: nothing
-			// unsafe is ever persisted in plaintext.
+			// ok == false (duplicate canonical keys / ambiguous): derived maps stay
+			// EMPTY so last-key-wins never launders ambiguity into safe content.
 		}
 	}
 	doc := struct {
@@ -923,38 +973,64 @@ func decodeProtocolString(raw []byte) (string, bool) {
 	return p, true
 }
 
-// canonicalDerivedBuckets decodes the canonical active/inactive field maps for
-// a known-protocol accepted envelope, returning empty maps when the envelope
-// is not cleanly decodable (ambiguity is never laundered into safe content).
-func canonicalDerivedBuckets(raw []byte) (map[string]any, map[string]any) {
+// canonicalDerivedBuckets decodes the canonical active/inactive/unknown field
+// maps for a known-protocol accepted envelope. It returns ok=false (so the
+// caller persists EMPTY derived maps) whenever the fields envelope is not
+// cleanly, unambiguously decodable: a duplicate canonical key at the fields
+// level or inside the active/inactive/unknown objects (last-key-wins would
+// launder ambiguity), a wrong bucket count, or a non-object bucket. The
+// exact original bytes stay sealed in the preservation container either way.
+func canonicalDerivedBuckets(raw []byte) (active, inactive, unknown map[string]any, ok bool) {
 	empty := map[string]any{}
 	var top map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&top); err != nil {
-		return empty, empty
+		return empty, empty, empty, false
 	}
-	fRaw, ok := top["fields"]
-	if !ok {
-		return empty, empty
+	fRaw, has := top["fields"]
+	if !has {
+		return empty, empty, empty, false
+	}
+	// A duplicate canonical key at the FIELDS level (e.g. two "active"
+	// buckets) is non-canonical: last-key-wins would launder ambiguity, so the
+	// whole decode is rejected and the caller persists empty derived maps.
+	if err := jsonscan.FullValue(fRaw); err != nil {
+		return empty, empty, empty, false
 	}
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(fRaw, &fields); err != nil || len(fields) != 3 {
-		return empty, empty
+	fdec := json.NewDecoder(bytes.NewReader(fRaw))
+	if err := fdec.Decode(&fields); err != nil || fields == nil {
+		return empty, empty, empty, false
+	}
+	if fdec.More() {
+		return empty, empty, empty, false // trailing content inside fields
+	}
+	if len(fields) != 3 {
+		return empty, empty, empty, false
 	}
 	a, aok := decodeObjectLoose(fields["active"])
 	i, iok := decodeObjectLoose(fields["inactive"])
-	if !aok || !iok {
-		return empty, empty
+	u, uok := decodeObjectLoose(fields["unknown"])
+	if !aok || !iok || !uok {
+		return empty, empty, empty, false
 	}
-	return a, i
+	return a, i, u, true
 }
 
 // decodeObjectLoose decodes a JSON object member into a map (UseNumber);
 // returns ok=false for absent/null/non-object members.
+// decodeObjectLoose decodes a JSON object member into a map (UseNumber). It
+// returns ok=false for absent/null/non-object members AND for an object that
+// carries a DUPLICATE key anywhere inside it (a duplicate means last-key-wins
+// would launder ambiguity, so the whole decode is rejected and the caller
+// persists empty derived maps instead).
 func decodeObjectLoose(raw json.RawMessage) (map[string]any, bool) {
 	if len(raw) == 0 {
 		return nil, false
+	}
+	if err := jsonscan.FullValue(raw); err != nil {
+		return nil, false // duplicate key (or unscalable content): never laundered
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()

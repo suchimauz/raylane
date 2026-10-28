@@ -134,8 +134,14 @@ type NodeCreateInput struct {
 // protocol input, ref, purpose, private error, ciphertext or plaintext field
 // is present in the result.
 type NodeOutcome struct {
-	NodeID         string
-	Revision       int64
+	NodeID   string
+	Revision int64
+	// Protocol is the protocol STRING exactly as the store decoded it for this
+	// outcome: the creation input protocol on a write, and the persisted
+	// derived-document protocol on a safe read (empty when the authority did
+	// not declare it — the raw protocol never persists outside ciphertext).
+	// Never an echo of arbitrary caller bytes on the read path.
+	Protocol       string
 	Validation     nodes.Result
 	SecretPresence map[string]bool
 	Projection     capability.ProjectedNode
@@ -566,9 +572,14 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 	if err != nil {
 		return NodeOutcome{}, err
 	}
+	// The creation outcome reports the INPUT protocol string (a plain decode
+	// of the explicit scalar component the writer already gated); the READ
+	// path derives it from the persisted derived document instead.
+	outProtocol := string(protocolLiteral(protocolBytes))
 	return NodeOutcome{
 		NodeID:         nodeID,
 		Revision:       1,
+		Protocol:       outProtocol,
 		Validation:     ar.Result,
 		SecretPresence: copyBoolMap(presence),
 		Projection:     projection,
@@ -577,8 +588,17 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 
 // errNodeComponent returns a static, value-free refusal for an invalid typed
 // outer component (protocol/fields/label shape).
+// ErrNodeComponent is the ONE exported static sentinel for a malformed TYPED
+// node component (a non-string protocol, a non-object fields envelope, a
+// non-string/overlong label). It wraps the same fixed, component-name-only
+// static error the store has always returned — no driver text, no input
+// bytes, no value — so the trusted HTTP composition classifies a typed refusal
+// with errors.Is INSTEAD of any string matching. Every other store failure
+// keeps its own category and maps to a static 500 upstream.
+var ErrNodeComponent = errors.New("store: node typed component refusal")
+
 func errNodeComponent(which string) error {
-	return fmt.Errorf("store: invalid node %s component", which)
+	return fmt.Errorf("store: invalid node %s component: %w", which, ErrNodeComponent)
 }
 
 // buildPreservationPlain assembles the single original-components container:
@@ -744,6 +764,7 @@ func (r *NodeReader) readNodeSafe(ctx context.Context, id string) (NodeOutcome, 
 	return NodeOutcome{
 		NodeID:         id,
 		Revision:       revision,
+		Protocol:       protocol,
 		Validation:     res,
 		SecretPresence: copyBoolMap(presence),
 		Projection:     projection,
@@ -1073,6 +1094,17 @@ func stringScalarJSON(raw json.RawMessage) bool {
 
 // decodeProtocolString extracts the protocol string from a canonical envelope
 // when it is exactly present; returns ok=false otherwise (never an echo).
+// protocolLiteral decodes the writer-gated protocol component (exactly one
+// JSON string scalar, already validated upstream) into its string value.
+// It never revalidates: an undecodable input yields the empty string.
+func protocolLiteral(raw []byte) string {
+	var p string
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return ""
+	}
+	return p
+}
+
 func decodeProtocolString(raw []byte) (string, bool) {
 	var top map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(raw))

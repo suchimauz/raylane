@@ -1045,6 +1045,7 @@ func copyModuleForBundleTest(t *testing.T) string {
 	copyFile("go.mod", 0o644)
 	copyFile("go.sum", 0o644)
 	copyDir("cmd")
+	copyDir("contracts")
 	copyDir("internal")
 	copyFile("web/embed.go", 0o644)
 	// Fresh empty dist for the caller to seed (never copy the production dist).

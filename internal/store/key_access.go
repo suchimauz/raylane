@@ -29,25 +29,43 @@ type KeyStore struct {
 
 // NewKeyStore opens the master key at an absolute, cleaned path and
 // establishes the full trust chain strictly descriptor-relatively (see
-// openTrustedKeyChain). filepath.Clean never dereferences symlinks, so
-// requiring the already-cleaned canonical spelling rejects ".", "..", "//"
-// and trailing-slash trickery before any syscall; every remaining literal
-// component is then opened no-follow regardless of what it points at.
+// openTrustedKeyChain). The PATH SHAPE rules live in exactly ONE place —
+// ValidateKeyPathShape, which NewKeyStore calls first — so any operator-facing
+// preflight can validate the identical shape with zero filesystem IO. After
+// Clean never dereferences symlinks, requiring the already-cleaned canonical
+// spelling rejects ".", "..", "//" and trailing-slash trickery before any
+// syscall; every remaining literal component is then opened no-follow
+// regardless of what it points at.
 func NewKeyStore(keyPath string) (*KeyStore, error) {
+	rel, err := ValidateKeyPathShape(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	return openTrustedKeyChain(rel)
+}
+
+// ValidateKeyPathShape applies the EXACT pure path-shape rules NewKeyStore
+// applies before its first syscall: linux-only, absolute, already-cleaned
+// (canonical spelling), not root, and no empty/"."/".." component. It opens
+// NOTHING and states nothing about existence, ownership or mode — those remain
+// the trust-chain checks of openTrustedKeyChain. The returned rel is the
+// slash-escaped root-relative path used by the chain walker. The error is the
+// same fixed secret-free ErrKeyUnavailable as every other key rejection.
+func ValidateKeyPathShape(keyPath string) (rel string, err error) {
 	if !filepath.IsAbs(keyPath) || runtime.GOOS != "linux" {
-		return nil, ErrKeyUnavailable
+		return "", ErrKeyUnavailable
 	}
 	clean := filepath.Clean(keyPath)
 	if clean != keyPath || clean == "/" {
-		return nil, ErrKeyUnavailable
+		return "", ErrKeyUnavailable
 	}
-	rel := strings.TrimPrefix(clean, "/")
+	rel = strings.TrimPrefix(clean, "/")
 	for _, c := range strings.Split(rel, "/") {
 		if c == "" || c == "." || c == ".." {
-			return nil, ErrKeyUnavailable
+			return "", ErrKeyUnavailable
 		}
 	}
-	return openTrustedKeyChain(rel)
+	return rel, nil
 }
 
 // openTrustedKeyChain resolves a CLEANED, escape-free, slash-separated

@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/suchimauz/raylane/internal/store"
 )
 
 // Configuration validation and runtime tuning constants. The session cookie,
@@ -73,6 +75,14 @@ type Config struct {
 	// UnixSocketDir is the owner-only parent directory (0700) holding the
 	// owner-only local bootstrap socket (0600). The serving process owns it.
 	UnixSocketDir string
+	// NodeKeyPath is the OPTIONAL operator-configured path to the trusted
+	// node master key. Omitted/empty keeps the runtime keyless: the safe
+	// node reader still works and the authenticated node create answers a
+	// static 503 — never a silent downgrade of a NONEMPTY path, which must
+	// open successfully or the process refuses to start. Validate checks the
+	// PATH SHAPE only (the pure rules shared with store.NewKeyStore); the key
+	// itself is opened exactly once at composition, not here.
+	NodeKeyPath string
 }
 
 // Validate reports whether every required field is present, well-formed and
@@ -112,6 +122,15 @@ func (c Config) Validate() error {
 	}
 	if c.UnixSocketDir == "" {
 		return errors.New("authhttp: unix socket directory is required")
+	}
+	// The optional node key path carries SHAPE validation only — a pure
+	// canonical-absolute-nonroot path check with zero filesystem IO, so a
+	// well-shaped path to a missing key validates here and fails (hard,
+	// no downgrade) later at the single composition-time key open.
+	if c.NodeKeyPath != "" {
+		if _, err := store.ValidateKeyPathShape(c.NodeKeyPath); err != nil {
+			return err
+		}
 	}
 	bindAddr, bindPort, err := parseListen(c.ManagementListen)
 	if err != nil {
@@ -266,10 +285,16 @@ func parseTrustedOrigin(origin string) (netip.Addr, uint16, error) {
 	return addr, port, nil
 }
 
-// String returns a redacted description (never a secret) for logs.
+// String returns a redacted description (never a secret) for logs. The node
+// key path is reported only as a set/unset flag — a key location is operator
+// secret-adjacent configuration and is never echoed.
 func (c Config) String() string {
-	return fmt.Sprintf("authhttp.Config{listen=%s origin=%s cert=%s key=%s db=%s sockdir=%s}",
-		c.ManagementListen, c.TrustedOrigin, c.TLSCertPath, c.TLSKeyPath, c.DBPath, c.UnixSocketDir)
+	nodeKey := "unset"
+	if c.NodeKeyPath != "" {
+		nodeKey = "set"
+	}
+	return fmt.Sprintf("authhttp.Config{listen=%s origin=%s cert=%s key=%s db=%s sockdir=%s nodeKey=%s}",
+		c.ManagementListen, c.TrustedOrigin, c.TLSCertPath, c.TLSKeyPath, c.DBPath, c.UnixSocketDir, nodeKey)
 }
 
 // UnixSocketPath returns the path of the owner-only local bootstrap socket

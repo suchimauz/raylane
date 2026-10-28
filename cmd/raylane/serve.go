@@ -69,6 +69,12 @@ type serveConfigJSON struct {
 	SocketDir   string `json:"socketDir"`
 	TLSCertPath string `json:"tlsCert"`
 	TLSKeyPath  string `json:"tlsKey"`
+	// NodeKeyPath is the OPTIONAL operator-configured trusted node master key.
+	// Omitted keeps the runtime keyless (safe reads work; authenticated create
+	// answers a static 503). A NONEMPTY path is validated for shape here and
+	// opened exactly once at server composition — a configured-but-unusable key
+	// is a hard no-downgrade refusal before the LAN listener binds.
+	NodeKeyPath string `json:"nodeKey"`
 }
 
 func runServe(args []string, stdout, stderr io.Writer) int {
@@ -111,6 +117,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		TLSKeyPath:       sc.TLSKeyPath,
 		DBPath:           sc.DBPath,
 		UnixSocketDir:    sc.SocketDir,
+		NodeKeyPath:      sc.NodeKeyPath,
 	}
 	// Validate the strict config BEFORE any certificate or listener work: an
 	// unsafe/wildcard/public/non-HTTPS/mismatched config is refused here.

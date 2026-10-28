@@ -67,6 +67,29 @@ func OpenSecretStore(s *Store, keyPath string) (*SecretStore, error) {
 	return &SecretStore{store: s, keys: ks}, nil
 }
 
+// OpenPreservation reads back the exact original-components plaintext of one
+// node's preservation container. It resolves the node's (ref, purpose) from
+// the owner/link metadata and authenticates the sealed blob with the trusted
+// key, returning the exact bytes the operator submitted. This is the trusted
+// management-side readback used to verify sealed-original preservation over a
+// real process; the keyless safe reader never exposes it.
+func (ss *SecretStore) OpenPreservation(ctx context.Context, nodeID string) ([]byte, error) {
+	var ref, purpose string
+	err := ss.store.db.QueryRowContext(ctx,
+		`SELECT ref, purpose FROM node_preservation WHERE node_id = ?`, nodeID).
+		Scan(&ref, &purpose)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrSealedSecretNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if ref == "" || purpose != nodeID+":"+SentinelPurpose {
+		return nil, fmt.Errorf("%w: malformed preservation binding", ErrSecretAuth)
+	}
+	return ss.Open(ctx, domain.SecretRef(ref), purpose)
+}
+
 // Seal stores plaintext under ref for the given purpose as an authenticated
 // immutable envelope and registers the reference in the existing secret_refs
 // metadata table, all in one transaction: either both rows exist or neither

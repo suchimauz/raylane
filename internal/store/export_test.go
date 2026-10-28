@@ -96,3 +96,18 @@ func ConnectionInvariants(db *sql.DB) (foreignKeysOn, wal bool, err error) {
 	}
 	return foreignKeysOn, mode == "wal", nil
 }
+
+// ReservedSentinel exposes the typed wire sentinel constant to the authhttp
+// composition tests (the value is a static contract constant, not a secret).
+func ReservedSentinel() string { return ReservedSecretSentinelValue }
+
+// OpenNodeAuthorityForTest composes an authority from caller-supplied profile
+// bytes for the trusted composition's foreign-authority tests (test-only file,
+// never production).
+func OpenNodeAuthorityForTest(profile []byte) *NodeAuthority {
+	a, err := OpenNodeAuthority(profile)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}

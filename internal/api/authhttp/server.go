@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/suchimauz/raylane/contracts"
 	"github.com/suchimauz/raylane/internal/api/auth"
 	"github.com/suchimauz/raylane/internal/store"
 )
@@ -44,12 +45,33 @@ type Server struct {
 	sess    *sessionManager
 	limiter *loginLimiter
 	issuer  *bootstrapIssuer
+	node    *nodeAccess
 	now     func() time.Time
+}
+
+// nodeAccess is the PRIVATE managed-node composition (T012): the trusted
+// capability authority, the keyless safe reader, and the keyed atomic writer
+// only when the operator configured a usable node key. Concrete types only —
+// no interface, no callback, no raw store reach; the HTTP handlers call the
+// accepted store methods directly.
+type nodeAccess struct {
+	authority *store.NodeAuthority
+	reader    *store.NodeReader
+	writer    *store.NodeWriter
 }
 
 // NewServer validates cfg and returns a ready Server bound to an already-open
 // store. The store ownership stays with the caller (Close closes the HTTP
 // listeners, not the store).
+//
+// The managed-node composition happens here, after config and nil-store
+// checks: the ONE compiled capability profile opens the authority, the keyless
+// safe reader always composes over the SAME store, and the keyed writer
+// composes only when Config.NodeKeyPath is set — opening the trusted key
+// EXACTLY ONCE here. A configured-but-unusable key is a HARD construction
+// failure (never a silent keyless downgrade): trust/IO failures surface the
+// store's static secret-free ErrKeyUnavailable category and the process
+// refuses to start before the LAN listener ever binds.
 func NewServer(cfg Config, st *store.Store) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -69,6 +91,30 @@ func NewServer(cfg Config, st *store.Store) (*Server, error) {
 	s.sess = newSessionManagerAt(clock)
 	s.limiter = newLoginLimiterAt(clock)
 	s.issuer = newBootstrapIssuerAt(clock)
+	// Managed-node composition over the compiled authority (exact bytes, once).
+	authority, err := store.OpenNodeAuthority(contracts.ProfileBytes())
+	if err != nil {
+		return nil, fmt.Errorf("authhttp: node authority: %w", err)
+	}
+	reader, err := store.OpenNodeReader(st, authority)
+	if err != nil {
+		return nil, fmt.Errorf("authhttp: node reader: %w", err)
+	}
+	access := &nodeAccess{authority: authority, reader: reader}
+	if cfg.NodeKeyPath != "" {
+		ss, err := store.OpenSecretStore(st, cfg.NodeKeyPath)
+		if err != nil {
+			// Static secret-free category (wraps ErrKeyUnavailable); the path
+			// is operator configuration and is never echoed by the store.
+			return nil, fmt.Errorf("authhttp: node key: %w", err)
+		}
+		writer, err := store.OpenNodeWriter(st, ss, authority)
+		if err != nil {
+			return nil, fmt.Errorf("authhttp: node writer: %w", err)
+		}
+		access.writer = writer
+	}
+	s.node = access
 	return s, nil
 }
 
@@ -81,6 +127,28 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/state", s.handleState)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
+	// The ONLY managed-node routes on the LAN surface: the exact create path
+	// and the exact single-node read pattern. A collection GET, PATCH, DELETE
+	// or any node subpath is deliberately NOT registered and stays the
+	// generic 403 — no existence oracle, no accidental CRUD exposure.
+	// The create route registers the WHOLE path and checks the method inside
+	// the handler: a wrong method there must answer 405, which only happens if
+	// this path pattern OUTRANKS any more specific one (the /{id} GET pattern)
+	// — a method-scoped "POST /api/v1/nodes" pattern would let PUT match the
+	// generic 403 instead. The node-id pattern below stays method-scoped so a
+	// wrong method on it lands on this catch-all as 405, never 403.
+	mux.HandleFunc("/api/v1/nodes", s.handleNodesCreate)
+	// The pattern carries an explicit GET method: Go's method-segment match
+	// outranks the bare "/api/v1/nodes" prefix registration, so a wrong method
+	// on the node-id path lands here as 405 (never the generic 403), while the
+	// collection path and every deeper subpath stay unregistered 403.
+	// The node-id route registers the bare path (no method segment) and checks
+	// the method inside handleNodesGet: a path+method pattern would make every
+	// OTHER method on that path a ServeMux 405, and the outer CSRF layer
+	// answers unsafe methods BEFORE routing — so a wrong-method POST would be
+	// 403 for a foreign Origin instead of the settled 405. Checking the method
+	// in the handler puts 405 after the settled Origin+session gates.
+	mux.HandleFunc("/api/v1/nodes/{id}", s.handleNodesGet)
 	mux.HandleFunc("/", notFoundHandler)
 	// The LAN handler is the OUTER layer, so it is the one that applies the
 	// no-store response policy for every management response (the local

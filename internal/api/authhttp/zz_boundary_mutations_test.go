@@ -26,7 +26,8 @@ import (
 // the guard itself always discovers via go/build.
 var productionSources = []string{
 	"bootstrap.go", "config.go", "csrf.go", "limiter.go",
-	"requestid.go", "responses.go", "server.go", "session.go",
+	"nodewire_decode.go", "nodes.go", "requestid.go", "responses.go",
+	"server.go", "session.go",
 }
 
 // copyProduction copies the production package into an isolated temp dir and

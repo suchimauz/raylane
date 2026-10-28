@@ -437,6 +437,17 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// no map mutation, no secret read, no new IssueCode.
 	checkStructuredRules(&res, in.Protocol, declared, active)
 
+	// FR-005 / D-1 unsupported-inactive applicability. An ACTUAL INACTIVE key
+	// whose DECLARED field carries HasSupported && !Supported is preserved as a
+	// valid draft but prevents apply (D-1): it reduces Applicable ONLY. No new
+	// IssueCode, no Status Invalid, no readiness aggregate, no shape re-check,
+	// no force-activation/default. Presence (not truthiness) drives the gate, so
+	// an inactive `false` counts; null/wrong-typed values are preserved verbatim.
+	// Never resets Status or a prior ChainCheck/StructuredCheck outcome.
+	if unsupportedInactiveGate(declared, inactive) {
+		res.Applicable = false
+	}
+
 	if len(res.Issues) > 0 {
 		res.Status = Invalid
 		// An invalid node is not applicable as a usable configuration.

@@ -1,5 +1,5 @@
 {
-  "profileVersion": 5,
+  "profileVersion": 6,
   "protocols": {
     "vless": {
       "fields": {
@@ -140,11 +140,17 @@
           "classification": "known",
           "default": false
         },
+        "concurrency": {
+          "type": "integer",
+          "classification": "known",
+          "minimum": -32768,
+          "maximum": 32767
+        },
         "xudpConcurrency": {
           "type": "integer",
           "classification": "known",
-          "minimum": 1,
-          "maximum": 256
+          "minimum": -32768,
+          "maximum": 32767
         },
         "dnsStrategy": {
           "type": "enum",

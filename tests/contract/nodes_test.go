@@ -40,8 +40,8 @@ func loadProfile(t *testing.T) *capability.Profile {
 	if err != nil {
 		t.Fatalf("Parse(authored): %v", err)
 	}
-	if p.Version() != 5 {
-		t.Fatalf("profile version = %d, want 5", p.Version())
+	if p.Version() != 6 {
+		t.Fatalf("profile version = %d, want 6", p.Version())
 	}
 	return p
 }

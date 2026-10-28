@@ -85,13 +85,13 @@ func TestParseTrailingRejectionIsValueFree(t *testing.T) {
 // rejection, unknown-key rejection and errors.Is behavior are untouched by the
 // EOF guard.
 func TestParseExistingContractsUnchanged(t *testing.T) {
-	// Valid authored profile still parses and reports version 2.
+	// Valid authored profile still parses and reports the authored version.
 	p, err := capability.Parse(authoredProfileBytes(t))
 	if err != nil {
 		t.Fatalf("authored profile: %v", err)
 	}
-	if p.Version() != 5 {
-		t.Fatalf("version = %d, want 5", p.Version())
+	if p.Version() != 6 {
+		t.Fatalf("version = %d, want 6", p.Version())
 	}
 	// Duplicate key still rejected.
 	dup := `{"profileVersion":2,"protocols":{"vless":{"fields":{"a":{"type":"string","classification":"known"},"a":{"type":"string","classification":"known"}}}}}`

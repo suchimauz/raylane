@@ -608,6 +608,78 @@ func TestColdReaderNoEchoOnForgedNames(t *testing.T) {
 	}
 }
 
+// C1: a maintained POSITIVE cold-roundtrip oracle across all four protocols,
+// auth and noauth. Each node is created, the Store is closed and reopened,
+// and an OpenNodeReader WITHOUT any SecretStore/key performs ReadNodeSafe.
+// Shared secret names ("username"/"password" are declared secret by BOTH
+// http and socks5) must read for the node's OWN protocol — a same-named
+// secret in another protocol neither invalidates the target nor hides it.
+// Negative controls (wrong-protocol / undeclared / nonsecret / canary) are in
+// B2/B3 and still refuse with static ErrSafeRead and no writes.
+func TestAllProtocolsColdRoundtripSharedSecretNames(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		proto  string
+		fields string
+		secs   []store.NodeSecretUpdate
+		want   []string // secret fields whose current presence must be true
+	}{
+		{"vless-auth", "vless", `{"active":{"server":"v.example","serverPort":443,"transport":"ws","security":"tls"},"inactive":{},"unknown":{}}`,
+			[]store.NodeSecretUpdate{replaceSecret("uuid", "u")}, []string{"uuid"}},
+		{"socks5-noauth", "socks5", `{"active":{"server":"s.example","serverPort":1080,"authMode":"none"},"inactive":{},"unknown":{}}`, nil, nil},
+		{"socks5-auth", "socks5", `{"active":{"server":"s.example","serverPort":1080,"authMode":"userpass"},"inactive":{},"unknown":{}}`,
+			[]store.NodeSecretUpdate{replaceSecret("username", "u"), replaceSecret("password", "p")}, []string{"username", "password"}},
+		{"http-noauth", "http", `{"active":{"server":"h.example","serverPort":8080,"authMode":"none"},"inactive":{},"unknown":{}}`, nil, nil},
+		{"http-auth", "http", `{"active":{"server":"h.example","serverPort":8080,"authMode":"userpass"},"inactive":{},"unknown":{}}`,
+			[]store.NodeSecretUpdate{replaceSecret("username", "u"), replaceSecret("password", "p")}, []string{"username", "password"}},
+		{"wireguard-auth", "wireguard", `{"active":{"endpoint":"w.example","endpointPort":51820,"publicKey":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","localAddresses":["10.0.0.2/32"]},"inactive":{},"unknown":{}}`,
+			[]store.NodeSecretUpdate{replaceSecret("privateKey", "k")}, []string{"privateKey"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _, s, dbPath := newManagedStore(t)
+			out, err := w.CreateNodeAtomic(ctx, store.NodeCreateInput{
+				ProtocolBytes: []byte(`"` + tc.proto + `"`), FieldsBytes: []byte(tc.fields), Secrets: tc.secs})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if out.Validation.Status != nodes.Valid {
+				t.Fatalf("create status=%v want Valid (secrets=%v presence=%v)", out.Validation.Status, out.Validation.Secrets, out.SecretPresence)
+			}
+			for _, name := range tc.want {
+				if !out.SecretPresence[name] {
+					t.Fatalf("create presence[%s] must be true (ownership-backed)", name)
+				}
+			}
+			s.Close()
+			// actual cold reopen: reader shares no open Store, no SecretStore/key.
+			s2, err := store.Open(ctx, dbPath)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer s2.Close()
+			auth, _ := store.OpenNodeAuthority(profileBytes(t))
+			r2, err := store.OpenNodeReader(s2, auth)
+			if err != nil {
+				t.Fatalf("cold reader: %v", err)
+			}
+			got, err := r2.ReadNodeSafe(ctx, out.NodeID)
+			if err != nil {
+				t.Fatalf("cold read %s: %v", tc.proto, err)
+			}
+			if got.Validation.Status != nodes.Valid {
+				t.Fatalf("cold status=%v want Valid", got.Validation.Status)
+			}
+			for _, name := range tc.want {
+				if !got.SecretPresence[name] {
+					t.Fatalf("cold presence[%s] must be true", name)
+				}
+			}
+		})
+	}
+}
+
 // --- helpers ----------------------------------------------------------------
 
 var _ = capability.ProjectedNode{}

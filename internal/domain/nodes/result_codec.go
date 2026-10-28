@@ -195,18 +195,32 @@ func validateSecretNames(profile *capability.Profile, protocol string, names []s
 	return nil
 }
 
-// isDeclaredSecretName reports whether n names a declared authority field
-// classified secret, optionally pinned to the given protocol.
+// isDeclaredSecretName reports whether n names a field the authority declares
+// CLASSIFIED SECRET. When a protocol context is supplied (requireProtocol),
+// it queries THAT protocol's field declaration directly: the name is accepted
+// iff the target protocol declares it as a secret. Another protocol sharing
+// the same field name neither invalidates a legitimate target declaration nor
+// authorizes a missing/nonsecret target field — so a shared name (e.g.
+// "username"/"password" declared secret by BOTH http and socks5) is accepted
+// for the target protocol regardless of declaration order. When unbound (no
+// protocol context, requireProtocol=false), the codec searches the immutable
+// authority for SOME declared-secret field of that name. No value is involved.
 func isDeclaredSecretName(profile *capability.Profile, protocol, n string, requireProtocol bool) bool {
+	if profile == nil {
+		return false
+	}
+	if requireProtocol {
+		// Direct target-protocol lookup: accept iff THIS protocol declares n as
+		// a secret field. A same-named secret in another protocol is irrelevant.
+		f, ok := profile.Field(protocol, n)
+		return ok && f.Classification == "secret"
+	}
+	// Unbound codec context: any protocol's declared-secret field of this name.
 	for _, proto := range profile.Protocols() {
 		f, ok := profile.Field(proto, n)
-		if !ok || f.Classification != "secret" {
-			continue
+		if ok && f.Classification == "secret" {
+			return true
 		}
-		if requireProtocol && proto != protocol {
-			return false // wrong-protocol secret claim
-		}
-		return true
 	}
 	return false
 }

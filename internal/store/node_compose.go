@@ -1059,6 +1059,18 @@ func hexQuad(q string) (v int, hok bool) {
 	return v, true
 }
 
+// stringScalarJSON reports whether a raw JSON string token (quoted) is
+// scalar: valid UTF-8, well-formed escapes, no unpaired surrogate. It is the
+// store-private wrapper around the jsonscan raw-string scalar capability,
+// scoped to the protocol token. Returns false for non-string/non-quoted input.
+func stringScalarJSON(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '"' || t[len(t)-1] != '"' {
+		return false
+	}
+	return jsonscan.StringScalar(t) == nil
+}
+
 // decodeProtocolString extracts the protocol string from a canonical envelope
 // when it is exactly present; returns ok=false otherwise (never an echo).
 func decodeProtocolString(raw []byte) (string, bool) {
@@ -1070,6 +1082,14 @@ func decodeProtocolString(raw []byte) (string, bool) {
 	}
 	pRaw, ok := top["protocol"]
 	if !ok {
+		return "", false
+	}
+	// The protocol is retained ONLY when its own raw token is scalar (valid
+	// UTF-8, well-formed escapes, no unpaired surrogate): the protocol is
+	// trusted metadata, and a non-scalar protocol must never be retained — but
+	// a KNOWN protocol on an envelope whose FIELDS carry a non-scalar
+	// value/key elsewhere is independently scalar-safe, so it stays.
+	if !stringScalarJSON(pRaw) {
 		return "", false
 	}
 	var p string
@@ -1096,6 +1116,14 @@ func canonicalDerivedBuckets(raw []byte) (active, inactive, unknown map[string]a
 	}
 	fRaw, has := top["fields"]
 	if !has {
+		return empty, empty, empty, false
+	}
+	// A non-scalar string/key anywhere in the fields (invalid raw UTF-8, an
+	// unpaired / wrongly-ordered surrogate escape, an ill-formed \uXXXX, or a
+	// raw control byte) is a NON-CANONONICAL SEMANTIC envelope: the derived maps
+	// must stay EMPTY so the lossy (U+FFFD) value is never laundered into safe
+	// plaintext. The exact original bytes stay sealed.
+	if err := jsonscan.StringScalar(fRaw); err != nil {
 		return empty, empty, empty, false
 	}
 	// A duplicate canonical key at the FIELDS level (e.g. two "active"

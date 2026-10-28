@@ -123,6 +123,20 @@ func ValidateDocumentWithContext(profile *capability.Profile, original []byte, p
 		// NO Document) wins, exactly as for unparseable bytes.
 		return AdapterResult{}, domain.ErrMalformedJSON
 	}
+	// Scalar-integrity canonicality: a syntactically valid envelope that carries
+	// a non-scalar string/key anywhere in protocol/fields (invalid raw UTF-8,
+	// an unpaired / wrongly-ordered UTF-16 surrogate escape, an ill-formed
+	// \\uXXXX escape, or a raw control byte) is a NON-CANONICAL SEMANTIC
+	// envelope — never a syntax refusal and never a lossy Valid. The exact
+	// original bytes stay sealed and the caller maps this to an invalid draft.
+	if serr := jsonscan.StringScalar(doc.Raw); serr != nil {
+		if errors.Is(serr, jsonscan.ErrNonScalar) {
+			return envelopeRejected(doc, IssueMalformedEnvelope)
+		}
+		// Structurally un-walkable here is unreachable past the syntax gate, but
+		// keep the malformed-JSON contract rather than inventing a new outcome.
+		return AdapterResult{}, domain.ErrMalformedJSON
+	}
 	// Decode the envelope over RAW members (UseNumber preserves integer
 	// fidelity). Map decode is permissive by construction; the closed shape
 	// is enforced explicitly below with exact key comparison. The document

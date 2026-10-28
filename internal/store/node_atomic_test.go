@@ -418,6 +418,127 @@ func TestSafeReadLegacyNodeRefuses(t *testing.T) {
 	}
 }
 
+// --- C1: v4-US1-T011 mux-vision store integration (A5) --------------------
+
+// muxVisionForbiddenFields is an otherwise-valid VLESS fields document whose
+// ACTIVE muxEnabled=true + flow=Vision + concurrency=8 triggers the settled
+// forbidden combination.
+const muxVisionForbiddenFields = `{"active":{"server":"v.example","serverPort":443,"transport":"ws","security":"tls","muxEnabled":true,"flow":"xtls-rprx-vision","concurrency":8},"inactive":{},"unknown":{}}`
+
+// A5: a syntactically valid forbidden pair is actually SAVED as Invalid/
+// notApplicable with a real typed secret; a Store CLOSE/REOPEN then an
+// OpenNodeReader WITHOUT SecretStore/key returns the same historical fact/
+// issue and the safe known scalar + presence, without credential echo. The
+// exact original component bytes remain in the protected preservation
+// container. A negative control (mux absent -> no Vision) stays Valid.
+func TestMuxVisionStoreIntegration(t *testing.T) {
+	ctx := context.Background()
+	kdir := keyDir(t)
+	keyPath := writeKeyFile(t, kdir, "master.key", validTestKey(), 0o600)
+
+	// Forbidden pair SAVED as Invalid/notApplicable.
+	w, _, s, dbPath := newManagedStore(t)
+	out, err := w.CreateNodeAtomic(ctx, store.NodeCreateInput{
+		ProtocolBytes: []byte(`"vless"`), FieldsBytes: []byte(muxVisionForbiddenFields),
+		Secrets: []store.NodeSecretUpdate{replaceSecret("uuid", "mux-vision-uuid")},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if out.Validation.Status != nodes.Invalid || out.Validation.Applicable {
+		t.Fatalf("forbidden pair must be SAVED Invalid/notApplicable, got %v/%v issues=%+v",
+			out.Validation.Status, out.Validation.Applicable, out.Validation.Issues)
+	}
+	dep := 0
+	for _, is := range out.Validation.Issues {
+		if is.Code == nodes.IssueDependencyIncompatible && is.Field == "concurrency" {
+			dep++
+		}
+	}
+	if dep != 1 {
+		t.Fatalf("want exactly one dependencyIncompatible@concurrency, got %d issues=%+v", dep, out.Validation.Issues)
+	}
+	if !out.SecretPresence["uuid"] {
+		t.Fatalf("typed secret presence must be ownership-backed true")
+	}
+	// Safe scalar retained in the projection; secret value never present.
+	if out.Projection.Active["server"] != "v.example" || out.Projection.Active["concurrency"] != int64(8) {
+		t.Fatalf("projection must retain safe known scalars, got active=%+v", out.Projection.Active)
+	}
+	nodeID := out.NodeID
+	s.Close()
+
+	// Cold reopen: keyless reader returns the same historical fact + safe
+	// scalar/presence, without credential echo.
+	s2, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	auth, _ := store.OpenNodeAuthority(profileBytes(t))
+	r2, err := store.OpenNodeReader(s2, auth)
+	if err != nil {
+		t.Fatalf("cold reader: %v", err)
+	}
+	cold, err := r2.ReadNodeSafe(ctx, nodeID)
+	if err != nil {
+		t.Fatalf("forbidden-pair draft must remain readable (not made unreadable): %v", err)
+	}
+	if cold.Validation.Status != nodes.Invalid || cold.Validation.Applicable {
+		t.Fatalf("cold historical fact mismatch: %v/%v", cold.Validation.Status, cold.Validation.Applicable)
+	}
+	if !hasIssueC(cold.Validation, nodes.IssueDependencyIncompatible, "concurrency") {
+		t.Fatalf("cold read must preserve the dependencyIncompatible@concurrency, got %+v", cold.Validation.Issues)
+	}
+	if cold.Projection.Active["server"] != "v.example" || !cold.SecretPresence["uuid"] {
+		t.Fatalf("cold safe scalar/presence mismatch: active=%+v presence=%+v", cold.Projection.Active, cold.SecretPresence)
+	}
+	reser, err := json.Marshal(cold)
+	if err != nil {
+		t.Fatalf("marshal cold outcome: %v", err)
+	}
+	// Noecho control: the SECRET value and SECRET-adjacent canary must never
+	// appear. Known allowlisted scalars (server host, flow spelling, numerics)
+	// legitimately remain in the safe projection — that is the anti-overredaction
+	// guarantee, NOT a leak (secrets are presence-only booleans).
+	for _, canary := range []string{"mux-vision-uuid", "neg-ctrl"} {
+		if bytes.Contains(reser, []byte(canary)) {
+			t.Fatalf("cold outcome echoes credential/value %q: %s", canary, reser)
+		}
+	}
+
+	// The exact original component bytes remain in the protected preservation
+	// container (the only sanctioned test-only recovery).
+	plain, err := store.OpenPreservationForTests(ctx, s2, keyPath, nodeID)
+	if err != nil {
+		t.Fatalf("preservation oracle: %v", err)
+	}
+	if !bytes.Contains(plain, []byte(`"concurrency":8`)) || !bytes.Contains(plain, []byte(`"flow":"xtls-rprx-vision"`)) {
+		t.Fatalf("preservation must hold the exact original forbidden components: %s", plain)
+	}
+
+	// Negative control: mux absent (no Vision trigger) stays Valid.
+	w3, _, s3, _ := newManagedStore(t)
+	defer s3.Close()
+	neg, err := w3.CreateNodeAtomic(ctx, vlessInput(replaceSecret("uuid", "neg-ctrl")))
+	if err != nil {
+		t.Fatalf("negative create: %v", err)
+	}
+	if neg.Validation.Status != nodes.Valid || !neg.Validation.Applicable {
+		t.Fatalf("negative control (mux absent) must stay Valid/applicable, got %v/%v issues=%+v",
+			neg.Validation.Status, neg.Validation.Applicable, neg.Validation.Issues)
+	}
+}
+
+func hasIssueC(res nodes.Result, code nodes.IssueCode, field string) bool {
+	for _, is := range res.Issues {
+		if is.Code == code && is.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
 // --- correction regression tests (B1 inactive membership, B2 strict decoder,
 // B3 cold noecho) -----------------------------------------------
 

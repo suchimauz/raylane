@@ -444,6 +444,21 @@ func Validate(profile *capability.Profile, in Input) Result {
 	// no force-activation/default. Presence (not truthiness) drives the gate, so
 	// an inactive `false` counts; null/wrong-typed values are preserved verbatim.
 	// Never resets Status or a prior ChainCheck/StructuredCheck outcome.
+	// FR-003 / mux-vision active combination (settled parent decisions FINAL;
+	// V4-FR003-MUX-FLOW-DIRECTION-COMPATIBILITY). Pure vless post-pass: ACTIVE
+	// muxEnabled=true + an ACTIVE flow enum admitted by its OWN AllowedValues
+	// that is exactly xtls-rprx-vision OR xtls-rprx-vision-udp443 + an ACTIVE
+	// concurrency that passes its OWN ordinary shape+bounds and is an exact
+	// integer >= 0 => exactly one existing static value-free
+	// dependencyIncompatible on the declared concurrency path. The Validate tail
+	// below then yields Invalid/notApplicable and preserves the exact draft.
+	// Locally absent ordinary concurrency stays absent and the rule is silent;
+	// this is NOT a safety claim for a future emitted enabled mux block (the
+	// future compiler/apply increment must not emit an enabled Vision mux with
+	// ordinary concurrency absent/0/positive). No new IssueCode/status/aggregate,
+	// no auto-toggle/flow rewrite/invented default, no xudpConcurrency condition.
+	checkMuxVisionRules(&res, in.Protocol, declared, active)
+
 	if unsupportedInactiveGate(declared, inactive) {
 		res.Applicable = false
 	}

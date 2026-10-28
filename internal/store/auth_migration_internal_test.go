@@ -90,8 +90,10 @@ func TestT008StorageLegacyV1V2UpgradePreservesData(t *testing.T) {
 		versions = append(versions, v)
 	}
 	rows.Close()
-	if len(versions) != 4 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 {
-		t.Fatalf("versions=%v want [1 2 3 4]", versions)
+	// Steps 1-4 must remain applied and ordered (the V4 managed-node step 5 is
+	// appended later and must not disturb the accepted 1-4 upgrade path).
+	if len(versions) < 4 || versions[0] != 1 || versions[1] != 2 || versions[2] != 3 || versions[3] != 4 {
+		t.Fatalf("versions=%v want [1 2 3 4 ...]", versions)
 	}
 	if nd, err := s2.GetNode(ctx, "node-1"); err != nil || string(nd.Doc.Raw) != `{"name":"keep-me"}` {
 		t.Fatalf("node preserved: %+v err=%v", nd, err)

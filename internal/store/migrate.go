@@ -33,6 +33,13 @@ var migrations = []migration{
 	// pre-existing v3 admin row gains no username and remains fail-closed at
 	// the identity read (no invented identity, no reopened bootstrap).
 	{Version: 4, Name: "auth-identity", Apply: migrateAuthIdentityStore},
+	// V4 US1/T012 (storage-only, nonapplying prerequisite) appends the managed
+	// node step; steps 1-4 stay byte-unchanged and any applied database
+	// upgrades transactionally. The managed tables hold only SAFE derived
+	// content, owner/link metadata and a closed validation snapshot — no
+	// ciphertext, original component bytes or plaintext outside the existing
+	// sealed_secrets / nodes.doc stores.
+	{Version: 5, Name: "managed-node", Apply: migrateManagedNode},
 }
 
 const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (

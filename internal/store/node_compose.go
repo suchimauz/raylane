@@ -610,6 +610,12 @@ func (r *NodeReader) readNodeSafe(ctx context.Context, id string) (NodeOutcome, 
 	if err != nil {
 		return NodeOutcome{}, fmt.Errorf("%w: %v", ErrSafeRead, err)
 	}
+	// The reader now holds the node protocol (from the closed derived document,
+	// digest-bound to the same authority): enforce that persisted secret names
+	// belong to THIS protocol, refusing a wrong-protocol secret claim.
+	if err := nodes.EnforceSecretProtocol(prof, protocol, res.Secrets); err != nil {
+		return NodeOutcome{}, fmt.Errorf("%w: %v", ErrSafeRead, err)
+	}
 
 	// CURRENT presence from owner + link + sealed row EXISTENCE (SELECT 1 /
 	// EXISTS only — never the blob, never SecretStore.Open). A missing
@@ -683,11 +689,28 @@ func safeProjectionDecoded(prof *capability.Profile, derived derivedDoc, protoco
 	if !prof.HasProtocol(protocol) {
 		return empty, nil
 	}
+	// Feed the projector the non-mutating union of active + inactive values with
+	// the allowlisted inactive-set, so readable inactive members are placed in
+	// Projection.Inactive (never promoted into Active, never dropped) while
+	// secret/nested/unknown/quarantined inactive values NEVER leak. The derived
+	// maps are treated as read-only and copied out by the projector.
+	allow := map[string]bool{}
+	for _, n := range prof.InactiveNames(protocol) {
+		allow[n] = true
+	}
+	merged := make(map[string]any, len(derived.active)+len(derived.inactive))
+	for k, v := range derived.active {
+		merged[k] = v
+	}
 	inactive := map[string]bool{}
-	for k := range derived.inactive {
+	for k, v := range derived.inactive {
+		if !allow[k] {
+			continue // not allowlisted to surface: secret/nested/unknown value stays sealed
+		}
+		merged[k] = v
 		inactive[k] = true
 	}
-	proj, err := prof.ProjectNodeFields(protocol, derived.active, presence, inactive)
+	proj, err := prof.ProjectNodeFields(protocol, merged, presence, inactive)
 	if err != nil {
 		return capability.ProjectedNode{}, err
 	}

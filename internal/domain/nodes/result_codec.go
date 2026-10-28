@@ -5,10 +5,52 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/suchimauz/raylane/internal/capability"
 	"github.com/suchimauz/raylane/internal/jsonscan"
 )
+
+// nextTokenType returns the JSON token type of one complete raw JSON value
+// (null, bool, number, string, array, object) using the stdlib streaming
+// decoder. It refuses anything that is not exactly one well-formed value.
+func nextTokenType(raw json.RawMessage) (json.Token, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, errResultFormat()
+	}
+	if dec.More() {
+		return nil, errResultFormat()
+	}
+	return tok, nil
+}
+
+// tokenIsNumber reports whether tok is a bare JSON number (never a quoted
+// string, null, bool, array or object). json.Decoder yields float64 for a
+// bare number token.
+func tokenIsNumber(tok json.Token) bool {
+	_, ok := tok.(float64)
+	return ok
+}
+
+func tokenIsBool(tok json.Token) bool {
+	_, ok := tok.(bool)
+	return ok
+}
+
+func tokenIsString(tok json.Token) bool {
+	_, ok := tok.(string)
+	return ok
+}
+
+func tokenIsArrayStart(tok json.Token) (bool, bool) {
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return false, false
+	}
+	return d == '[', true
+}
 
 // DecodeResultStrict decodes a persisted, previously encoded nodes.Result from
 // JSON with a CLOSED, fail-closed contract. It is the nodes-owned counterpart
@@ -54,7 +96,7 @@ func DecodeResultStrict(raw []byte, profile *capability.Profile) (Result, error)
 	}
 
 	var res Result
-	st, err := decodeInt(top["status"])
+	st, err := decodeIntStrict(top["status"])
 	if err != nil {
 		return Result{}, err
 	}
@@ -64,19 +106,19 @@ func DecodeResultStrict(raw []byte, profile *capability.Profile) (Result, error)
 	default:
 		return Result{}, errResultFormat()
 	}
-	if res.Applicable, err = decodeBool(top["applicable"]); err != nil {
+	if res.Applicable, err = decodeBoolStrict(top["applicable"]); err != nil {
 		return Result{}, err
 	}
 	if res.Issues, err = decodeIssueArray(top["issues"], profile); err != nil {
 		return Result{}, err
 	}
-	if res.Secrets, err = decodeStringArray(top["secrets"]); err != nil {
+	if res.Secrets, err = decodeStringArrayStrict(top["secrets"]); err != nil {
 		return Result{}, err
 	}
-	if res.Unknown, err = decodeStringArray(top["unknown"]); err != nil {
+	if res.Unknown, err = decodeStringArrayStrict(top["unknown"]); err != nil {
 		return Result{}, err
 	}
-	cc, err := decodeInt(top["chainCheck"])
+	cc, err := decodeIntStrict(top["chainCheck"])
 	if err != nil {
 		return Result{}, err
 	}
@@ -86,7 +128,7 @@ func DecodeResultStrict(raw []byte, profile *capability.Profile) (Result, error)
 	default:
 		return Result{}, errResultFormat()
 	}
-	sc, err := decodeInt(top["structuredCheck"])
+	sc, err := decodeIntStrict(top["structuredCheck"])
 	if err != nil {
 		return Result{}, err
 	}
@@ -96,12 +138,87 @@ func DecodeResultStrict(raw []byte, profile *capability.Profile) (Result, error)
 	default:
 		return Result{}, errResultFormat()
 	}
+	// Semantic name vocabulary (no echo): persisted names must be genuine
+	// authority facts, never arbitrary caller strings. Unknown entries are ONLY
+	// the validator's generic "unknown" bucket marker (repeated markers are
+	// legitimate and kept); Secrets entries must be declared fields classified
+	// secret (no nonsecret/undeclared/wrong-protocol claims). No value is ever
+	// decoded here.
+	if err := validateUnknownNames(res.Unknown); err != nil {
+		return Result{}, err
+	}
+	if err := validateSecretNames(profile, "", res.Secrets, false); err != nil {
+		return Result{}, err
+	}
 	return res, nil
 }
 
 // errResultFormat is the single static, value-free refusal for any structural
 // violation of a persisted result.
 func errResultFormat() error { return errors.New("nodes: malformed persisted validation result") }
+
+// validateUnknownNames enforces that every persisted Unknown entry is exactly
+// the validator's generic "unknown" bucket marker — never a raw submitted
+// name or value. Repeated generic markers are legitimate historical facts and
+// are kept (NOT deduplicated); only a non-"unknown" entry refuses.
+func validateUnknownNames(names []string) error {
+	for _, n := range names {
+		if n != "unknown" {
+			return errResultFormat()
+		}
+	}
+	return nil
+}
+
+// validateSecretNames enforces that every persisted Secrets entry names a
+// declared authority field classified secret — never a nonsecret/undeclared
+// name, and never a field that does not belong to the given protocol when a
+// protocol context is supplied. Names are the closed authority vocabulary,
+// not arbitrary caller strings; no secret value is involved. A field whose
+// sealed row was later deleted still keeps its historical declared-secret
+// name (absence is a presence fact, not a name fact), so this does not reject
+// valid historical secret names on current-row absence.
+func validateSecretNames(profile *capability.Profile, protocol string, names []string, requireProtocol bool) error {
+	if profile == nil {
+		// No authority available to settle names: fail closed rather than
+		// accept arbitrary caller strings.
+		if len(names) == 0 {
+			return nil
+		}
+		return errResultFormat()
+	}
+	for _, n := range names {
+		if !isDeclaredSecretName(profile, protocol, n, requireProtocol) {
+			return errResultFormat() // undeclared / nonsecret / wrong-protocol name
+		}
+	}
+	return nil
+}
+
+// isDeclaredSecretName reports whether n names a declared authority field
+// classified secret, optionally pinned to the given protocol.
+func isDeclaredSecretName(profile *capability.Profile, protocol, n string, requireProtocol bool) bool {
+	for _, proto := range profile.Protocols() {
+		f, ok := profile.Field(proto, n)
+		if !ok || f.Classification != "secret" {
+			continue
+		}
+		if requireProtocol && proto != protocol {
+			return false // wrong-protocol secret claim
+		}
+		return true
+	}
+	return false
+}
+
+// EnforceSecretProtocol re-validates a persisted Secrets name list against the
+// node's protocol context. DecodeResultStrict already guarantees each name is
+// a declared secret field of SOME protocol; the reader (which holds the node
+// protocol) uses this to refuse a wrong-protocol secret claim. It never reads
+// or echoes a value.
+func EnforceSecretProtocol(profile *capability.Profile, protocol string, names []string) error {
+	return validateSecretNames(profile, protocol, names, true)
+}
 
 // requireExactKeys enforces that m has EXACTLY the given keys (none missing,
 // none extra). Duplicate keys are rejected earlier by the strict scanner.
@@ -117,9 +234,25 @@ func requireExactKeys(m map[string]json.RawMessage, want []string) error {
 	return nil
 }
 
-func decodeInt(raw json.RawMessage) (int64, error) {
+// decodeIntStrict decodes a persisted enum token that MUST be a bare JSON
+// integer in int64 range. A quoted/non-integer number ("1"), a fractional
+// value, an out-of-range integer, or null/wrong container are ALL refused — no
+// JSON type coercion. Valid whole-integer spellings (0, 1, 2, …) are accepted.
+func decodeIntStrict(raw json.RawMessage) (int64, error) {
+	tok, err := nextTokenType(raw)
+	if err != nil || !tokenIsNumber(tok) {
+		return 0, errResultFormat()
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var n json.Number
-	if err := json.Unmarshal(raw, &n); err != nil {
+	if err := dec.Decode(&n); err != nil {
+		return 0, errResultFormat()
+	}
+	// Whole-integer, in-int64-range only: reject fractional lexemes (1.5),
+	// exponent forms that are not whole (1e-1), and out-of-range (1e400).
+	f, ok := new(big.Float).SetString(n.String())
+	if !ok || !f.IsInt() {
 		return 0, errResultFormat()
 	}
 	i, err := n.Int64()
@@ -129,7 +262,13 @@ func decodeInt(raw json.RawMessage) (int64, error) {
 	return i, nil
 }
 
-func decodeBool(raw json.RawMessage) (bool, error) {
+// decodeBoolStrict decodes a persisted boolean token that MUST be a bare JSON
+// true/false; null and any quoted/wrong type refuse.
+func decodeBoolStrict(raw json.RawMessage) (bool, error) {
+	tok, err := nextTokenType(raw)
+	if err != nil || !tokenIsBool(tok) {
+		return false, errResultFormat()
+	}
 	var b bool
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return false, errResultFormat()
@@ -137,21 +276,41 @@ func decodeBool(raw json.RawMessage) (bool, error) {
 	return b, nil
 }
 
-func decodeStringArray(raw json.RawMessage) ([]string, error) {
-	var arr []json.RawMessage
-	if err := json.Unmarshal(raw, &arr); err != nil {
+// decodeStringArrayStrict decodes a persisted name array that MUST be a JSON
+// array (never null) whose every item is a string. A null array, a non-array
+// container, or a non-string item refuses. Items are returned verbatim; the
+// caller applies the semantic name-vocabulary check. Uses a single streaming
+// decoder (not Unmarshal) so quoted strings, nested arrays/objects and wrong
+// item types are all refused without ever materializing an attacker-supplied
+// value into a Go string that could be echoed.
+func decodeStringArrayStrict(raw json.RawMessage) ([]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
 		return nil, errResultFormat()
 	}
-	out := make([]string, 0, len(arr))
-	for _, e := range arr {
-		var s string
-		if err := json.Unmarshal(e, &s); err != nil || s == "" {
+	d, ok := tok.(json.Delim)
+	if !ok || d != '[' {
+		return nil, errResultFormat() // null / scalar / object: not an array
+	}
+	out := []string{}
+	for dec.More() {
+		it, err := dec.Token()
+		if err != nil {
 			return nil, errResultFormat()
+		}
+		s, ok := it.(string)
+		if !ok || s == "" {
+			return nil, errResultFormat() // non-string or empty item
 		}
 		out = append(out, s)
 	}
-	if out == nil {
-		out = []string{}
+	// Consume the closing ']' and confirm nothing trails the array.
+	if _, err := dec.Token(); err != nil {
+		return nil, errResultFormat()
+	}
+	if dec.More() {
+		return nil, errResultFormat()
 	}
 	return out, nil
 }
@@ -161,14 +320,45 @@ func decodeStringArray(raw json.RawMessage) ([]string, error) {
 // vocabulary or a profile-authorized declared-field path, and the reason is the
 // canonical issueReason[code] text.
 func decodeIssueArray(raw json.RawMessage, profile *capability.Profile) ([]Issue, error) {
-	var arr []json.RawMessage
-	if err := json.Unmarshal(raw, &arr); err != nil {
+	// The issues array MUST be a JSON array (never null). A streaming decoder
+	// (not Unmarshal) is used so null / wrong containers and non-object items
+	// are refused without materializing attacker bytes.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
 		return nil, errResultFormat()
 	}
-	out := make([]Issue, 0, len(arr))
-	for _, e := range arr {
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(e, &m); err != nil {
+	d, ok := tok.(json.Delim)
+	if !ok || d != '[' {
+		return nil, errResultFormat() // null / scalar / object: not an array
+	}
+	out := []Issue{}
+	for dec.More() {
+		it, err := dec.Token()
+		if err != nil {
+			return nil, errResultFormat()
+		}
+		di, ok := it.(json.Delim)
+		if !ok || di != '{' {
+			return nil, errResultFormat() // non-object item
+		}
+		m := map[string]json.RawMessage{}
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return nil, errResultFormat()
+			}
+			ks, ok := kt.(string)
+			if !ok {
+				return nil, errResultFormat()
+			}
+			var v json.RawMessage
+			if err := dec.Decode(&v); err != nil {
+				return nil, errResultFormat()
+			}
+			m[ks] = v
+		}
+		if _, err := dec.Token(); err != nil { // consume '}'
 			return nil, errResultFormat()
 		}
 		if err := requireExactKeys(m, []string{"code", "field", "reason"}); err != nil {
@@ -176,6 +366,10 @@ func decodeIssueArray(raw json.RawMessage, profile *capability.Profile) ([]Issue
 		}
 		var code, field, reason string
 		for k, v := range m {
+			tk, terr := nextTokenType(v)
+			if terr != nil || !tokenIsString(tk) {
+				return nil, errResultFormat() // non-string member
+			}
 			var s string
 			if err := json.Unmarshal(v, &s); err != nil {
 				return nil, errResultFormat()
@@ -201,8 +395,11 @@ func decodeIssueArray(raw json.RawMessage, profile *capability.Profile) ([]Issue
 		}
 		out = append(out, Issue{Code: ic, Field: field, Reason: reason})
 	}
-	if out == nil {
-		out = []Issue{}
+	if _, err := dec.Token(); err != nil { // consume ']'
+		return nil, errResultFormat()
+	}
+	if dec.More() {
+		return nil, errResultFormat() // trailing content
 	}
 	return out, nil
 }

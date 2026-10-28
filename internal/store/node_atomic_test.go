@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -414,6 +415,196 @@ func TestSafeReadLegacyNodeRefuses(t *testing.T) {
 	}
 	if _, err := r.ReadNodeSafe(ctx, "legacy-1"); err == nil {
 		t.Fatalf("legacy nonmanaged node must refuse safe managed read")
+	}
+}
+
+// --- correction regression tests (B1 inactive membership, B2 strict decoder,
+// B3 cold noecho) -----------------------------------------------
+
+// B1: an inactive bucket member that is a declared readable known field is
+// preserved in Projection.Inactive at BOTH create and actual cold reopen —
+// never promoted into Active, never silently dropped. Secret/nested/unknown
+// inactive values still never leak.
+func TestInactiveMembershipPreservedCreateAndCold(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name, inactive, key string
+		val                 any
+	}{
+		{"unsupported tfo", `"tfo":false`, "tfo", false},
+		{"known numeric", `"xudpConcurrency":257`, "xudpConcurrency", int64(257)},
+		{"known scalar", `"concurrency":8`, "concurrency", int64(8)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _, s, dbPath := newManagedStore(t)
+			fields := `{"active":{"server":"v.example","serverPort":443,"transport":"ws","security":"tls"},"inactive":{` + tc.inactive + `},"unknown":{}}`
+			out, err := w.CreateNodeAtomic(ctx, store.NodeCreateInput{
+				ProtocolBytes: []byte(`"vless"`), FieldsBytes: []byte(fields),
+				Secrets: []store.NodeSecretUpdate{replaceSecret("uuid", "u")},
+			})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			// create-time projection retains the inactive member, not in Active.
+			if !reflect.DeepEqual(out.Projection.Inactive[tc.key], tc.val) {
+				t.Fatalf("create Inactive[%s]=%v want %v (Inactive=%v)", tc.key, out.Projection.Inactive[tc.key], tc.val, out.Projection.Inactive)
+			}
+			if _, inActive := out.Projection.Active[tc.key]; inActive {
+				t.Fatalf("inactive member %s must NOT be promoted into Active", tc.key)
+			}
+			s.Close()
+			// actual cold reopen: reader shares no open Store.
+			s2, err := store.Open(ctx, dbPath)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer s2.Close()
+			auth, _ := store.OpenNodeAuthority(profileBytes(t))
+			r2, err := store.OpenNodeReader(s2, auth)
+			if err != nil {
+				t.Fatalf("cold reader: %v", err)
+			}
+			cold, err := r2.ReadNodeSafe(ctx, out.NodeID)
+			if err != nil {
+				t.Fatalf("cold read: %v", err)
+			}
+			if !reflect.DeepEqual(cold.Projection.Inactive[tc.key], tc.val) {
+				t.Fatalf("cold Inactive[%s]=%v want %v (Inactive=%v Active=%v)", tc.key, cold.Projection.Inactive[tc.key], tc.val, cold.Projection.Inactive, cold.Projection.Active)
+			}
+			if _, inActive := cold.Projection.Active[tc.key]; inActive {
+				t.Fatalf("cold: inactive member %s promoted into Active", tc.key)
+			}
+			// historical verdict unchanged (notApplicable is legitimate, not promoted).
+			_ = cold.Validation
+		})
+	}
+}
+
+// B2: the closed decoder refuses type-confused persisted verdicts. Each
+// malformed token is written into the stored result (valid JSON, CHECK
+// enabled, digest/revision untouched), the read must fail with static
+// ErrSafeRead and perform NO writes; legitimate enum spellings stay accepted.
+func TestDecoderRejectsTypeCoercionAndAcceptsValid(t *testing.T) {
+	ctx := context.Background()
+	w, r, s, _ := newManagedStore(t)
+	defer s.Close()
+	out, err := w.CreateNodeAtomic(ctx, vlessInput(replaceSecret("uuid", "coerce")))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	db := s.DB()
+	// Canonical row: {"status":1,"applicable":true,"issues":[],"secrets":[...],
+	// "unknown":[],"chainCheck":0,"structuredCheck":0}. Each forged token stays
+	// valid JSON with the original digest/revision untouched.
+	forge := []struct{ name, from, to string }{
+		{"quoted status", `"status":1,`, `"status":"1",`},
+		{"status bool", `"status":1,`, `"status":true,`},
+		{"null applicable", `"applicable":true,`, `"applicable":null,`},
+		{"bool as string", `"applicable":true,`, `"applicable":"true",`},
+		{"null issues", `"issues":[],`, `"issues":null,`},
+		{"null unknown", `"unknown":[],`, `"unknown":null,`},
+		{"null chainCheck", `"chainCheck":0,`, `"chainCheck":null,`},
+	}
+	for _, c := range forge {
+		// confirm the setup token is actually present before asserting refusal
+		var orig string
+		if err := db.QueryRow(`SELECT result FROM node_validation WHERE node_id=?`, out.NodeID).Scan(&orig); err != nil {
+			t.Fatalf("%s: read: %v", c.name, err)
+		}
+		if !strings.Contains(orig, c.from) {
+			t.Fatalf("%s: setup token %q not present in %s", c.name, c.from, orig)
+		}
+		if _, err := db.Exec(`UPDATE node_validation SET result = replace(result, ?, ?) WHERE node_id = ?`, c.from, c.to, out.NodeID); err != nil {
+			t.Fatalf("%s: forge: %v", c.name, err)
+		}
+		var forged string
+		if err := db.QueryRow(`SELECT result FROM node_validation WHERE node_id=?`, out.NodeID).Scan(&forged); err != nil {
+			t.Fatalf("%s: re-read: %v", c.name, err)
+		}
+		if !strings.Contains(forged, c.to) {
+			t.Fatalf("%s: setup bytes not changed (forged=%s)", c.name, forged)
+		}
+		got, rerr := r.ReadNodeSafe(ctx, out.NodeID)
+		if !errors.Is(rerr, store.ErrSafeRead) {
+			t.Fatalf("%s: want ErrSafeRead, got err=%v outcome=%+v", c.name, rerr, got)
+		}
+		if strings.Contains(rerr.Error(), "coerce") {
+			t.Fatalf("%s: error echoes submitted value: %v", c.name, rerr)
+		}
+		// malformed read performs no writes: restore the row and continue.
+		if _, err := db.Exec(`UPDATE node_validation SET result = replace(result, ?, ?) WHERE node_id = ?`, c.to, c.from, out.NodeID); err != nil {
+			t.Fatalf("%s: restore: %v", c.name, err)
+		}
+	}
+	// legitimate spellings accepted (anti blanket-rejection control): numeric
+	// status, true/false applicable, empty arrays, valid secret names still read.
+	if got, err := r.ReadNodeSafe(ctx, out.NodeID); err != nil || got.Validation.Status != nodes.Valid {
+		t.Fatalf("valid verdict must still read: err=%v status=%v", err, got.Validation.Status)
+	}
+}
+
+// B3: the cold reader (no SecretStore/key) refuses a persisted result whose
+// name arrays carry arbitrary caller strings, with static ErrSafeRead and no
+// echo — reached through the real create+close/reopen path (no CHECK bypass).
+func TestColdReaderNoEchoOnForgedNames(t *testing.T) {
+	for _, field := range []string{"secrets", "unknown"} {
+		t.Run(field, func(t *testing.T) {
+			ctx := context.Background()
+			w, _, s, dbPath := newManagedStore(t)
+			out, err := w.CreateNodeAtomic(ctx, vlessInput(replaceSecret("uuid", "noecho")))
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			var original string
+			if err := s.DB().QueryRow(`SELECT result FROM node_validation WHERE node_id=?`, out.NodeID).Scan(&original); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			var forged map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(original), &forged); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			canary := "SYNTHETIC_PRIVATE_VALUE__" + field
+			forged[field], err = json.Marshal([]string{canary})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			encoded, err := json.Marshal(forged)
+			if err != nil || !bytes.Contains(encoded, []byte(canary)) {
+				t.Fatalf("setup marshal failed: %v", err)
+			}
+			if _, err := s.DB().Exec(`UPDATE node_validation SET result = CAST(? AS TEXT) WHERE node_id = ?`, string(encoded), out.NodeID); err != nil {
+				t.Fatalf("valid JSON corruption setup (CHECK enabled): %v", err)
+			}
+			var persisted string
+			if err := s.DB().QueryRow(`SELECT result FROM node_validation WHERE node_id=?`, out.NodeID).Scan(&persisted); err != nil || !strings.Contains(persisted, canary) {
+				t.Fatalf("setup canary not persisted: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			cold, err := store.Open(ctx, dbPath)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer cold.Close()
+			auth, _ := store.OpenNodeAuthority(profileBytes(t))
+			reader, err := store.OpenNodeReader(cold, auth)
+			if err != nil {
+				t.Fatalf("reader: %v", err)
+			}
+			got, rerr := reader.ReadNodeSafe(ctx, out.NodeID)
+			if !errors.Is(rerr, store.ErrSafeRead) {
+				body, merr := json.Marshal(got)
+				if merr != nil {
+					t.Fatalf("marshal outcome: %v", merr)
+				}
+				t.Fatalf("%s: want static ErrSafeRead, got err=%v canaryEchoed=%v", field, rerr, bytes.Contains(body, []byte(canary)))
+			}
+			if strings.Contains(rerr.Error(), canary) {
+				t.Fatalf("refusal error echoed the canary: %v", rerr)
+			}
+		})
 	}
 }
 

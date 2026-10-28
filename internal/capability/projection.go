@@ -41,6 +41,36 @@ var ErrProtocolUnknown = errors.New("capability: protocol not declared by profil
 //     they are reported by name in Unsupported.
 //
 // Values are copied, never aliased.
+// InactiveNames returns the names of DECLARED fields for a protocol that
+// are allowlisted to surface in Projection.Inactive: inactive by default
+// (HasActiveByDef && !ActiveByDefault) or unsupported (HasSupported &&
+// !Supported). Secret, nested-object and unknown/quarantined names are
+// NEVER returned, so a caller can mark exactly the readable inactive subset
+// as inactive without leaking a secret/nested/unknown value into the
+// projection. Safe for concurrent use.
+func (p *Profile) InactiveNames(protocol string) []string {
+	if p == nil {
+		return nil
+	}
+	proto, ok := p.protocols[protocol]
+	if !ok {
+		return nil
+	}
+	out := []string{}
+	for name, fi := range proto.fields {
+		f := fi.Field
+		if f.Classification != "known" || f.Type == "object" {
+			continue // secrets presence-only, nested never surfaced
+		}
+		// Any readable known non-object field may surface as inactive when the
+		// caller explicitly places it in the inactive bucket: an active-by-default
+		// field so marked is preserved in Inactive (not dropped, not promoted into
+		// Active); an unsupported/default-inactive field stays inactive.
+		out = append(out, name)
+	}
+	return out
+}
+
 func (p *Profile) ProjectNodeFields(protocol string, fields map[string]any, presence map[string]bool, inactive map[string]bool) (ProjectedNode, error) {
 	out := ProjectedNode{
 		Active:   map[string]any{},

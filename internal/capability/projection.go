@@ -102,9 +102,15 @@ func (p *Profile) ProjectNodeFields(protocol string, fields map[string]any, pres
 			out.Secrets[name] = presence[name]
 		case "known":
 			if f.Type == "object" {
-				// Documented fail-closed boundary: no nested leaf allowlist, so
-				// nothing is copied. Name only.
-				out.Unsupported = append(out.Unsupported, name)
+				// Documented fail-closed boundary: no nested leaf allowlist, so no
+				// private content is copied. A REAL submitted object (nonempty map)
+				// and a persisted FIXED name-only marker (empty {}) are both reported
+				// as name-only Unsupported — the historical fact that an EXISTING
+				// active known object was present, never a value. A nil/absent object
+				// (no content and no marker) surfaces nothing.
+				if m, isObj := val.(map[string]any); isObj && (len(m) > 0 || inactive[name]) {
+					out.Unsupported = append(out.Unsupported, name)
+				}
 				continue
 			}
 			if safe, ok := checkValue(val, fi); ok {

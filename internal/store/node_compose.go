@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"unicode/utf8"
 
 	"github.com/suchimauz/raylane/internal/capability"
@@ -37,6 +38,14 @@ import (
 // secret operations: it is reserved for the node's own preservation container
 // and can never be claimed by a caller-supplied field.
 const SentinelPurpose = "preservation"
+
+// ReservedSecretSentinelValue is the exact reserved "leave this secret
+// unchanged" sentinel. A `replace` whose VALUE equals it exactly is refused
+// (the OpenAPI SecretUpdate schema rejects it with `not: {const: ...}`);
+// matching is by exact equality only, so mask-like and other non-exact
+// strings remain legitimate values. The sentinel is never stored and never
+// echoed.
+const ReservedSecretSentinelValue = "__RAYLANE_SECRET_UNCHANGED_V1__"
 
 // ErrSafeRead is the single static, secret-free refusal category for a cold
 // keyless safe-read that fails a binding check (authority digest mismatch,
@@ -276,23 +285,47 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 	if err := json.Unmarshal(protocolBytes, &protocolStr); err != nil {
 		return NodeOutcome{}, errNodeComponent("protocol")
 	}
-	var fieldsAny any
-	if err := json.Unmarshal(fieldsBytes, &fieldsAny); err != nil {
+	// The fields component must be exactly one complete JSON OBJECT, gated
+	// STRUCTURALLY on the raw bytes (map[string]json.RawMessage, non-nil) with
+	// NO float64 conversion: huge canonical numbers (1E400, very large integers,
+	// tiny 1e-400, long fractions) must reach the actual validator, which owns
+	// the faithful semantic verdict, instead of being refused here by a lossy
+	// any/float64 decode. Null (decodes to a nil map), non-object, malformed,
+	// and trailing content remain a static zero-write refusal.
+	var fieldsObj map[string]json.RawMessage
+	fieldsDec := json.NewDecoder(bytes.NewReader(fieldsBytes))
+	if err := fieldsDec.Decode(&fieldsObj); err != nil || fieldsObj == nil {
 		return NodeOutcome{}, errNodeComponent("fields")
 	}
-	if _, ok := fieldsAny.(map[string]any); !ok {
+	var fieldsExtra any
+	if err := fieldsDec.Decode(&fieldsExtra); err != io.EOF {
+		// Trailing content after the object is not one complete JSON value.
 		return NodeOutcome{}, errNodeComponent("fields")
 	}
 
-	// Label: absent stays absent; present must be a JSON string of 1..256
-	// Unicode characters (a present JSON null is a refusal — absence and
-	// explicit null stay distinguishable).
+	// Label: absent stays absent; present must be a JSON string of 0..256
+	// Unicode characters. The contract field is OPTIONAL with maxLength 256 and
+	// NO minLength, so the empty string is accepted exactly; absence (nil) and
+	// explicit null stay distinguishable — a present JSON null, a non-string,
+	// or >256 runes are a static zero-write refusal. Decoding into a
+	// json.RawMessage first keeps null from being silently coerced by a direct
+	// string unmarshal.
 	if labelBytes != nil {
-		var labelStr string
-		if err := json.Unmarshal(labelBytes, &labelStr); err != nil {
+		var labelRaw json.RawMessage
+		if err := json.Unmarshal(labelBytes, &labelRaw); err != nil {
 			return NodeOutcome{}, errNodeComponent("label")
 		}
-		if labelStr == "" || utf8.RuneCountInString(labelStr) > 256 {
+		// A present JSON null must stay a refusal: absence (nil labelBytes) and
+		// explicit null stay distinguishable. Comparing the trimmed bytes keeps
+		// null from being silently coerced by the string unmarshal below.
+		if len(bytes.TrimSpace(labelRaw)) == 0 || bytes.Equal(bytes.TrimSpace(labelRaw), []byte("null")) {
+			return NodeOutcome{}, errNodeComponent("label") // absent/null
+		}
+		var labelStr string
+		if err := json.Unmarshal(labelRaw, &labelStr); err != nil {
+			return NodeOutcome{}, errNodeComponent("label") // non-string
+		}
+		if utf8.RuneCountInString(labelStr) > 256 {
 			return NodeOutcome{}, errNodeComponent("label")
 		}
 	}
@@ -329,6 +362,14 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 		case "replace":
 			if !su.HasValue || su.Value == "" {
 				return NodeOutcome{}, fmt.Errorf("%w: replace requires a value", ErrSecretOp)
+			}
+			// The reserved "leave unchanged" sentinel is refused by EXACT VALUE
+			// equality (the OpenAPI SecretUpdate schema rejects it with
+			// `not: {const: ...}`), never by a substring/pattern match: mask-like
+			// and other non-exact strings stay legitimate values. This guards the
+			// VALUE, complementing the FIELD/purpose guard below.
+			if su.Value == ReservedSecretSentinelValue {
+				return NodeOutcome{}, fmt.Errorf("%w: reserved sentinel value", ErrSecretOp)
 			}
 			if !utf8.ValidString(su.Value) {
 				return NodeOutcome{}, fmt.Errorf("%w: value is not valid UTF-8", ErrSecretOp)
@@ -412,18 +453,26 @@ func (w *NodeWriter) CreateNodeAtomic(ctx context.Context, in NodeCreateInput) (
 	// they never promote presence.
 	envBytes := buildValidationEnvelope(protocolBytes, fieldsBytes)
 	ar, err := nodes.ValidateDocument(prof, envBytes, presence)
-	if err != nil {
-		// domain.ErrMalformedJSON is a syntax refusal (zero writes); every
-		// other adapter error is a nonwrite refusal.
+	if err != nil && !errors.Is(err, nodes.ErrNotANodeEnvelope) {
+		// domain.ErrMalformedJSON (and any other non-envelope adapter error) is a
+		// syntax / nonwrite refusal: zero writes, the transaction rolls back.
 		return NodeOutcome{}, err
 	}
+	// A syntactically-valid but non-canonical envelope (inner duplicate keys,
+	// ambiguous buckets) is a SEMANTIC refusal, not a syntax error: the adapter
+	// already produced its faithful Invalid / notApplicable AdapterResult with
+	// the exact original bytes preserved. The draft is SAVEABLE — it persists as
+	// an Invalid draft (exact bytes sealed; ambiguous derived maps stay empty so
+	// nothing is laundered). errors.Is(err, nodes.ErrNotANodeEnvelope) is the
+	// ONLY accepted adapter error here; nothing is revalidated, normalized, or
+	// invented.
 
 	// Generate derived safe content ONLY from unambiguous canonical decoded
 	// buckets after actual validation (UseNumber, not float64). Unknown
 	// protocol / malformed / duplicate / colliding envelopes produce empty
 	// derived content rather than laundering ambiguity, but their exact
 	// original bytes stay encrypted in the preservation container.
-	derivedDoc := buildDerivedDoc(ar, prof)
+	derivedDoc := buildDerivedDoc(ar, prof, presence)
 
 	// Persist the node row (ONE derived safe document in nodes.doc) + metadata
 	// + closed validation snapshot + owner/link rows.
@@ -699,10 +748,17 @@ func safeProjectionDecoded(prof *capability.Profile, derived derivedDoc, protoco
 		allow[n] = true
 	}
 	merged := make(map[string]any, len(derived.active)+len(derived.inactive))
+	inactive := map[string]bool{}
 	for k, v := range derived.active {
 		merged[k] = v
+		// A persisted FIXED name-only object marker (empty {}) in the ACTIVE
+		// derived map is flagged so the projector surfaces it as name-only
+		// Unsupported (an EXISTING active known object), never promoted and
+		// never a value.
+		if m, isObj := v.(map[string]any); isObj && len(m) == 0 {
+			inactive[k] = true
+		}
 	}
-	inactive := map[string]bool{}
 	for k, v := range derived.inactive {
 		if !allow[k] {
 			continue // not allowlisted to surface: secret/nested/unknown value stays sealed
@@ -777,20 +833,60 @@ func decodeDerivedDoc(raw []byte) (derivedDoc, string, error) {
 	return derivedDoc{protocol: protocol, active: active, inactive: inactive}, protocol, nil
 }
 
-// buildDerivedDoc derives the safe document from the canonical decoded buckets
-// of an accepted adapter result (UseNumber fidelity). Unknown protocol /
-// malformed / duplicate / colliding envelopes produce a document with empty
-// maps and an EMPTY protocol (the raw protocol is never persisted outside the
-// ciphertext); opaque objects are persisted name-only Unsupported via the
-// projection, with only bucket-safe known data retained.
-func buildDerivedDoc(ar nodes.AdapterResult, prof *capability.Profile) string {
+// buildDerivedDoc derives the safe document for nodes.doc: ONLY the actual
+// allowlisted safe known values (or fixed value-free metadata) ever persist in
+// plaintext. It reuses the SAME closed authority projection the public read
+// path applies (ProjectNodeFields) over the canonical decoded active/inactive
+// buckets — unknown names, smuggled plaintext secret fields, and opaque-object
+// private leaves are NEVER copied (secrets are presence-only, objects render
+// name-only Unsupported, out-of-bounds values are withheld). The projector is
+// fed the non-mutating union of active + inactive values with the allowlisted
+// inactive-set, so readable inactive members land in Inactive (never promoted
+// to Active, never dropped).
+//
+// The derived document stays the exact version-1 shape {version, protocol,
+// active, inactive}. The protocol is derived ONLY from the independently
+// decoded envelope when the authority actually declares it (prof.HasProtocol);
+// otherwise it stays empty (the raw protocol never persists outside the
+// ciphertext). An accepted envelope that fails the clean decode (unknown
+// protocol / malformed / duplicate / colliding) yields EMPTY maps so ambiguity
+// is never laundered into safe content, while its exact original bytes stay
+// sealed in the preservation container.
+func buildDerivedDoc(ar nodes.AdapterResult, prof *capability.Profile, presence map[string]bool) string {
 	protocol := ""
 	active := map[string]any{}
 	inactive := map[string]any{}
 	if ar.Validation == domain.ValidationValid || ar.Validation == domain.ValidationInvalid {
 		if p, ok := decodeProtocolString(ar.Document.Raw); ok && prof.HasProtocol(p) {
 			protocol = p
-			active, inactive = canonicalDerivedBuckets(ar.Document.Raw)
+			decActive, decInactive := canonicalDerivedBuckets(ar.Document.Raw)
+			// Non-mutating union: every decoded active/inactive value is offered to
+			// the projector, keyed by its own bucket so placement is authority-
+			// driven (never promoted across buckets).
+			union := make(map[string]any, len(decActive)+len(decInactive))
+			for name, val := range decActive {
+				union[name] = val
+			}
+			inactiveSet := make(map[string]bool, len(decInactive))
+			for name, val := range decInactive {
+				union[name] = val
+				inactiveSet[name] = true
+			}
+			proj, err := prof.ProjectNodeFields(protocol, union, presence, inactiveSet)
+			if err == nil {
+				active, inactive = proj.Active, proj.Inactive
+				// An EXISTING ACTIVE known object renders as a FIXED name-only marker
+				// ({}), never its private leaves and never promoted from inactive.
+				// The marker keeps the historical fact that the object was present
+				// without persisting any nested content in plaintext.
+				for _, name := range proj.Unsupported {
+					if _, wasActive := decActive[name]; wasActive {
+						active[name] = map[string]any{}
+					}
+				}
+			}
+			// On any projection refusal the safe derived maps stay empty: nothing
+			// unsafe is ever persisted in plaintext.
 		}
 	}
 	doc := struct {

@@ -94,11 +94,13 @@ func TestScalarEnvelope_Noncanonical(t *testing.T) {
 		{"known-sni-raw-invalid", `"vless"`, scalarFields(`"sni":"a`+string([]byte{0xff})+`b"`, "", ""), true},
 		// active unknown key with a surrogate escape.
 		{"active-unknown-key", `"vless"`, scalarFields(`"PRIVATE_KEY_\ud800":"PRIVATE_FIELD_VALUE"`, "", ""), true},
-		// inactive known value with an unpaired surrogate ESCAPE and an
-		// inactive key carrying raw invalid UTF-8. Raw invalid bytes make the
-		// whole payload SYNTAX-invalid to encoding/json — the syntax gate
-		// (ErrMalformedJSON, zero-write) legitimately wins there — while the
-		// escape form is syntax-valid and must reach the semantic gate.
+		// inactive known value with an unpaired surrogate ESCAPE, and an
+		// inactive key carrying raw invalid UTF-8. BOTH forms are
+		// syntax-accepted by encoding/json (probe-verified: a complete document
+		// with a raw 0xFF byte inside a string is json.Valid=true) and must
+		// reach the semantic scalar gate below. A raw C0 CONTROL byte and a
+		// malformed \u hex remain syntax-invalid — those live in
+		// TestScalarEnvelope_RefusalZeroWrite, not in this table.
 		{"inactive-known-value", `"vless"`, scalarFields("", `"sni":"a\ud800b"`, ""), true},
 		{"inactive-key-raw-invalid", `"vless"`, scalarFields("", `"PRIVATE_KEY_`+string([]byte{0xff})+`":1`, ""), true},
 		// unknown bucket nested array with a surrogate value.
@@ -129,33 +131,24 @@ func TestScalarEnvelope_Noncanonical(t *testing.T) {
 
 			// (1) The REAL adapter over the original bytes yields a SEMANTIC
 			// noncanonical Invalid (not a syntax refusal, not a lossy Valid).
-			// The raw invalid UTF-8 cases assert the decoder's ACTUAL behavior
-			// (probe-verified): a raw 0xFF byte inside a string is SYNTAX-invalid
-			// to encoding/json, so those payloads legitimately stop at the syntax
-			// gate with ErrMalformedJSON and the store's static zero-write — the
-			// sealed originals are never rewritten, never lossily stored.
-			// Escape-form non-scalars are syntax-VALID and MUST reach the
-			// semantic malformedEnvelope Invalid draft below.
-			rawSyntax := rawInvalidUTF8Rejected(env)
+			// This holds for EVERY fixture in this table, raw bytes included:
+			// probe-verified, encoding/json SYNTACTICALLY ACCEPTS a complete
+			// document carrying raw invalid UTF-8 inside strings (json.Valid is
+			// true; a raw 0xFF/0x80 byte is not a JSON syntax error), and a plain
+			// json.Unmarshal decodes it LOSSILY (U+FFFD replacement). That is
+			// precisely why the semantic raw scalar-integrity gate is necessary:
+			// it must fire where syntax alone would silently accept. The json.Valid
+			// precondition below states this explicitly for all eleven fixtures —
+			// if a fixture ever stops being syntax-valid it fails visibly instead
+			// of silently bypassing the semantic assertions.
+			if !json.Valid(env) {
+				t.Fatalf("every noncanonical fixture must be syntax-VALID so the semantic scalar gate is what rejects it; json.Valid(env)=false for %s", tc.name)
+			}
 			authority, err := store.OpenNodeAuthority(profileBytes(t))
 			if err != nil {
 				t.Fatal(err)
 			}
 			ar, aerr := nodes.ValidateDocument(authority.Profile(), env, map[string]bool{"uuid": true})
-			if rawSyntax {
-				if !errors.Is(aerr, domain.ErrMalformedJSON) {
-					t.Fatalf("raw invalid UTF-8 must stay the syntax gate ErrMalformedJSON, got %v", aerr)
-				}
-				before := tableCounts(t, s)
-				_, serr := w.CreateNodeAtomic(ctx, in)
-				if !errors.Is(serr, domain.ErrMalformedJSON) {
-					t.Fatalf("raw invalid UTF-8 store path must be the syntax refusal, got %v", serr)
-				}
-				if after := tableCounts(t, s); !countsEqual(before, after) {
-					t.Fatal("raw invalid UTF-8 syntax refusal must be zero-write")
-				}
-				return
-			}
 			if !errors.Is(aerr, nodes.ErrNotANodeEnvelope) || ar.Validation != domain.ValidationInvalid ||
 				ar.Result.Status != nodes.Invalid || ar.Result.Applicable {
 				t.Fatalf("adapter must return semantic noncanonical Invalid/notApplicable, not syntax/lossy: err=%v verdict=%v/%v applicable=%v",
@@ -237,14 +230,6 @@ func TestScalarEnvelope_Noncanonical(t *testing.T) {
 			}
 		})
 	}
-}
-
-// rawInvalidUTF8Rejected reports whether encoding/json itself refuses raw as
-// syntax (the gate domain.ParseDocument applies before anything else runs).
-// This pins the ACTUAL decoder behavior the syntax gate inherits, instead of
-// assuming raw invalid UTF-8 is syntax-legal.
-func rawInvalidUTF8Rejected(raw []byte) bool {
-	return !json.Valid(raw)
 }
 
 func marshalRawMap(m map[string]json.RawMessage) []byte {

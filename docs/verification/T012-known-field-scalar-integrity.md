@@ -47,8 +47,10 @@ profile parser / result codec / config / other consumers untouched):
     scalar — a non-scalar protocol is never kept, but a KNOWN protocol on a
     fields-non-scalar envelope is independently scalar-safe and stays.
 - The typed-label private scan (`validJSONStringContent`/`hexQuad`) is left
-  intact (accepted label behavior + static refusal preserved); no second
-  divergent UTF16 rule is introduced — both use the same jsonscan capability.
+  intact (accepted label behavior + static refusal preserved); it is a
+  SEPARATE equivalent implementation retained beside the jsonscan scalar
+  capability — not the same code path — verified behaviorally equivalent for
+  the accepted label cases, so no divergent UTF16 rule is introduced.
 
 ## Verified (author; independent acceptance controls closure)
 
